@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m py_compile scripts/generate_report.py)",
+      "Bash(python3 -m py_compile scripts/generate_report.py)",
+      "Bash(echo \"--- exit $?\")",
+      "Bash(git init *)",
+      "Bash(git add *)"
+    ]
+  }
+}

@@ -1,0 +1,64 @@
+name: 美股收盤日報
+
+on:
+  schedule:
+    # 台北時間 08:30（週二～週六）= UTC 00:30（週二～週六）
+    - cron: "30 0 * * 2-6"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (generate report but skip notifications)"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+jobs:
+  generate-report:
+    name: Generate US Close Report
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Generate US Close Report
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          EMAIL_SMTP_SERVER: ${{ secrets.EMAIL_SMTP_SERVER }}
+          EMAIL_SMTP_PORT: ${{ secrets.EMAIL_SMTP_PORT }}
+          EMAIL_USERNAME: ${{ secrets.EMAIL_USERNAME }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          REPORT_MODEL: ${{ vars.REPORT_MODEL }}
+          DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+        run: |
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "=== DRY RUN: notifications disabled ==="
+            TELEGRAM_BOT_TOKEN="" EMAIL_SMTP_SERVER="" python scripts/generate_report.py us_close
+          else
+            python scripts/generate_report.py us_close
+          fi
+
+      - name: Upload report as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: us-close-${{ github.run_id }}-${{ github.run_attempt }}
+          path: reports/us_close_*.md
+          retention-days: 90
+          if-no-files-found: warn
