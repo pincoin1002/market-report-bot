@@ -20,6 +20,7 @@ jobs:
     name: Generate US Close Report
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    continue-on-error: true
 
     steps:
       - name: Checkout repository
@@ -59,6 +60,58 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: us-close-${{ github.run_id }}-${{ github.run_attempt }}
+          path: reports/us_close_*.md
+          retention-days: 90
+          if-no-files-found: warn
+
+  retry-on-failure:
+    name: Retry US Close Report (on failure)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: generate-report
+    if: ${{ needs.generate-report.result == 'failure' }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Wait before retry
+        run: sleep 60
+
+      - name: Generate US Close Report (retry)
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          EMAIL_SMTP_SERVER: ${{ secrets.EMAIL_SMTP_SERVER }}
+          EMAIL_SMTP_PORT: ${{ secrets.EMAIL_SMTP_PORT }}
+          EMAIL_USERNAME: ${{ secrets.EMAIL_USERNAME }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          REPORT_MODEL: ${{ vars.REPORT_MODEL }}
+          DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+        run: |
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "=== DRY RUN: notifications disabled ==="
+            TELEGRAM_BOT_TOKEN="" EMAIL_SMTP_SERVER="" python scripts/generate_report.py us_close
+          else
+            python scripts/generate_report.py us_close
+          fi
+
+      - name: Upload report as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: us-close-retry-${{ github.run_id }}-${{ github.run_attempt }}
           path: reports/us_close_*.md
           retention-days: 90
           if-no-files-found: warn
