@@ -194,12 +194,117 @@ def send_telegram(report: str, report_type: str) -> None:
 
 
 def _md_to_html(md: str) -> str:
-    html = md.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    html = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", html)
-    html = re.sub(r"\*(.+?)\*", r"<em>\1</em>", html)
-    html = html.replace("\n", "<br>")
-    return f"<html><body><pre style='font-family:monospace'>{html}</pre></body></html>"
+    """Convert Markdown report to mobile-friendly HTML email."""
+    import html as html_module
 
+    lines = md.split("\n")
+    html_parts: list[str] = []
+
+    css = """<style>
+      body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+             font-size: 15px; line-height: 1.6; color: #222; background: #fff;
+             margin: 0; padding: 12px; }
+      h1 { font-size: 20px; color: #1a1a2e; border-bottom: 2px solid #3d5a99;
+           padding-bottom: 6px; margin: 20px 0 8px; }
+      h2 { font-size: 17px; color: #1a1a2e; border-bottom: 1px solid #ccc;
+           padding-bottom: 4px; margin: 18px 0 8px; }
+      h3 { font-size: 15px; color: #3d5a99; margin: 14px 0 6px; }
+      p  { margin: 6px 0; }
+      table { border-collapse: collapse; width: 100%; margin: 10px 0; font-size: 14px; }
+      th { background: #3d5a99; color: #fff; padding: 8px 10px; text-align: left; }
+      td { padding: 7px 10px; border-bottom: 1px solid #e0e0e0; vertical-align: top; }
+      tr:nth-child(even) td { background: #f5f7fa; }
+      strong { color: #1a1a2e; }
+      ul, ol { margin: 6px 0 6px 20px; padding: 0; }
+      li { margin: 3px 0; }
+      hr { border: none; border-top: 1px solid #ddd; margin: 16px 0; }
+    </style>"""
+
+    def esc(t: str) -> str:
+        return html_module.escape(t)
+
+    def inline(t: str) -> str:
+        t = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', t)
+        t = re.sub(r'\*(.+?)\*', r'<em>\1</em>', t)
+        return t
+
+    i = 0
+    in_table = False
+    table_rows: list[list[str]] = []
+
+    def flush_table() -> None:
+        nonlocal in_table, table_rows
+        if not table_rows:
+            in_table = False
+            return
+        html_parts.append('<table>')
+        header = table_rows[0]
+        html_parts.append('<thead><tr>' + ''.join(f'<th>{esc(h.strip())}</th>' for h in header) + '</tr></thead>')
+        html_parts.append('<tbody>')
+        for row in table_rows[2:]:
+            html_parts.append('<tr>' + ''.join(f'<td>{inline(esc(c.strip()))}</td>' for c in row) + '</tr>')
+        html_parts.append('</tbody></table>')
+        in_table = False
+        table_rows.clear()
+
+    html_parts.append(f'<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">{css}</head><body>')
+
+    while i < len(lines):
+        line = lines[i]
+
+        h_match = re.match(r'^(#{1,3})\s+(.*)', line)
+        if h_match:
+            if in_table:
+                flush_table()
+            level = len(h_match.group(1))
+            html_parts.append(f'<h{level}>{inline(esc(h_match.group(2)))}</h{level}>')
+            i += 1
+            continue
+
+        if line.startswith('|'):
+            if not in_table:
+                in_table = True
+            table_rows.append([c for c in line.split('|')[1:-1]])
+            i += 1
+            continue
+        elif in_table:
+            flush_table()
+
+        if re.match(r'^---+$', line.strip()):
+            html_parts.append('<hr>')
+            i += 1
+            continue
+
+        if re.match(r'^[\*\-]\s+', line):
+            html_parts.append('<ul>')
+            while i < len(lines) and re.match(r'^[\*\-]\s+', lines[i]):
+                item = re.sub(r'^[\*\-]\s+', '', lines[i])
+                html_parts.append(f'<li>{inline(esc(item))}</li>')
+                i += 1
+            html_parts.append('</ul>')
+            continue
+
+        if re.match(r'^\d+\.\s+', line):
+            html_parts.append('<ol>')
+            while i < len(lines) and re.match(r'^\d+\.\s+', lines[i]):
+                item = re.sub(r'^\d+\.\s+', '', lines[i])
+                html_parts.append(f'<li>{inline(esc(item))}</li>')
+                i += 1
+            html_parts.append('</ol>')
+            continue
+
+        if line.strip() == '':
+            i += 1
+            continue
+
+        html_parts.append(f'<p>{inline(esc(line))}</p>')
+        i += 1
+
+    if in_table:
+        flush_table()
+
+    html_parts.append('</body></html>')
+    return '\n'.join(html_parts)
 
 def send_email(report: str, report_type: str) -> None:
     smtp_server = os.getenv("EMAIL_SMTP_SERVER", "")
