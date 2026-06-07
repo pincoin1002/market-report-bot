@@ -1,0 +1,51 @@
+name: Telegram Q&A Bot
+
+on:
+  schedule:
+    # Run every 5 minutes on weekdays (UTC 00:00-15:55 = TPE 08:00-23:55)
+    - cron: "*/5 0-15 * * 1-5"
+  workflow_dispatch:
+
+jobs:
+  run-bot:
+    name: Poll Telegram and answer questions
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    continue-on-error: true
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Restore bot state
+        uses: actions/cache@v4
+        with:
+          path: bot_state.json
+          key: bot-state
+          restore-keys: |
+            bot-state
+
+      - name: Restore latest report
+        uses: actions/cache@v4
+        with:
+          path: reports/
+          key: reports-cache
+          restore-keys: |
+            reports-cache
+
+      - name: Run Telegram bot (270s polling)
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          REPORT_MODEL: ${{ vars.REPORT_MODEL }}
+        run: python scripts/telegram_bot.py --duration 270
