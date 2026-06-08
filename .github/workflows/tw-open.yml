@@ -2,8 +2,8 @@ name: 台股開盤戰報
 
 on:
   schedule:
-    # 台北時間 07:50（週一～週五）= UTC 23:50（前一天週日～週四）
-    - cron: "50 23 * * 0-4"
+    # 台北時間 06:50（週一～週五）= UTC 22:50（前一天週日～週四）（提早以防 GitHub 排程延遲）
+    - cron: "50 22 * * 0-4"
   workflow_dispatch:
     inputs:
       dry_run:
