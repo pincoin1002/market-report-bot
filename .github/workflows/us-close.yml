@@ -2,8 +2,8 @@ name: 美股收盤日報
 
 on:
   schedule:
-    # 台北時間 07:30（週二～週六）= UTC 23:30（前一天週一～週五）（提早以防 GitHub 排程延遲）
-    - cron: "30 23 * * 1-5"
+            # 台北時間 05:00 (週二～週六) = UTC 21:00 (週一～週五)，美股收盤後約 30 分鐘觸發
+        - cron: "0 21 * * 1-5"
   workflow_dispatch:
     inputs:
       dry_run:
