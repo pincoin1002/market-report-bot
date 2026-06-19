@@ -1,6 +1,9 @@
 # Generated reports (uploaded as GitHub artifacts instead)
 reports/
 
+# Runtime data (market snapshot, validation results — uploaded as artifacts)
+data/*.json
+
 # Python
 __pycache__/
 *.py[cod]
