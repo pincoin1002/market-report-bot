@@ -52,6 +52,35 @@ TW_HOLIDAYS: set[str] = {
     "2025-10-10",
 }
 
+# ── US market holidays (NYSE / NASDAQ) ───────────────────────────────────────
+# Update annually. Source: https://www.nyse.com/markets/hours-calendars
+US_HOLIDAYS: set[str] = {
+    # 2026
+    "2026-01-01",  # New Year's Day
+    "2026-01-19",  # Martin Luther King Jr. Day
+    "2026-02-16",  # Presidents' Day
+    "2026-04-03",  # Good Friday
+    "2026-05-25",  # Memorial Day
+    "2026-06-19",  # Juneteenth
+    "2026-07-03",  # Independence Day (observed)
+    "2026-09-07",  # Labor Day
+    "2026-11-26",  # Thanksgiving Day
+    "2026-11-27",  # Black Friday (early close — treated as full holiday for simplicity)
+    "2026-12-24",  # Christmas Eve (early close — treated as full holiday)
+    "2026-12-25",  # Christmas Day
+    # 2025
+    "2025-01-01",  # New Year's Day
+    "2025-01-20",  # Martin Luther King Jr. Day
+    "2025-02-17",  # Presidents' Day
+    "2025-04-18",  # Good Friday
+    "2025-05-26",  # Memorial Day
+    "2025-06-19",  # Juneteenth
+    "2025-07-04",  # Independence Day
+    "2025-09-01",  # Labor Day
+    "2025-11-27",  # Thanksgiving Day
+    "2025-12-25",  # Christmas Day
+}
+
 # ── Ticker configuration ───────────────────────────────────────────────────────
 # Add / remove symbols here to customize the snapshot.
 
@@ -100,6 +129,25 @@ def is_tw_market_closed(report_type: str) -> bool:
                         print(f"[fetch] today is {today_str} ({_holiday_name(today_str)}) — market closed, skipping report")
                         return True
                     return False
+
+def is_us_market_closed(report_type: str) -> bool:
+    """Return True if the US market is closed today.
+    For TW-only report types skip this check.
+    Uses ET (UTC-5 in winter / UTC-4 in summer) to determine the trading date.
+    """
+    if report_type in ("tw_open", "tw_close"):
+        return False
+    # Use EST (UTC-5) as conservative base — NYSE opens 9:30 ET
+    ET = timezone(timedelta(hours=-5))
+    today = datetime.now(tz=ET)
+    today_str = today.strftime("%Y-%m-%d")
+    if today.weekday() >= 5:
+        print(f"[fetch] today is {today_str} (US weekend) — US market closed, sending notice")
+        return True
+    if today_str in US_HOLIDAYS:
+        print(f"[fetch] today is {today_str} (US holiday) — US market closed, sending notice")
+        return True
+    return False
 
 def _holiday_name(date_str: str) -> str:
         names = {
@@ -192,14 +240,22 @@ def main() -> None:
         data_dir.mkdir(exist_ok=True)
 
     # ── Holiday / weekend guard ────────────────────────────────────────────────
-        if is_tw_market_closed(report_type):
-                    # Signal the workflow to skip report generation
-                    _set_github_output("market_closed", "true")
-                    today_str = datetime.now(tz=TPE).strftime("%Y-%m-%d")
-                    print(f"[fetch] EXIT 2 — market closed on {today_str}, report skipped")
-                    sys.exit(2)
+    if is_tw_market_closed(report_type):
+        # Signal the workflow to skip report generation (TW market closed)
+        _set_github_output("market_closed", "true")
+        today_str = datetime.now(tz=TPE).strftime("%Y-%m-%d")
+        print(f"[fetch] EXIT 2 — TW market closed on {today_str}, report skipped")
+        sys.exit(2)
 
-        _set_github_output("market_closed", "false")
+    if is_us_market_closed(report_type):
+        # Signal the workflow to send a "non-trading day" notice (exit 3)
+        _set_github_output("market_closed", "true")
+        ET = timezone(timedelta(hours=-5))
+        today_str = datetime.now(tz=ET).strftime("%Y-%m-%d")
+        print(f"[fetch] EXIT 3 — US market closed on {today_str}, sending notice")
+        sys.exit(3)
+
+    _set_github_output("market_closed", "false")
 
     print(f"[fetch] building snapshot for {report_type} …")
     snapshot = build_snapshot(report_type)
