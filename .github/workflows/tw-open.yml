@@ -35,12 +35,21 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Fetch market snapshot
+        id: fetch
         continue-on-error: true
         run: |
           mkdir -p data
           python scripts/fetch_market_data.py tw_open
+          EXIT_CODE=$?
+          if [ $EXIT_CODE -eq 2 ]; then
+            echo "market_closed=true" >> $GITHUB_OUTPUT
+          else
+            echo "market_closed=false" >> $GITHUB_OUTPUT
+          fi
+          exit 0
 
       - name: Generate Taiwan Open Report
+        if: steps.fetch.outputs.market_closed != 'true'
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -61,7 +70,12 @@ jobs:
             python scripts/generate_report.py tw_open
           fi
 
+      - name: Skip report (market closed)
+        if: steps.fetch.outputs.market_closed == 'true'
+        run: echo "Market closed today — report generation skipped."
+
       - name: Validate report prices
+        if: steps.fetch.outputs.market_closed != 'true'
         continue-on-error: true
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
