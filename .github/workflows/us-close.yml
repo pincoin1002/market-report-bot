@@ -35,12 +35,21 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Fetch market snapshot
+        id: fetch
         continue-on-error: true
         run: |
           mkdir -p data
           python scripts/fetch_market_data.py us_close
+          EXIT_CODE=$?
+          if [ $EXIT_CODE -eq 3 ]; then
+            echo "market_closed=true" >> $GITHUB_OUTPUT
+          else
+            echo "market_closed=false" >> $GITHUB_OUTPUT
+          fi
+          exit 0
 
       - name: Generate US Close Report
+        if: steps.fetch.outputs.market_closed != 'true'
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -60,7 +69,53 @@ jobs:
             python scripts/generate_report.py us_close
           fi
 
+      - name: Send non-trading day notice
+        if: steps.fetch.outputs.market_closed == 'true'
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          EMAIL_SMTP_SERVER: ${{ secrets.EMAIL_SMTP_SERVER }}
+          EMAIL_SMTP_PORT: ${{ secrets.EMAIL_SMTP_PORT }}
+          EMAIL_USERNAME: ${{ secrets.EMAIL_USERNAME }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+        run: |
+          python - <<'EOF'
+          import os, smtplib, requests
+          from datetime import datetime, timezone, timedelta
+          from email.mime.multipart import MIMEMultipart
+          from email.mime.text import MIMEText
+
+          ET = timezone(timedelta(hours=-5))
+          today = datetime.now(tz=ET).strftime("%Y-%m-%d")
+          msg_text = f"🔴 美股收盤日報｜{today}\n{'─'*38}\n\n今天為美股非交易日（假日或週末），市場休市，無收盤報告。"
+
+          token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+          chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+          if token and chat_id:
+              requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
+                            json={"chat_id": chat_id, "text": msg_text}, timeout=30)
+              print("[notice] Telegram sent")
+
+          smtp = os.getenv("EMAIL_SMTP_SERVER", "").strip()
+          user = os.getenv("EMAIL_USERNAME", "").strip()
+          pwd  = os.getenv("EMAIL_PASSWORD", "").strip()
+          to   = os.getenv("EMAIL_TO", "").strip()
+          if smtp and user and pwd and to:
+              recipients = [e.strip() for e in to.split(",") if e.strip()]
+              m = MIMEMultipart("alternative")
+              m["Subject"] = f"【市場報告】美股收盤日報 {today} — 今天非交易日"
+              m["From"] = user
+              m["To"] = ", ".join(recipients)
+              m.attach(MIMEText(msg_text, "plain", "utf-8"))
+              with smtplib.SMTP(smtp, int(os.getenv("EMAIL_SMTP_PORT","587")), timeout=30) as s:
+                  s.ehlo(); s.starttls(); s.login(user, pwd)
+                  s.sendmail(user, recipients, m.as_string())
+              print("[notice] Email sent")
+          EOF
+
       - name: Validate report prices
+        if: steps.fetch.outputs.market_closed != 'true'
         continue-on-error: true
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
