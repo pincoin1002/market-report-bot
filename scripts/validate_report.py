@@ -18,6 +18,30 @@ from google.genai import types
 
 TOLERANCE = 0.05  # 5 % — flag prices that deviate more than this
 
+# Required section anchors per report type.
+# Each string must appear somewhere in the report for the section to be "present".
+REQUIRED_SECTIONS: dict[str, list[str]] = {
+    "tw_open": [
+        "## 1.", "## 2.", "## 3.", "## 4.", "## 5.",
+        "## 6.", "## 7.", "## 8.", "## 9.", "## 10.",
+        "## 11.", "## 12.", "## 13.", "## 14.", "## 15.",
+        "Tomorrow Key Signals", "Risk Matrix", "Rotation Assessment", "AI Trend Health Check",
+    ],
+    "tw_close": [
+        "## 1.", "## 2.", "## 3.", "## 4.", "## 5.",
+        "## 6.", "## 7.", "## 8.", "## 9.", "## 10.",
+        "## 11.", "## 12.",
+    ],
+    "us_open": [
+        "## 1.", "## 2.", "## 3.", "## 4.", "## 5.",
+        "## 6.", "## 7.", "## 8.", "## 9.", "## 10.", "## 11.",
+    ],
+    "us_close": [
+        "## 1.", "## 2.", "## 3.", "## 4.", "## 5.",
+        "## 6.", "## 7.", "## 8.", "## 9.", "## 10.", "## 11.", "## 12.",
+    ],
+}
+
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -71,6 +95,44 @@ def extract_prices(report_text: str, model: str) -> dict[str, float]:
         return {}
 
 
+# ── Structure check ───────────────────────────────────────────────────────────
+
+def check_structure(report_text: str, report_type: str) -> dict:
+    """Check required sections are present and count missing-data markers."""
+    anchors = REQUIRED_SECTIONS.get(report_type, [])
+    missing = [a for a in anchors if a not in report_text]
+    present = len(anchors) - len(missing)
+
+    missing_marker_count = report_text.count("⚠️ 未取得")
+    total_fields_estimate = max(report_text.count("|") // 4, 1)
+    missing_pct = round(missing_marker_count / total_fields_estimate * 100, 1)
+
+    # Truncation = last anchor in the list is absent
+    truncated = bool(anchors) and (anchors[-1] not in report_text)
+
+    result = {
+        "sections_total":   len(anchors),
+        "sections_present": present,
+        "sections_missing": missing,
+        "truncated":        truncated,
+        "missing_data_count": missing_marker_count,
+        "missing_data_pct":   missing_pct,
+        "char_count":       len(report_text),
+    }
+
+    print(f"\n{'='*56}")
+    print(f"STRUCTURE CHECK: {report_type}")
+    print(f"  sections     : {present}/{len(anchors)}")
+    print(f"  truncated    : {'⚠️  YES' if truncated else 'no'}")
+    print(f"  ⚠️ 未取得    : {missing_marker_count} occurrences (~{missing_pct}% of fields)")
+    print(f"  char count   : {len(report_text):,}")
+    if missing:
+        print(f"  missing      : {missing}")
+    print("="*56)
+
+    return result
+
+
 # ── Comparison ─────────────────────────────────────────────────────────────────
 
 def compare(extracted: dict[str, float], snapshot: dict) -> dict:
@@ -116,12 +178,16 @@ def main() -> None:
         print(f"[validate] no report found for {report_type} — skipping")
         sys.exit(0)
 
-    print(f"[validate] extracting prices from report ({len(report_text):,} chars) …")
-    extracted = extract_prices(report_text, model)
-    print(f"[validate] found {len(extracted)} prices in report")
+    # ── Structure check (no API call needed) ─────────────────────────────────
+    structure = check_structure(report_text, report_type)
 
     data_dir = Path(__file__).parent.parent / "data"
     data_dir.mkdir(exist_ok=True)
+
+    # ── Price extraction ──────────────────────────────────────────────────────
+    print(f"[validate] extracting prices from report ({len(report_text):,} chars) …")
+    extracted = extract_prices(report_text, model)
+    print(f"[validate] found {len(extracted)} prices in report")
 
     (data_dir / "report_summary.json").write_text(
         json.dumps({"report_type": report_type, "extracted_prices": extracted},
@@ -131,33 +197,49 @@ def main() -> None:
 
     snapshot = _load_snapshot()
     if not snapshot:
-        print("[validate] no market_snapshot.json — skipping comparison")
-        sys.exit(0)
+        print("[validate] no market_snapshot.json — skipping price comparison")
+        (data_dir / "validation_results.json").write_text(
+            json.dumps({"structure": structure, "price_check": None},
+                       ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        sys.exit(1 if structure["truncated"] else 0)
 
-    results = compare(extracted, snapshot)
+    price_results = compare(extracted, snapshot)
 
     print(f"\n{'='*56}")
-    print(f"VALIDATION RESULT: {report_type}")
-    print(f"  ✓ pass      : {len(results['passed'])}")
-    print(f"  ✗ fail (>{TOLERANCE*100:.0f}%): {len(results['failed'])}")
-    print(f"  ? unchecked : {len(results['unchecked'])}")
+    print(f"PRICE CHECK: {report_type}")
+    print(f"  ✓ pass      : {len(price_results['passed'])}")
+    print(f"  ✗ fail (>{TOLERANCE*100:.0f}%): {len(price_results['failed'])}")
+    print(f"  ? unchecked : {len(price_results['unchecked'])}")
 
-    if results["failed"]:
+    if price_results["failed"]:
         print(f"\n⚠️  Price deviations > {TOLERANCE*100:.0f}%:")
-        for row in results["failed"]:
+        for row in price_results["failed"]:
             print(f"  {row['ticker']:8s}  reported={row['reported']:<12}  "
                   f"actual={row['actual']:<12}  diff={row['diff_pct']}%")
     print("="*56)
 
     (data_dir / "validation_results.json").write_text(
-        json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8",
+        json.dumps({"structure": structure, "price_check": price_results},
+                   ensure_ascii=False, indent=2),
+        encoding="utf-8",
     )
 
-    if results["failed"]:
-        print(f"\n[validate] {len(results['failed'])} price(s) exceeded {TOLERANCE*100:.0f}% tolerance — exit 1")
+    has_price_failures = bool(price_results["failed"])
+    has_structure_failures = structure["truncated"] or bool(structure["sections_missing"])
+
+    if has_price_failures or has_structure_failures:
+        reasons = []
+        if has_structure_failures:
+            reasons.append(f"structure incomplete (truncated={structure['truncated']}, "
+                           f"missing={structure['sections_missing']})")
+        if has_price_failures:
+            reasons.append(f"{len(price_results['failed'])} price(s) exceeded {TOLERANCE*100:.0f}% tolerance")
+        print(f"\n[validate] FAIL — {'; '.join(reasons)} — exit 1")
         sys.exit(1)
     else:
-        print("[validate] all checked prices within tolerance ✓")
+        print("[validate] all checks passed ✓")
 
 
 if __name__ == "__main__":

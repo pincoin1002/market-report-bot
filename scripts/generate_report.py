@@ -55,7 +55,7 @@ def generate_report(prompt: str, model: str) -> str:
         config=types.GenerateContentConfig(
             tools=[types.Tool(google_search=types.GoogleSearch())],
             temperature=0.1,
-            max_output_tokens=8000,
+            max_output_tokens=16000,
         ),
     )
     return response.text
