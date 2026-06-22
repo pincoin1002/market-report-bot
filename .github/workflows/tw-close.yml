@@ -82,6 +82,20 @@ jobs:
           REPORT_MODEL: ${{ vars.REPORT_MODEL }}
         run: python scripts/validate_report.py tw_close
 
+      - name: Prepare review package
+        if: steps.fetch.outputs.market_closed != 'true'
+        continue-on-error: true
+        run: python scripts/prepare_review.py tw_close
+
+      - name: Upload review package
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tw-close-review-${{ github.run_id }}-${{ github.run_attempt }}
+          path: data/review_package_*.md
+          retention-days: 30
+          if-no-files-found: ignore
+
       - name: Upload report as artifact
         if: always()
         uses: actions/upload-artifact@v4
