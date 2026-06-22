@@ -25,6 +25,14 @@ import requests
 
 REPORT_TYPES = ("tw_open", "us_close", "tw_close", "us_open")
 
+# us_close has 22 sections + 4 tail modules — needs a higher ceiling
+MAX_OUTPUT_TOKENS: dict[str, int] = {
+    "tw_open":  16000,
+    "tw_close": 16000,
+    "us_open":  16000,
+    "us_close": 24000,
+}
+
 REPORT_TITLES = {
     "tw_open":  "台股開盤戰報",
     "us_close": "美股收盤日報",
@@ -47,15 +55,16 @@ def load_prompt(report_type: str) -> str:
     return text.replace("{{TODAY_DATE}}", today).replace("{{TODAY_WEEKDAY}}", weekday)
 
 
-def generate_report(prompt: str, model: str) -> str:
+def generate_report(prompt: str, model: str, report_type: str) -> str:
     client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+    max_tokens = MAX_OUTPUT_TOKENS.get(report_type, 16000)
     response = client.models.generate_content(
         model=model,
         contents=prompt,
         config=types.GenerateContentConfig(
             tools=[types.Tool(google_search=types.GoogleSearch())],
             temperature=0.1,
-            max_output_tokens=16000,
+            max_output_tokens=max_tokens,
         ),
     )
     return response.text
@@ -296,8 +305,9 @@ def main() -> None:
     else:
         print(f"[{report_type}] no snapshot found — pure search mode")
 
-    print(f"[{report_type}] calling Gemini API  model={model} …")
-    report = generate_report(prompt, model)
+    max_tokens = MAX_OUTPUT_TOKENS.get(report_type, 16000)
+    print(f"[{report_type}] calling Gemini API  model={model}  max_tokens={max_tokens} …")
+    report = generate_report(prompt, model, report_type)
 
     filepath = save_report(report, report_type)
     print(f"[{report_type}] saved → {filepath}")
