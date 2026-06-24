@@ -20,6 +20,7 @@ from pathlib import Path
 from google import genai
 from google.genai import types
 import requests
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -55,6 +56,12 @@ def load_prompt(report_type: str) -> str:
     return text.replace("{{TODAY_DATE}}", today).replace("{{TODAY_WEEKDAY}}", weekday)
 
 
+@retry(
+        reraise=True,
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=2, min=4, max=60),
+        retry=retry_if_exception(lambda e: isinstance(e, Exception) and "503" in str(e)),
+)
 def generate_report(prompt: str, model: str, report_type: str) -> str:
     client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
     max_tokens = MAX_OUTPUT_TOKENS.get(report_type, 16000)
