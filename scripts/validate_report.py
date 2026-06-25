@@ -25,19 +25,19 @@ REQUIRED_SECTIONS: dict[str, list[str]] = {
         "## 1.", "## 2.", "## 3.", "## 4.", "## 5.",
         "## 6.", "## 7.", "## 8.", "## 9.", "## 10.",
         "## 11.", "## 12.", "## 13.", "## 14.", "## 15.",
-        "Tomorrow Key Signals", "Risk Matrix", "Rotation Assessment", "AI Trend Health Check",
+        "Tomorrow Key Signals", "Rotation Assessment", "AI Trend Health Check",
     ],
     "tw_close": [
         "## 1.", "## 2.", "## 3.", "## 4.", "## 5.",
         "## 6.", "## 7.", "## 8.", "## 9.", "## 10.",
         "## 11.", "## 12.", "## 13.", "## 14.", "## 15.",
-        "Tomorrow Key Signals", "Risk Matrix", "Rotation Assessment", "AI Trend Health Check",
+        "Tomorrow Key Signals", "Rotation Assessment", "AI Trend Health Check",
     ],
     "us_open": [
         "## 1.", "## 2.", "## 3.", "## 4.", "## 5.",
         "## 6.", "## 7.", "## 8.", "## 9.", "## 10.",
         "## 11.", "## 12.", "## 13.", "## 14.", "## 15.",
-        "Tomorrow Key Signals", "Risk Matrix", "Rotation Assessment", "AI Trend Health Check",
+        "Tomorrow Key Signals", "Rotation Assessment", "AI Trend Health Check",
     ],
     "us_close": [
         "## 1.", "## 2.", "## 3.", "## 4.", "## 5.",
@@ -45,7 +45,7 @@ REQUIRED_SECTIONS: dict[str, list[str]] = {
         "## 11.", "## 12.", "## 13.", "## 14.", "## 15.",
         "## 16.", "## 17.", "## 18.", "## 19.", "## 20.",
         "## 21.", "## 22.",
-        "Tomorrow Key Signals", "Risk Matrix", "Rotation Assessment", "AI Trend Health Check",
+        "Tomorrow Key Signals", "Rotation Assessment", "AI Trend Health Check",
     ],
 }
 
@@ -77,8 +77,7 @@ def extract_prices(report_text: str, model: str) -> dict[str, float]:
 - 同一 ticker 出現多次時，取最後一次
 - 輸出純 JSON，格式：{{"2330": 1045.0, "SPX": 5850.2, "VIX": 18.5}}
 - 若找不到任何價格，輸出 {{}}
-
-報告全文：
+報告：
 ---
 {report_text}
 ---"""

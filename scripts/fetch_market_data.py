@@ -18,83 +18,30 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 import yfinance as yf
+import holidays
 
 TPE = timezone(timedelta(hours=8))
-
-# ── Taiwan public holidays (YYYY-MM-DD, TSE trading holidays only) ─────────────
-# Update this list each year.
-TW_HOLIDAYS: set[str] = {
-    # 2026
-    "2026-01-01",  # 元旦
-    "2026-01-27",  # 春節前
-    "2026-01-28",  # 春節
-    "2026-01-29",  # 春節
-    "2026-01-30",  # 春節
-    "2026-02-02",  # 春節補假
-    "2026-02-27",  # 和平紀念日補假
-    "2026-02-28",  # 和平紀念日
-    "2026-04-03",  # 兒童節補假
-    "2026-04-04",  # 兒童節 / 清明
-    "2026-05-01",  # 勞動節
-    "2026-06-19",  # 端午節
-    "2026-09-18",  # 中秋節補假
-    "2026-09-19",  # 中秋節
-    "2026-10-09",  # 國慶日補假
-    "2026-10-10",  # 國慶日
-    "2026-12-25",  # 行憲紀念日
-    # 2025
-    "2025-01-01",
-    "2025-01-27",
-    "2025-01-28",
-    "2025-01-29",
-    "2025-01-30",
-    "2025-01-31",
-    "2025-02-28",
-    "2025-04-03",
-    "2025-04-04",
-    "2025-05-01",
-    "2025-05-31",  # 端午節
-    "2025-10-10",
-}
-
-# ── US market holidays (NYSE / NASDAQ) ────────────────────────────────────────
-# Source: https://www.nyse.com/markets/hours-calendars
-US_HOLIDAYS: set[str] = {
-    # 2026
-    "2026-01-01",  # New Year's Day
-    "2026-01-19",  # Martin Luther King Jr. Day
-    "2026-02-16",  # Presidents' Day
-    "2026-04-03",  # Good Friday
-    "2026-05-25",  # Memorial Day
-    "2026-06-19",  # Juneteenth
-    "2026-07-03",  # Independence Day (observed)
-    "2026-09-07",  # Labor Day
-    "2026-11-26",  # Thanksgiving Day
-    "2026-11-27",  # Black Friday (early close — treated as full holiday)
-    "2026-12-24",  # Christmas Eve (early close — treated as full holiday)
-    "2026-12-25",  # Christmas Day
-    # 2025
-    "2025-01-01",
-    "2025-01-20",
-    "2025-02-17",
-    "2025-04-18",
-    "2025-05-26",
-    "2025-06-19",
-    "2025-07-04",
-    "2025-09-01",
-    "2025-11-27",
-    "2025-12-25",
-}
 
 # ── Ticker configuration ───────────────────────────────────────────────────────
 
 TW_STOCKS: dict[str, str] = {
-    "2330": "台積電",
-    "2317": "鴻海",
-    "2454": "聯發科",
-    "2308": "台達電",
-    "2382": "廣達",
-    "2327": "國巨",
+    "2330.TW": "台積電",
+    "2317.TW": "鴻海",
+    "2454.TW": "聯發科",
+    "2308.TW": "台達電",
+    "2382.TW": "廣達",
+    "2327.TW": "國巨",
+    "2303.TW": "聯電",
+    "3711.TW": "日月光投控",
+    "2356.TW": "英業達",
+    "3231.TW": "緯創",
+    "2383.TW": "台光電",
+    "4958.TW": "臻鼎-KY",
+    "2368.TW": "金像電",
+    "3017.TW": "奇鋐",
+    "3324.TWO": "雙鴻",
+    "2421.TW": "建準",
+    "2301.TW": "光寶科",
 }
 
 US_MARKETS: dict[str, tuple[str, str, str]] = {
@@ -102,12 +49,52 @@ US_MARKETS: dict[str, tuple[str, str, str]] = {
     "SPX":  ("^GSPC",    "S&P 500",     ""),
     "NDX":  ("^NDX",     "NASDAQ 100",  ""),
     "DJI":  ("^DJI",     "Dow Jones",   ""),
+    "RUT":  ("^RUT",     "Russell 2000", ""),
+    "SOX":  ("^SOX",     "費城半導體 SOX", ""),
     "VIX":  ("^VIX",     "VIX",         ""),
     "TNX":  ("^TNX",     "US10Y Yield", "percent"),
+    "US2Y": ("2YY=F", "US2Y Yield", "percent"),
     "DXY":  ("DX-Y.NYB", "美元指數",    ""),
     "BTC":  ("BTC-USD",  "Bitcoin",     "USD"),
     "TSM":  ("TSM",      "台積電 ADR",  "USD"),
     "NVDA": ("NVDA",     "NVIDIA",      "USD"),
+    "TAIEX": ("^TWII",    "加權指數",     ""),
+    "GC":   ("GC=F",     "黃金 GC",     "USD"),
+    "CL":   ("CL=F",     "原油 WTI",    "USD"),
+    "AAPL":  ("AAPL",     "Apple",       "USD"),
+    "MSFT":  ("MSFT",     "Microsoft",   "USD"),
+    "META":  ("META",     "Meta",        "USD"),
+    "GOOGL": ("GOOGL",    "Alphabet",    "USD"),
+    "AMZN":  ("AMZN",     "Amazon",      "USD"),
+    "TSLA":  ("TSLA",     "Tesla",       "USD"),
+    "AVGO":  ("AVGO",     "Broadcom",    "USD"),
+    "AMD":   ("AMD",      "AMD",         "USD"),
+    "MRVL":  ("MRVL",     "Marvell",     "USD"),
+    "MU":    ("MU",       "Micron",      "USD"),
+    "ARM":   ("ARM",      "ARM",         "USD"),
+    "ASML":  ("ASML",     "ASML",        "USD"),
+    "SMCI":  ("SMCI",     "Supermicro",  "USD"),
+    "DELL":  ("DELL",     "Dell",        "USD"),
+    "HPE":   ("HPE",      "HPE",         "USD"),
+    "ANET":  ("ANET",     "Arista",      "USD"),
+    "VRT":   ("VRT",      "Vertiv",      "USD"),
+    "COHR":  ("COHR",     "Coherent",    "USD"),
+    "CEG":   ("CEG",      "Constellation Energy", "USD"),
+    "VST":   ("VST",      "Vistra",      "USD"),
+    "ETN":   ("ETN",      "Eaton",       "USD"),
+    "GEV":   ("GEV",      "GE Vernova",  "USD"),
+    "PWR":   ("PWR",      "Quanta Services", "USD"),
+    "OKLO":  ("OKLO",     "Oklo",        "USD"),
+    "SMR":   ("SMR",      "NuScale Power", "USD"),
+    "APLD":  ("APLD",     "Applied Digital", "USD"),
+    "IREN":  ("IREN",     "Iris Energy", "USD"),
+    "FLNC":  ("FLNC",     "Fluence Energy", "USD"),
+    "SPY":   ("SPY",      "SPY ETF",     "USD"),
+    "QQQ":   ("QQQ",      "QQQ ETF",     "USD"),
+    "SOXX":  ("SOXX",     "SOXX ETF",    "USD"),
+    "SMH":   ("SMH",      "SMH ETF",     "USD"),
+    "XLK":   ("XLK",      "XLK ETF",     "USD"),
+    "ARKK":  ("ARKK",     "ARKK ETF",    "USD"),
 }
 
 FOREX: dict[str, tuple[str, str, str]] = {
@@ -115,20 +102,6 @@ FOREX: dict[str, tuple[str, str, str]] = {
 }
 
 # ── Holiday / weekend helpers ──────────────────────────────────────────────────
-
-def _holiday_name(date_str: str) -> str:
-    names = {
-        "2026-01-01": "元旦",
-        "2026-02-28": "和平紀念日",
-        "2026-04-04": "兒童節/清明",
-        "2026-05-01": "勞動節",
-        "2026-06-19": "端午節",
-        "2026-09-19": "中秋節",
-        "2026-10-10": "國慶日",
-        "2026-12-25": "行憲紀念日",
-    }
-    return names.get(date_str, "國定假日")
-
 
 def is_tw_market_closed(report_type: str) -> bool:
     """Return True if the Taiwan stock market is closed today."""
@@ -139,8 +112,12 @@ def is_tw_market_closed(report_type: str) -> bool:
     if today.weekday() >= 5:
         print(f"[fetch] {today_str} is a weekend — TW market closed, skipping report")
         return True
-    if today_str in TW_HOLIDAYS:
-        print(f"[fetch] {today_str} is {_holiday_name(today_str)} — TW market closed, skipping report")
+    
+    tw_cal = holidays.Taiwan()
+    today_date = today.date()
+    if today_date in tw_cal:
+        hname = tw_cal.get(today_date)
+        print(f"[fetch] {today_str} is {hname} — TW market closed, skipping report")
         return True
     return False
 
@@ -155,8 +132,12 @@ def is_us_market_closed(report_type: str) -> bool:
     if today.weekday() >= 5:
         print(f"[fetch] {today_str} is a US weekend — US market closed, sending notice")
         return True
-    if today_str in US_HOLIDAYS:
-        print(f"[fetch] {today_str} is a US holiday — US market closed, sending notice")
+        
+    nyse_cal = holidays.NYSE()
+    today_date = today.date()
+    if today_date in nyse_cal:
+        hname = nyse_cal.get(today_date)
+        print(f"[fetch] {today_str} is a US holiday ({hname}) — US market closed, sending notice")
         return True
     return False
 
@@ -202,9 +183,10 @@ def build_snapshot(report_type: str) -> dict:
     }
 
     print("Fetching Taiwan stocks …")
-    for code, name in TW_STOCKS.items():
-        data = _fetch_one(f"{code}.TW")
+    for symbol, name in TW_STOCKS.items():
+        data = _fetch_one(symbol)
         if data:
+            code = symbol.split(".")[0]
             snapshot["tw_stocks"][code] = {"name": name, "currency": "TWD", **data}
             print(f"  {code} {name}: {data['price']:,.1f} ({data['change_pct']:+.2f}%)")
 

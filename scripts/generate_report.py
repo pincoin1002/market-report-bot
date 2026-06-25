@@ -17,9 +17,10 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
 
+import requests
 from google import genai
 from google.genai import types
-import requests
+import markdown
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 # ── Constants ──────────────────────────────────────────────────────────────────
@@ -124,6 +125,54 @@ def _build_snapshot_block(snapshot: dict) -> str:
     return "\n".join(lines)
 
 
+
+def _build_portfolio_block(portfolio: dict) -> str:
+    """Format the portfolio JSON as a prompt preamble."""
+    lines = [
+        "## ⚠️ 您的目前持股與投資部位 — 供今日交易計畫決策參考",
+        "請務必針對以下持股進行具體的走勢評估，並給出加減碼或出場的操作建議：",
+        "",
+    ]
+    
+    tw = portfolio.get("tw_positions", [])
+    if tw:
+        lines += [
+            "### 台股持股",
+            "| Ticker | 名稱 | 持股數量 | 買進均價 | 備註 |",
+            "|--------|------|---------|---------|------|"
+        ]
+        for pos in tw:
+            lines.append(f"| {pos['ticker']} | {pos['name']} | {pos['shares']} | {pos['cost_basis']} | {pos.get('note', '')} |")
+        lines.append("")
+
+    us = portfolio.get("us_positions", [])
+    if us:
+        lines += [
+            "### 美股持股",
+            "| Ticker | 名稱 | 持股數量 | 買進均價 | 備註 |",
+            "|--------|------|---------|---------|------|"
+        ]
+        for pos in us:
+            lines.append(f"| {pos['ticker']} | {pos['name']} | {pos['shares']} | {pos['cost_basis']} | {pos.get('note', '')} |")
+        lines.append("")
+
+    cash = portfolio.get("available_cash")
+    if cash:
+        lines.append(f"**可用資金 (Available Cash)**: {cash}")
+    else:
+        lines.append("**可用資金 (Available Cash)**: ⚠️ 用戶未設定可用資金。請在日報的交易計畫中，主動詢問用戶目前可操作的金額，例如提示：'如果您能提供目前的可操作金額，我將能為您估算更精確的加減碼股數與部位配比。'")
+    lines.append("")
+    
+    notes = portfolio.get("portfolio_notes")
+    if notes:
+        lines.append(f"**持股說明**: {notes}")
+        lines.append("")
+
+    lines.append("---")
+    lines.append("")
+    return "\n".join(lines)
+
+
 def save_report(report: str, report_type: str) -> Path:
     reports_dir = Path(__file__).parent.parent / "reports"
     reports_dir.mkdir(exist_ok=True)
@@ -174,51 +223,8 @@ def send_telegram(report: str, report_type: str) -> None:
 # ── Email ──────────────────────────────────────────────────────────────────────
 
 def _md_to_html(md: str) -> str:
-    """Minimal Markdown to HTML conversion (no external dependencies)."""
-    h = md
-
-    # Escape HTML special chars in code blocks first, then restore tags
-    def escape_code(m: re.Match) -> str:
-        inner = m.group(1).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-        return f"<pre><code>{inner}</code></pre>"
-
-    h = re.sub(r"```[^\n]*\n(.*?)```", escape_code, h, flags=re.DOTALL)
-    h = re.sub(r"`([^`\n]+)`", r"<code>\1</code>", h)
-
-    # Headings
-    for n in range(6, 0, -1):
-        h = re.sub(r"^#{" + str(n) + r"} (.+)$", rf"<h{n}>\1</h{n}>", h, flags=re.MULTILINE)
-
-    # Bold / italic
-    h = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", h)
-    h = re.sub(r"\*(.+?)\*", r"<em>\1</em>", h)
-
-    # Horizontal rule
-    h = re.sub(r"^-{3,}$", "<hr>", h, flags=re.MULTILINE)
-
-    # Markdown tables
-    def table_replace(m: re.Match) -> str:
-        lines = [l for l in m.group(0).strip().split("\n") if l.strip() and "|" in l]
-        rows_html: list[str] = []
-        is_header = True
-        for i, line in enumerate(lines):
-            cells = [c.strip() for c in line.strip("|").split("|")]
-            # Detect separator row (e.g. |---|---|)
-            if i == 1 and all(re.match(r"^[-: ]+$", c) for c in cells if c):
-                continue
-            tag = "th" if is_header else "td"
-            rows_html.append(
-                "<tr>" + "".join(f"<{tag}>{c}</{tag}>" for c in cells) + "</tr>"
-            )
-            is_header = False
-        return "<table>" + "".join(rows_html) + "</table>"
-
-    h = re.sub(r"(\|.+\|\n?)+", table_replace, h)
-
-    # Line breaks and paragraphs
-    h = re.sub(r"\n\n+", "</p>\n<p>", h)
-    h = h.replace("\n", "<br>\n")
-
+    """Convert Markdown to HTML using the standard markdown library."""
+    html_content = markdown.markdown(md, extensions=["tables", "fenced_code"])
     return f"""<!DOCTYPE html>
 <html lang="zh-TW">
 <head>
@@ -238,12 +244,14 @@ th{{background:#3d5a99;color:#fff;padding:8px 12px;text-align:left}}
 td{{border:1px solid #dce1e7;padding:7px 12px}}
 tr:nth-child(even){{background:#f2f4f8}}
 hr{{border:none;border-top:1px solid #ddd;margin:22px 0}}
-p{{margin:.4em 0}}
+p{{margin:.8em 0}}
+ul, ol{{padding-left:20px;margin:.8em 0}}
+li{{margin:.4em 0}}
 strong{{color:#1a1a2e}}
 </style>
 </head>
 <body>
-<p>{h}</p>
+{html_content}
 </body>
 </html>"""
 
@@ -300,6 +308,15 @@ def main() -> None:
 
     print(f"[{report_type}] loading prompt …")
     prompt = load_prompt(report_type)
+
+    portfolio_path = Path(__file__).parent.parent / "portfolio.json"
+    if portfolio_path.exists():
+        try:
+            portfolio = json.loads(portfolio_path.read_text(encoding="utf-8"))
+            prompt = _build_portfolio_block(portfolio) + prompt
+            print(f"[{report_type}] portfolio injected")
+        except Exception as exc:
+            print(f"[{report_type}] failed to inject portfolio: {exc}", file=sys.stderr)
 
     snapshot_path = Path(__file__).parent.parent / "data" / "market_snapshot.json"
     if snapshot_path.exists():

@@ -4,6 +4,8 @@ on:
   schedule:
     # 台北時間 08:30（週二～週六）= UTC 00:30（週二～週六）
     - cron: "30 0 * * 2-6"
+  repository_dispatch:
+    types: [trigger-us-close]
   workflow_dispatch:
     inputs:
       dry_run:
@@ -20,6 +22,8 @@ jobs:
     name: Generate US Close Report
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout repository
@@ -36,17 +40,20 @@ jobs:
 
       - name: Fetch market snapshot
         id: fetch
-        continue-on-error: true
         run: |
           mkdir -p data
           python scripts/fetch_market_data.py us_close
           EXIT_CODE=$?
           if [ $EXIT_CODE -eq 3 ]; then
             echo "market_closed=true" >> $GITHUB_OUTPUT
-          else
+            exit 0
+          elif [ $EXIT_CODE -eq 0 ]; then
             echo "market_closed=false" >> $GITHUB_OUTPUT
+            exit 0
+          else
+            echo "Error: fetch_market_data.py failed with exit code $EXIT_CODE"
+            exit $EXIT_CODE
           fi
-          exit 0
 
       - name: Generate US Close Report
         if: steps.fetch.outputs.market_closed != 'true'
@@ -126,6 +133,15 @@ jobs:
         if: steps.fetch.outputs.market_closed != 'true'
         continue-on-error: true
         run: python scripts/prepare_review.py us_close
+
+      - name: Commit and push generated report
+        if: steps.fetch.outputs.market_closed != 'true'
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add reports/
+          git commit -m "chore: save generated us_close report [skip ci]" || exit 0
+          git push
 
       - name: Upload review package
         if: always()

@@ -328,9 +328,6 @@
 - 市場寬度：
 - 重要經濟數據 / 財報：
 
-## Risk Matrix
-（同第 21 節，精簡版）
-
 ## Rotation Assessment
 - 當前 Rotation 方向：
 - 持續性判斷：

@@ -268,9 +268,6 @@
 - NVDA / 關鍵 AI 股收盤：
 - Options 未平倉變化：
 
-## Risk Matrix
-（同第 14 節精簡版）
-
 ## Rotation Assessment
 - 今日開盤前 Rotation 訊號：
 - 日內需要監控的輪動信號：

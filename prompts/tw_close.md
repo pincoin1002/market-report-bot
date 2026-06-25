@@ -220,9 +220,6 @@
 - USD/TWD：
 - 重要數據 / 法說會：
 
-## Risk Matrix
-（同第 14 節精簡版）
-
 ## Rotation Assessment
 - 今日輪動結果：
 - 隔日輪動預判：

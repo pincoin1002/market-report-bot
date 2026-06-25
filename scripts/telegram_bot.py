@@ -66,10 +66,39 @@ def send_message(token: str, chat_id: str, text: str, reply_to: int | None = Non
 
 # ── Gemini Q&A ───────────────────────────────────────────────────────────────
 
-def ask_gemini(question: str, report_context: str, model: str) -> str:
+def _load_portfolio_context() -> str:
+    portfolio_path = Path(__file__).parent.parent / "portfolio.json"
+    if portfolio_path.exists():
+        try:
+            portfolio = json.loads(portfolio_path.read_text(encoding="utf-8"))
+            lines = ["\n=== 使用者目前持股與部位數據 ==="]
+            tw = portfolio.get("tw_positions", [])
+            if tw:
+                lines.append("台股持股:")
+                for p in tw:
+                    lines.append(f"- {p['name']}({p['ticker']}): {p['shares']}股, 均價{p['cost_basis']} TWD")
+            us = portfolio.get("us_positions", [])
+            if us:
+                lines.append("美股持股:")
+                for p in us:
+                    lines.append(f"- {p['name']}({p['ticker']}): {p['shares']}股, 均價{p['cost_basis']} USD")
+            
+            cash = portfolio.get("available_cash")
+            if cash:
+                lines.append(f"可用資金 (Available Cash): {cash}")
+            else:
+                lines.append("可用資金 (Available Cash): ⚠️ 未設定。請提示用戶，若提供可用資金，您可以計算精確的倉位加減碼數量。")
+            lines.append("=== 持股資訊結束 ===\n")
+            return "\n".join(lines)
+        except Exception:
+            pass
+    return ""
+
+
+def ask_gemini(question: str, report_context: str, portfolio_context: str, model: str) -> str:
     api_key = os.environ["GEMINI_API_KEY"]
     client = genai.Client(api_key=api_key)
-    prompt = f"{SYSTEM_PROMPT}\n\n=== 今日市場報告 ===\n{report_context}\n=== 報告結束 ===\n\n使用者問題：{question}"
+    prompt = f"{SYSTEM_PROMPT}\n{portfolio_context}\n=== 今日市場報告 ===\n{report_context}\n=== 報告結束 ===\n\n使用者問題：{question}"
     cfg = types.GenerateContentConfig(
         response_modalities=["TEXT"],
         temperature=0.4,
@@ -131,7 +160,8 @@ def poll(token: str, chat_id: str, model: str, duration: int) -> None:
             if not (is_reply or is_ask_cmd):
                 continue
             if from_chat != str(chat_id):
-                print(f"[bot] ignored message from unauthorized chat: {from_chat}")
+                # Only respond to configured chat
+                print(f"[bot] Ignored unauthorized message from chat: {from_chat}")
                 continue
 
             question = text[5:].strip() if is_ask_cmd else text
@@ -144,9 +174,11 @@ def poll(token: str, chat_id: str, model: str, duration: int) -> None:
             if not report_ctx:
                 report_ctx = "(報告內容不可用，請根據你的市場知識回答)"
 
+            portfolio_ctx = _load_portfolio_context()
+
             print(f"[bot] answering: {question[:60]}...")
             try:
-                answer = ask_gemini(question, report_ctx, model)
+                answer = ask_gemini(question, report_ctx, portfolio_ctx, model)
                 send_message(token, from_chat, answer, reply_to=msg.get("message_id"))
                 print(f"[bot] replied to message {msg.get('message_id')}")
             except Exception as exc:
@@ -175,7 +207,7 @@ def main() -> None:
 
     token = os.getenv("TELEGRAM_BOT_TOKEN", "")
     chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
-    model = os.getenv("REPORT_MODEL", "gemini-2.5-flash")
+    model = os.getenv("REPORT_MODEL", "gemini-2.0-flash")
 
     if not token or not chat_id:
         print("[bot] TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set — exiting")

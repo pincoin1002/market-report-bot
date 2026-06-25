@@ -4,6 +4,8 @@ on:
   schedule:
     # 台北時間 07:50（週一～週五）= UTC 23:50（前一天週日～週四）
     - cron: "50 23 * * 0-4"
+  repository_dispatch:
+    types: [trigger-tw-open]
   workflow_dispatch:
     inputs:
       dry_run:
@@ -20,6 +22,8 @@ jobs:
     name: Generate Taiwan Open Report
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout repository
@@ -36,17 +40,20 @@ jobs:
 
       - name: Fetch market snapshot
         id: fetch
-        continue-on-error: true
         run: |
           mkdir -p data
           python scripts/fetch_market_data.py tw_open
           EXIT_CODE=$?
           if [ $EXIT_CODE -eq 2 ]; then
             echo "market_closed=true" >> $GITHUB_OUTPUT
-          else
+            exit 0
+          elif [ $EXIT_CODE -eq 0 ]; then
             echo "market_closed=false" >> $GITHUB_OUTPUT
+            exit 0
+          else
+            echo "Error: fetch_market_data.py failed with exit code $EXIT_CODE"
+            exit $EXIT_CODE
           fi
-          exit 0
 
       - name: Generate Taiwan Open Report
         if: steps.fetch.outputs.market_closed != 'true'
@@ -86,6 +93,15 @@ jobs:
         if: steps.fetch.outputs.market_closed != 'true'
         continue-on-error: true
         run: python scripts/prepare_review.py tw_open
+
+      - name: Commit and push generated report
+        if: steps.fetch.outputs.market_closed != 'true'
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add reports/
+          git commit -m "chore: save generated tw_open report [skip ci]" || exit 0
+          git push
 
       - name: Upload review package
         if: always()
