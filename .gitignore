@@ -18,6 +18,13 @@ build/
 venv/
 env/
 
+# Personal portfolio data — never commit (contains names, holdings, cost basis)
+portfolio.json
+portfolio*.json
+
+# Bot runtime state
+bot_state.json
+
 # Local env file (never commit secrets)
 .env
 .env.*

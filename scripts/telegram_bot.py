@@ -130,10 +130,9 @@ def poll(token: str, chat_id: str, model: str, duration: int) -> None:
                 continue
             if not (is_reply or is_ask_cmd):
                 continue
-            if from_chat != str(chat_id) and not from_chat.startswith("-"):
-                # Only respond to configured chat
-                if from_chat != str(chat_id):
-                    continue
+            if from_chat != str(chat_id):
+                print(f"[bot] ignored message from unauthorized chat: {from_chat}")
+                continue
 
             question = text[5:].strip() if is_ask_cmd else text
             if not question:

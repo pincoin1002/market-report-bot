@@ -78,9 +78,9 @@ def extract_prices(report_text: str, model: str) -> dict[str, float]:
 - 輸出純 JSON，格式：{{"2330": 1045.0, "SPX": 5850.2, "VIX": 18.5}}
 - 若找不到任何價格，輸出 {{}}
 
-報告（前 6000 字）：
+報告全文：
 ---
-{report_text[:6000]}
+{report_text}
 ---"""
 
     response = client.models.generate_content(

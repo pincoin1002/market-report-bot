@@ -30,17 +30,19 @@ jobs:
         uses: actions/cache@v4
         with:
           path: bot_state.json
-          key: bot-state
+          # Use run_id as unique key so state is always saved after each run.
+          # restore-keys prefix picks up the most recent previous run's state.
+          key: bot-state-${{ github.run_id }}
           restore-keys: |
-            bot-state
+            bot-state-
 
       - name: Restore latest report
         uses: actions/cache@v4
         with:
           path: reports/
-          key: reports-cache
+          key: reports-cache-${{ github.run_id }}
           restore-keys: |
-            reports-cache
+            reports-cache-
 
       - name: Run Telegram bot (270s polling)
         env:
