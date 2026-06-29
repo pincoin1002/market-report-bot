@@ -96,6 +96,7 @@ jobs:
 
       - name: Commit and push generated report
         if: steps.fetch.outputs.market_closed != 'true'
+        continue-on-error: true
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"

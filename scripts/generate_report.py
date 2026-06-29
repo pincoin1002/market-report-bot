@@ -61,7 +61,7 @@ def load_prompt(report_type: str) -> str:
         reraise=True,
         stop=stop_after_attempt(5),
         wait=wait_exponential(multiplier=2, min=4, max=60),
-        retry=retry_if_exception(lambda e: isinstance(e, Exception) and "503" in str(e)),
+        retry=retry_if_exception(lambda e: isinstance(e, Exception) and any(err in str(e).lower() for err in ("503", "500", "502", "504", "429", "resourceexhausted", "quota", "unavailable", "connection", "timeout"))),
 )
 def generate_report(prompt: str, model: str, report_type: str) -> str:
     client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
@@ -75,6 +75,8 @@ def generate_report(prompt: str, model: str, report_type: str) -> str:
             max_output_tokens=max_tokens,
         ),
     )
+    if not response or not response.text:
+        raise ValueError("Gemini API returned empty response text")
     return response.text
 
 
@@ -289,8 +291,8 @@ def send_email(report: str, report_type: str) -> None:
             srv.login(username, password)
             srv.sendmail(username, recipients, msg.as_string())
         print(f"[Email] sent to {recipients}")
-    except smtplib.SMTPException as exc:
-        print(f"[Email] SMTP error: {exc}", file=sys.stderr)
+    except Exception as exc:
+        print(f"[Email] error sending email: {exc}", file=sys.stderr)
 
 # ── Entry point ────────────────────────────────────────────────────────────────
 
