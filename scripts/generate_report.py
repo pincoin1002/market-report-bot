@@ -44,6 +44,13 @@ REPORT_TITLES = {
 
 TPE = timezone(timedelta(hours=8))
 
+def get_market_date(report_type: str) -> datetime:
+    """Return the financial market date for this report type relative to TPE time."""
+    now = datetime.now(tz=TPE)
+    if report_type == "us_close":
+        return now - timedelta(days=1)
+    return now
+
 # ── Core ───────────────────────────────────────────────────────────────────────
 
 def load_prompt(report_type: str) -> str:
@@ -51,9 +58,10 @@ def load_prompt(report_type: str) -> str:
     if not prompt_path.exists():
         raise FileNotFoundError(f"Prompt not found: {prompt_path}")
     text = prompt_path.read_text(encoding="utf-8")
-    today = datetime.now(tz=TPE).strftime("%Y-%m-%d")
+    mdate = get_market_date(report_type)
+    today = mdate.strftime("%Y-%m-%d")
     weekday_map = {0: "週一", 1: "週二", 2: "週三", 3: "週四", 4: "週五", 5: "週六", 6: "週日"}
-    weekday = weekday_map[datetime.now(tz=TPE).weekday()]
+    weekday = weekday_map[mdate.weekday()]
     return text.replace("{{TODAY_DATE}}", today).replace("{{TODAY_WEEKDAY}}", weekday)
 
 
@@ -275,7 +283,8 @@ def send_email(report: str, report_type: str) -> None:
 
     recipients = [e.strip() for e in email_to_raw.split(",") if e.strip()]
     title = REPORT_TITLES[report_type]
-    date_str = datetime.now(tz=TPE).strftime("%Y-%m-%d")
+    mdate = get_market_date(report_type)
+    date_str = mdate.strftime("%Y-%m-%d")
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = f"【市場報告】{title} {date_str}"
