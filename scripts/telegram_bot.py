@@ -16,6 +16,7 @@ import argparse
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 
+import re
 import requests
 from google import genai
 from google.genai import types
@@ -23,10 +24,24 @@ from google.genai import types
 TPE = timezone(timedelta(hours=8))
 STATE_FILE = Path(__file__).parent.parent / "bot_state.json"
 SYSTEM_PROMPT = """你是一位專業的台股 / 美股市場分析師助理。
-使用者剛收到一份市場日報（內容已附在下方），現在想針對報告內容追問問題。
-請根據報告內容回答，必要時可用你的市場知識補充，但要明確標示哪些是報告內容、哪些是你的補充判斷。
-回答請簡潔、具體、有操作性，不要廢話。
+使用者剛收到一份市場日報，現在想針對報告追問問題。
+請根據報告內容回答，必要時可用市場知識補充。
+
+【Telegram 格式排版規則】
+1. 禁止輸出任何 Markdown 標題標籤（絕對不要使用 #, ##, ###, ####）。
+2. 如果要表示標題或強調重點，請直接用粗體並換行，例如：*今日操作建議*。
+3. 嚴禁使用三個星號（***）或深層嵌套符號，保持字句乾淨。
+4. 使用繁體中文回答，段落之間適度留空行以提升可讀性。
+5. 回答請簡潔、具體、有操作性，字數控制在 350 字內。
 """
+
+def _clean_markdown_for_tg(text: str) -> str:
+    """Clean up markdown text to make it clean and readable in Telegram."""
+    # 1. Convert ### Heading to bold: *Heading*
+    text = re.sub(r'^\s*#+\s*(.*)$', r'*\1*', text, flags=re.MULTILINE)
+    # 2. Convert *** or ** to a single asterisk * for simple Telegram bold
+    text = text.replace("***", "*").replace("**", "*")
+    return text
 
 
 # ── State (last seen message_id + cached reports) ────────────────────────────
@@ -179,7 +194,8 @@ def poll(token: str, chat_id: str, model: str, duration: int) -> None:
             print(f"[bot] answering: {question[:60]}...")
             try:
                 answer = ask_gemini(question, report_ctx, portfolio_ctx, model)
-                send_message(token, from_chat, answer, reply_to=msg.get("message_id"))
+                cleaned_answer = _clean_markdown_for_tg(answer)
+                send_message(token, from_chat, cleaned_answer, reply_to=msg.get("message_id"))
                 print(f"[bot] replied to message {msg.get('message_id')}")
             except Exception as exc:
                 print(f"[bot] error answering: {exc}")
