@@ -183,11 +183,28 @@ def _build_portfolio_block(portfolio: dict) -> str:
     return "\n".join(lines)
 
 
+def check_report_already_generated(report_type: str) -> bool:
+    """Return True if a report of report_type for the same market date already exists."""
+    reports_dir = Path(__file__).parent.parent / "reports"
+    if not reports_dir.exists():
+        return False
+    mdate = get_market_date(report_type)
+    date_str = mdate.strftime("%Y%m%d")
+    files = list(reports_dir.glob(f"{report_type}_{date_str}_*.md"))
+    if not files:
+        files = list(reports_dir.glob(f"{report_type}_{date_str}*.md"))
+    if files:
+        print(f"[{report_type}] Report for market date {date_str} already exists: {files[0].name}. Skipping to prevent duplicate delivery.")
+        return True
+    return False
+
+
 def save_report(report: str, report_type: str) -> Path:
     reports_dir = Path(__file__).parent.parent / "reports"
     reports_dir.mkdir(exist_ok=True)
     now = datetime.now(tz=TPE)
-    filepath = reports_dir / f"{report_type}_{now.strftime('%Y%m%d_%H%M%S')}.md"
+    mdate = get_market_date(report_type)
+    filepath = reports_dir / f"{report_type}_{mdate.strftime('%Y%m%d')}_{now.strftime('%H%M%S')}.md"
     filepath.write_text(report, encoding="utf-8")
     return filepath
 
@@ -316,6 +333,11 @@ def main() -> None:
 
     model = (os.getenv("REPORT_MODEL") or "gemini-2.0-flash").strip()
     report_type: str = args.report_type
+
+    # Prevent duplicate runs for the same market date
+    if check_report_already_generated(report_type):
+        print(f"[{report_type}] Daily report already generated for this market date. Exiting successfully (idempotent skip).")
+        sys.exit(0)
 
     print(f"[{report_type}] loading prompt …")
     prompt = load_prompt(report_type)
