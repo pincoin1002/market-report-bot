@@ -29,6 +29,17 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Materialize portfolio from secret
+        env:
+          PORTFOLIO_JSON: ${{ secrets.PORTFOLIO_JSON }}
+        run: |
+          if [ -n "$PORTFOLIO_JSON" ]; then
+            printf '%s' "$PORTFOLIO_JSON" > portfolio.json
+            echo "portfolio.json materialized"
+          else
+            echo "PORTFOLIO_JSON secret not set — running without portfolio context"
+          fi
+
       - name: Run Telegram bot (270s polling)
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}

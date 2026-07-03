@@ -38,12 +38,27 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Materialize portfolio from secret
+        env:
+          PORTFOLIO_JSON: ${{ secrets.PORTFOLIO_JSON }}
+        run: |
+          if [ -n "$PORTFOLIO_JSON" ]; then
+            printf '%s' "$PORTFOLIO_JSON" > portfolio.json
+            echo "portfolio.json materialized"
+          else
+            echo "PORTFOLIO_JSON secret not set — running without portfolio context"
+          fi
+
       - name: Fetch market snapshot
         id: fetch
         run: |
           mkdir -p data
+          # set +e: the runner shell is bash -e, so a non-zero exit would kill
+          # the step before EXIT_CODE=$? runs and holiday exits (2/3) would fail the job
+          set +e
           python scripts/fetch_market_data.py us_close
           EXIT_CODE=$?
+          set -e
           if [ $EXIT_CODE -eq 3 ]; then
             echo "market_closed=true" >> $GITHUB_OUTPUT
             exit 0

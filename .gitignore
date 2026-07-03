@@ -1,7 +1,5 @@
-# Generated reports (uploaded as GitHub artifacts instead)
-reports/
-
-# Runtime data (market snapshot, validation results — uploaded as artifacts)
+# Generated reports are committed by workflows (idempotency check + bot context).
+# Runtime data (market snapshot, validation results) stays artifact-only:
 data/*.json
 
 # Python
@@ -22,8 +20,6 @@ env/
 portfolio.json
 portfolio*.json
 
-# Bot runtime state
-bot_state.json
 
 # Local env file (never commit secrets)
 .env
