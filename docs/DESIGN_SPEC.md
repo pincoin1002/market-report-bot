@@ -137,10 +137,18 @@ CPython 3.12's bundled SQLite (≥ 3.34) on `ubuntu-latest`.
 ```
 Tier 1  YFinanceBatchProvider   — ONE yf.download() call for all ~60 symbols
 Tier 2  YFinanceSingleProvider  — per-symbol Ticker().history with tenacity retry
-Tier 3  StooqProvider (US)      — free CSV endpoint, no key, no auth
-        TWSEProvider (TW .TW)   — TWSE OpenAPI STOCK_DAY_ALL, one call, no key
-        TPExProvider (TW .TWO)  — TPEx OpenAPI equivalent for OTC symbols
+Tier 3  TWSEProvider (TW .TW)   — TWSE OpenAPI STOCK_DAY_ALL, one call, no key
+        YahooChartProvider      — Yahoo chart API via plain requests (no yfinance);
+                                  survives yfinance library breakage, covers
+                                  equities / indices / futures / forex / crypto
 ```
+
+> Implementation note (2026-07-03): the spec originally proposed Stooq as the
+> US fallback; live testing showed Stooq's CSV endpoint now serves a JS
+> anti-bot challenge, so it was replaced with the Yahoo chart API called via
+> plain `requests` — a different code path from the yfinance library, which
+> addresses the dominant real-world failure (library breakage) even though it
+> shares Yahoo as the upstream.
 
 Tier 1 collapses ~60 sequential HTTP requests into one, which removes most of
 the rate-limit exposure that motivates proxy talk in the first place. Tiers 2–3

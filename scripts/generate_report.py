@@ -5,9 +5,8 @@ Uses Google Gemini API with Google Search grounding to generate daily market
 reports for Taiwan and US equity markets, then distributes via Telegram and Email.
 """
 
-import json
+import logging
 import os
-import re
 import sys
 import smtplib
 import time
@@ -21,7 +20,13 @@ import requests
 from google import genai
 from google.genai import types
 import markdown
+from pydantic import ValidationError
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
+
+from logging_config import setup_logging
+from models import Portfolio, Snapshot
+
+log = logging.getLogger("generate")
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -88,12 +93,12 @@ def generate_report(prompt: str, model: str, report_type: str) -> str:
     return response.text
 
 
-def _build_snapshot_block(snapshot: dict) -> str:
-    """Format a market snapshot dict as a strongly-worded preamble for the prompt."""
-    fetched_at = snapshot.get("generated_at", "")[:19].replace("T", " ")
+def _build_snapshot_block(snapshot: Snapshot) -> str:
+    """Format the market snapshot as a strongly-worded preamble for the prompt."""
+    fetched_at = snapshot.generated_at.strftime("%Y-%m-%d %H:%M:%S")
     lines = [
         "## ⚠️ 系統提供的市場快照 — 禁止修改，禁止估算，禁止重新搜尋價格",
-        f"（抓取時間：{fetched_at} TPE | 來源：yfinance）",
+        f"（抓取時間：{fetched_at} TPE | 來源：已驗證行情資料）",
         "",
         "以下所有數字為已驗證的最新收盤價。在報告中引用時必須完全一致，不得四捨五入或改動。",
         "若 Google Search 返回衝突數字，以本快照為準。",
@@ -101,30 +106,34 @@ def _build_snapshot_block(snapshot: dict) -> str:
         "",
     ]
 
-    tw = snapshot.get("tw_stocks", {})
-    if tw:
+    if snapshot.fetch_coverage < 1.0:
+        lines += [
+            f"⚠️ 本快照涵蓋率為 {snapshot.fetch_coverage:.0%}。"
+            "快照中未列出的標的，報告中對應欄位一律填「⚠️ 未取得」，禁止搜尋或估算其價格。",
+            "",
+        ]
+
+    if snapshot.tw_stocks:
         lines += ["**台股**",
                   "| 代號 | 名稱 | 收盤 (TWD) | 漲跌% |",
                   "|------|------|-----------|-------|"]
-        for code, d in tw.items():
-            lines.append(f"| {code} | {d['name']} | {d['price']:,.1f} | {d['change_pct']:+.2f}% |")
+        for code, q in snapshot.tw_stocks.items():
+            lines.append(f"| {code} | {q.name} | {q.price:,.1f} | {q.change_pct:+.2f}% |")
         lines.append("")
 
-    us = snapshot.get("us_markets", {})
-    if us:
+    if snapshot.us_markets:
         lines += ["**美股 / 指數 / 宏觀**",
                   "| Symbol | 名稱 | 最新 | 漲跌% |",
                   "|--------|------|------|-------|"]
-        for key, d in us.items():
-            val = f"{d['price']:.2f}%" if d.get("currency") == "percent" else f"{d['price']:,.2f}"
-            lines.append(f"| {key} | {d['name']} | {val} | {d['change_pct']:+.2f}% |")
+        for key, q in snapshot.us_markets.items():
+            val = f"{q.price:.2f}%" if q.currency == "percent" else f"{q.price:,.2f}"
+            lines.append(f"| {key} | {q.name} | {val} | {q.change_pct:+.2f}% |")
         lines.append("")
 
-    forex = snapshot.get("forex", {})
-    if forex:
+    if snapshot.forex:
         lines.append("**外匯**")
-        for key, d in forex.items():
-            lines.append(f"- {d['name']}: {d['price']:.4f} ({d['change_pct']:+.2f}%)")
+        for key, q in snapshot.forex.items():
+            lines.append(f"- {q.name}: {q.price:.4f} ({q.change_pct:+.2f}%)")
         lines.append("")
 
     lines += [
@@ -136,46 +145,42 @@ def _build_snapshot_block(snapshot: dict) -> str:
 
 
 
-def _build_portfolio_block(portfolio: dict) -> str:
-    """Format the portfolio JSON as a prompt preamble."""
+def _build_portfolio_block(portfolio: Portfolio) -> str:
+    """Format the portfolio as a prompt preamble."""
     lines = [
         "## ⚠️ 您的目前持股與投資部位 — 供今日交易計畫決策參考",
         "請務必針對以下持股進行具體的走勢評估，並給出加減碼或出場的操作建議：",
         "",
     ]
-    
-    tw = portfolio.get("tw_positions", [])
-    if tw:
+
+    if portfolio.tw_positions:
         lines += [
             "### 台股持股",
             "| Ticker | 名稱 | 持股數量 | 買進均價 | 備註 |",
             "|--------|------|---------|---------|------|"
         ]
-        for pos in tw:
-            lines.append(f"| {pos['ticker']} | {pos['name']} | {pos['shares']} | {pos['cost_basis']} | {pos.get('note', '')} |")
+        for pos in portfolio.tw_positions:
+            lines.append(f"| {pos.ticker} | {pos.name} | {pos.shares} | {pos.cost_basis} | {pos.note} |")
         lines.append("")
 
-    us = portfolio.get("us_positions", [])
-    if us:
+    if portfolio.us_positions:
         lines += [
             "### 美股持股",
             "| Ticker | 名稱 | 持股數量 | 買進均價 | 備註 |",
             "|--------|------|---------|---------|------|"
         ]
-        for pos in us:
-            lines.append(f"| {pos['ticker']} | {pos['name']} | {pos['shares']} | {pos['cost_basis']} | {pos.get('note', '')} |")
+        for pos in portfolio.us_positions:
+            lines.append(f"| {pos.ticker} | {pos.name} | {pos.shares} | {pos.cost_basis} | {pos.note} |")
         lines.append("")
 
-    cash = portfolio.get("available_cash")
-    if cash:
-        lines.append(f"**可用資金 (Available Cash)**: {cash}")
+    if portfolio.available_cash:
+        lines.append(f"**可用資金 (Available Cash)**: {portfolio.available_cash}")
     else:
         lines.append("**可用資金 (Available Cash)**: ⚠️ 用戶未設定可用資金。請在日報的交易計畫中，主動詢問用戶目前可操作的金額，例如提示：'如果您能提供目前的可操作金額，我將能為您估算更精確的加減碼股數與部位配比。'")
     lines.append("")
-    
-    notes = portfolio.get("portfolio_notes")
-    if notes:
-        lines.append(f"**持股說明**: {notes}")
+
+    if portfolio.portfolio_notes:
+        lines.append(f"**持股說明**: {portfolio.portfolio_notes}")
         lines.append("")
 
     lines.append("---")
@@ -194,7 +199,9 @@ def check_report_already_generated(report_type: str) -> bool:
     if not files:
         files = list(reports_dir.glob(f"{report_type}_{date_str}*.md"))
     if files:
-        print(f"[{report_type}] Report for market date {date_str} already exists: {files[0].name}. Skipping to prevent duplicate delivery.")
+        log.info("report already exists for market date — skipping duplicate delivery",
+                 extra={"report_type": report_type, "market_date": date_str,
+                        "existing": files[0].name})
         return True
     return False
 
@@ -228,7 +235,7 @@ def send_telegram(report: str, report_type: str) -> None:
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
     if not token or not chat_id:
-        print("[Telegram] not configured — skipping")
+        log.info("Telegram not configured — skipping")
         return
 
     title = REPORT_TITLES[report_type]
@@ -241,9 +248,10 @@ def send_telegram(report: str, report_type: str) -> None:
         try:
             resp = requests.post(url, json={"chat_id": chat_id, "text": chunk}, timeout=30)
             resp.raise_for_status()
-            print(f"[Telegram] chunk {i+1}/{len(chunks)} sent")
-        except requests.RequestException as exc:
-            print(f"[Telegram] error on chunk {i+1}: {exc}", file=sys.stderr)
+            log.info("Telegram chunk sent", extra={"chunk": i + 1, "total": len(chunks)})
+        except requests.RequestException:
+            log.error("Telegram send failed", exc_info=True,
+                      extra={"chunk": i + 1, "total": len(chunks)})
         if i < len(chunks) - 1:
             time.sleep(0.5)
 
@@ -286,7 +294,7 @@ strong{{color:#1a1a2e}}
 def send_email(report: str, report_type: str) -> None:
     smtp_server = os.getenv("EMAIL_SMTP_SERVER", "").strip()
     if not smtp_server:
-        print("[Email] not configured — skipping")
+        log.info("Email not configured — skipping")
         return
 
     smtp_port = int(os.getenv("EMAIL_SMTP_PORT", "587") or "587")
@@ -295,7 +303,7 @@ def send_email(report: str, report_type: str) -> None:
     email_to_raw = os.getenv("EMAIL_TO", "").strip()
 
     if not (username and password and email_to_raw):
-        print("[Email] incomplete credentials — skipping")
+        log.info("Email incomplete credentials — skipping")
         return
 
     recipients = [e.strip() for e in email_to_raw.split(",") if e.strip()]
@@ -316,19 +324,20 @@ def send_email(report: str, report_type: str) -> None:
             srv.starttls()
             srv.login(username, password)
             srv.sendmail(username, recipients, msg.as_string())
-        print(f"[Email] sent to {recipients}")
-    except Exception as exc:
-        print(f"[Email] error sending email: {exc}", file=sys.stderr)
+        log.info("Email sent", extra={"recipients": recipients})
+    except Exception:
+        log.error("Email send failed", exc_info=True)
 
 # ── Entry point ────────────────────────────────────────────────────────────────
 
 def main() -> None:
+    setup_logging()
     parser = argparse.ArgumentParser(description="Institutional market report generator")
     parser.add_argument("report_type", choices=REPORT_TYPES, help="Report type to generate")
     args = parser.parse_args()
 
     if not os.getenv("GEMINI_API_KEY"):
-        print("Error: GEMINI_API_KEY is not set", file=sys.stderr)
+        log.error("GEMINI_API_KEY is not set")
         sys.exit(1)
 
     model = (os.getenv("REPORT_MODEL") or "gemini-2.0-flash").strip()
@@ -336,43 +345,50 @@ def main() -> None:
 
     # Prevent duplicate runs for the same market date
     if check_report_already_generated(report_type):
-        print(f"[{report_type}] Daily report already generated for this market date. Exiting successfully (idempotent skip).")
         sys.exit(0)
 
-    print(f"[{report_type}] loading prompt …")
     prompt = load_prompt(report_type)
 
     portfolio_path = Path(__file__).parent.parent / "portfolio.json"
     if portfolio_path.exists():
         try:
-            portfolio = json.loads(portfolio_path.read_text(encoding="utf-8"))
+            portfolio = Portfolio.model_validate_json(
+                portfolio_path.read_text(encoding="utf-8"))
             prompt = _build_portfolio_block(portfolio) + prompt
-            print(f"[{report_type}] portfolio injected")
-        except Exception as exc:
-            print(f"[{report_type}] failed to inject portfolio: {exc}", file=sys.stderr)
+            log.info("portfolio injected", extra={"report_type": report_type})
+        except ValidationError:
+            log.error("portfolio.json invalid — skipping portfolio injection",
+                      exc_info=True)
 
     snapshot_path = Path(__file__).parent.parent / "data" / "market_snapshot.json"
-    if snapshot_path.exists():
-        snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    try:
+        snapshot = Snapshot.model_validate_json(
+            snapshot_path.read_text(encoding="utf-8"))
         prompt = _build_snapshot_block(snapshot) + prompt
-        print(f"[{report_type}] snapshot injected "
-              f"(TW:{len(snapshot.get('tw_stocks', {}))} "
-              f"US:{len(snapshot.get('us_markets', {}))} "
-              f"FX:{len(snapshot.get('forex', {}))})")
-    else:
-        print(f"[{report_type}] no snapshot found — pure search mode")
+        log.info("snapshot injected", extra={
+            "report_type": report_type,
+            "coverage": snapshot.fetch_coverage,
+            "tw": len(snapshot.tw_stocks),
+            "us": len(snapshot.us_markets),
+            "fx": len(snapshot.forex)})
+    except FileNotFoundError:
+        log.warning("no snapshot found — pure search mode",
+                    extra={"report_type": report_type})
+    except ValidationError:
+        log.error("snapshot invalid — pure search mode", exc_info=True)
 
     max_tokens = MAX_OUTPUT_TOKENS.get(report_type, 16000)
-    print(f"[{report_type}] calling Gemini API  model={model}  max_tokens={max_tokens} …")
+    log.info("calling Gemini API", extra={
+        "report_type": report_type, "model": model, "max_tokens": max_tokens})
     report = generate_report(prompt, model, report_type)
 
     filepath = save_report(report, report_type)
-    print(f"[{report_type}] saved → {filepath}")
+    log.info("report saved", extra={"path": str(filepath)})
 
     send_telegram(report, report_type)
     send_email(report, report_type)
 
-    print(f"[{report_type}] done")
+    log.info("done", extra={"report_type": report_type})
 
 
 if __name__ == "__main__":

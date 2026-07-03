@@ -9,12 +9,20 @@ Flow:
 """
 
 import json
+import logging
 import os
 import sys
 from pathlib import Path
 
 from google import genai
 from google.genai import types
+from pydantic import ValidationError
+
+from logging_config import setup_logging
+from models import (PriceCheck, PriceCheckRow, Snapshot, StructureCheck,
+                    ValidationResult)
+
+log = logging.getLogger("validate")
 
 TOLERANCE = 0.05  # 5 % — flag prices that deviate more than this
 
@@ -58,9 +66,16 @@ def _latest_report(report_type: str) -> str | None:
     return files[0].read_text(encoding="utf-8") if files else None
 
 
-def _load_snapshot() -> dict:
+def _load_snapshot() -> Snapshot | None:
     p = Path(__file__).parent.parent / "data" / "market_snapshot.json"
-    return json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+    if not p.exists():
+        return None
+    try:
+        return Snapshot.model_validate_json(p.read_text(encoding="utf-8"))
+    except ValidationError:
+        log.error("market_snapshot.json invalid — skipping price comparison",
+                  exc_info=True)
+        return None
 
 
 # ── Extraction ─────────────────────────────────────────────────────────────────
@@ -96,14 +111,15 @@ def extract_prices(report_text: str, model: str) -> dict[str, float]:
         return {}
     try:
         return {k: float(v) for k, v in json.loads(response.text).items()}
-    except (json.JSONDecodeError, TypeError, ValueError) as exc:
-        print(f"[validate] extraction parse error: {exc}\nRaw: {response.text[:300]}", file=sys.stderr)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        log.error("extraction parse error", exc_info=True,
+                  extra={"raw": response.text[:300]})
         return {}
 
 
 # ── Structure check ───────────────────────────────────────────────────────────
 
-def check_structure(report_text: str, report_type: str) -> dict:
+def check_structure(report_text: str, report_type: str) -> StructureCheck:
     """Check required sections are present and count missing-data markers."""
     anchors = REQUIRED_SECTIONS.get(report_type, [])
     missing = [a for a in anchors if a not in report_text]
@@ -116,58 +132,50 @@ def check_structure(report_text: str, report_type: str) -> dict:
     # Truncation = last anchor in the list is absent
     truncated = bool(anchors) and (anchors[-1] not in report_text)
 
-    result = {
-        "sections_total":   len(anchors),
-        "sections_present": present,
-        "sections_missing": missing,
-        "truncated":        truncated,
+    result = StructureCheck(
+        sections_total=len(anchors),
+        sections_present=present,
+        sections_missing=missing,
+        truncated=truncated,
+        missing_data_count=missing_marker_count,
+        missing_data_pct=missing_pct,
+        char_count=len(report_text),
+    )
+
+    log.info("structure check", extra={
+        "report_type": report_type,
+        "sections": f"{present}/{len(anchors)}",
+        "truncated": truncated,
         "missing_data_count": missing_marker_count,
-        "missing_data_pct":   missing_pct,
-        "char_count":       len(report_text),
-    }
-
-    print(f"\n{'='*56}")
-    print(f"STRUCTURE CHECK: {report_type}")
-    print(f"  sections     : {present}/{len(anchors)}")
-    print(f"  truncated    : {'⚠️  YES' if truncated else 'no'}")
-    print(f"  ⚠️ 未取得    : {missing_marker_count} occurrences (~{missing_pct}% of fields)")
-    print(f"  char count   : {len(report_text):,}")
-    if missing:
-        print(f"  missing      : {missing}")
-    print("="*56)
-
+        "missing_data_pct": missing_pct,
+        "char_count": len(report_text),
+        "missing": missing,
+    })
     return result
 
 
 # ── Comparison ─────────────────────────────────────────────────────────────────
 
-def compare(extracted: dict[str, float], snapshot: dict) -> dict:
-    ground_truth: dict[str, float] = {}
-    for section in ("tw_stocks", "us_markets", "forex"):
-        for key, data in snapshot.get(section, {}).items():
-            ground_truth[key] = data["price"]
+def compare(extracted: dict[str, float], snapshot: Snapshot) -> PriceCheck:
+    ground_truth = snapshot.ground_truth()
 
-    passed, failed, unchecked = [], [], []
+    result = PriceCheck()
     for ticker, reported in extracted.items():
         if ticker in ground_truth:
             actual = ground_truth[ticker]
             diff = abs(reported - actual) / actual if actual != 0 else 0.0
-            row = {
-                "ticker":    ticker,
-                "reported":  reported,
-                "actual":    actual,
-                "diff_pct":  round(diff * 100, 2),
-            }
-            (passed if diff <= TOLERANCE else failed).append(row)
+            row = PriceCheckRow(ticker=ticker, reported=reported, actual=actual,
+                                diff_pct=round(diff * 100, 2))
+            (result.passed if diff <= TOLERANCE else result.failed).append(row)
         else:
-            unchecked.append({"ticker": ticker, "reported": reported})
-
-    return {"passed": passed, "failed": failed, "unchecked": unchecked}
+            result.unchecked.append({"ticker": ticker, "reported": reported})
+    return result
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────
 
 def main() -> None:
+    setup_logging()
     if len(sys.argv) < 2:
         print("Usage: validate_report.py <report_type>", file=sys.stderr)
         sys.exit(1)
@@ -176,12 +184,12 @@ def main() -> None:
     model = (os.getenv("REPORT_MODEL") or "gemini-2.0-flash").strip()
 
     if not os.getenv("GEMINI_API_KEY"):
-        print("[validate] GEMINI_API_KEY not set — skipping", file=sys.stderr)
+        log.warning("GEMINI_API_KEY not set — skipping")
         sys.exit(0)
 
     report_text = _latest_report(report_type)
     if not report_text:
-        print(f"[validate] no report found for {report_type} — skipping")
+        log.warning("no report found — skipping", extra={"report_type": report_type})
         sys.exit(0)
 
     # ── Structure check (no API call needed) ─────────────────────────────────
@@ -191,9 +199,9 @@ def main() -> None:
     data_dir.mkdir(exist_ok=True)
 
     # ── Price extraction ──────────────────────────────────────────────────────
-    print(f"[validate] extracting prices from report ({len(report_text):,} chars) …")
+    log.info("extracting prices from report", extra={"chars": len(report_text)})
     extracted = extract_prices(report_text, model)
-    print(f"[validate] found {len(extracted)} prices in report")
+    log.info("prices extracted", extra={"count": len(extracted)})
 
     (data_dir / "report_summary.json").write_text(
         json.dumps({"report_type": report_type, "extracted_prices": extracted},
@@ -202,50 +210,40 @@ def main() -> None:
     )
 
     snapshot = _load_snapshot()
-    if not snapshot:
-        print("[validate] no market_snapshot.json — skipping price comparison")
+    if snapshot is None:
+        log.warning("no usable market_snapshot.json — skipping price comparison")
+        result = ValidationResult(structure=structure, price_check=None)
         (data_dir / "validation_results.json").write_text(
-            json.dumps({"structure": structure, "price_check": None},
-                       ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        sys.exit(1 if structure["truncated"] else 0)
+            result.model_dump_json(indent=2), encoding="utf-8")
+        sys.exit(1 if structure.truncated else 0)
 
     price_results = compare(extracted, snapshot)
 
-    print(f"\n{'='*56}")
-    print(f"PRICE CHECK: {report_type}")
-    print(f"  ✓ pass      : {len(price_results['passed'])}")
-    print(f"  ✗ fail (>{TOLERANCE*100:.0f}%): {len(price_results['failed'])}")
-    print(f"  ? unchecked : {len(price_results['unchecked'])}")
+    log.info("price check", extra={
+        "report_type": report_type,
+        "passed": len(price_results.passed),
+        "failed": len(price_results.failed),
+        "unchecked": len(price_results.unchecked),
+    })
+    for row in price_results.failed:
+        log.warning("price deviation exceeds tolerance", extra={
+            "ticker": row.ticker, "reported": row.reported,
+            "actual": row.actual, "diff_pct": row.diff_pct})
 
-    if price_results["failed"]:
-        print(f"\n⚠️  Price deviations > {TOLERANCE*100:.0f}%:")
-        for row in price_results["failed"]:
-            print(f"  {row['ticker']:8s}  reported={row['reported']:<12}  "
-                  f"actual={row['actual']:<12}  diff={row['diff_pct']}%")
-    print("="*56)
-
+    result = ValidationResult(structure=structure, price_check=price_results)
     (data_dir / "validation_results.json").write_text(
-        json.dumps({"structure": structure, "price_check": price_results},
-                   ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+        result.model_dump_json(indent=2), encoding="utf-8")
 
-    has_price_failures = bool(price_results["failed"])
-    has_structure_failures = structure["truncated"] or bool(structure["sections_missing"])
+    has_price_failures = bool(price_results.failed)
+    has_structure_failures = structure.truncated or bool(structure.sections_missing)
 
     if has_price_failures or has_structure_failures:
-        reasons = []
-        if has_structure_failures:
-            reasons.append(f"structure incomplete (truncated={structure['truncated']}, "
-                           f"missing={structure['sections_missing']})")
-        if has_price_failures:
-            reasons.append(f"{len(price_results['failed'])} price(s) exceeded {TOLERANCE*100:.0f}% tolerance")
-        print(f"\n[validate] FAIL — {'; '.join(reasons)} — exit 1")
+        log.error("validation FAIL", extra={
+            "truncated": structure.truncated,
+            "sections_missing": structure.sections_missing,
+            "price_failures": len(price_results.failed)})
         sys.exit(1)
-    else:
-        print("[validate] all checks passed ✓")
+    log.info("all checks passed")
 
 
 if __name__ == "__main__":
