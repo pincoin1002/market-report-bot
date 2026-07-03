@@ -545,10 +545,15 @@ symptom of exactly this drift).
 
 1. Create `prompts/_common.md` containing: role definition, 分析風格規則,
    data-discipline rules (no estimation, ⚠️ 未取得, snapshot supremacy),
-   anti-fluff rules, and the four tail-module templates (Tomorrow Key Signals /
-   Risk Matrix / Rotation Assessment / AI Trend Health Check).
+   anti-fluff rules, search discipline, and the portfolio-actionability
+   contract.
+   *(Implementation note: the tail modules — Tomorrow Key Signals / Rotation
+   Assessment / AI Trend Health Check — stay in the per-report bodies. On
+   inspection their sub-bullets genuinely differ per report type (TW versions
+   track 外資期貨/ADR, US versions track FOMC/NVDA); centralizing them would
+   lose that specificity, so only the byte-identical blocks were extracted.)*
 2. Per-report files keep only: the search-task list, the section skeleton
-   (`## 1.` … `## N.`), and report-specific emphases.
+   (`## 1.` … `## N.`), report-specific emphases, and tail modules.
 3. `load_prompt()` becomes:
 
 ```python

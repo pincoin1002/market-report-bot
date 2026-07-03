@@ -58,16 +58,29 @@ def get_market_date(report_type: str) -> datetime:
 
 # ── Core ───────────────────────────────────────────────────────────────────────
 
+def _prev_trade_date(mdate: datetime) -> datetime:
+    """Previous weekday. Approximation for search queries only — holidays are
+    acceptable noise since prices come from the snapshot, not from search."""
+    prev = mdate - timedelta(days=1)
+    while prev.weekday() >= 5:
+        prev -= timedelta(days=1)
+    return prev
+
+
 def load_prompt(report_type: str) -> str:
-    prompt_path = Path(__file__).parent.parent / "prompts" / f"{report_type}.md"
+    prompts_dir = Path(__file__).parent.parent / "prompts"
+    prompt_path = prompts_dir / f"{report_type}.md"
     if not prompt_path.exists():
         raise FileNotFoundError(f"Prompt not found: {prompt_path}")
-    text = prompt_path.read_text(encoding="utf-8")
+    common = (prompts_dir / "_common.md").read_text(encoding="utf-8")
+    body = prompt_path.read_text(encoding="utf-8")
+    text = common + "\n\n" + body
     mdate = get_market_date(report_type)
-    today = mdate.strftime("%Y-%m-%d")
     weekday_map = {0: "週一", 1: "週二", 2: "週三", 3: "週四", 4: "週五", 5: "週六", 6: "週日"}
-    weekday = weekday_map[mdate.weekday()]
-    return text.replace("{{TODAY_DATE}}", today).replace("{{TODAY_WEEKDAY}}", weekday)
+    return (text
+            .replace("{{TODAY_DATE}}", mdate.strftime("%Y-%m-%d"))
+            .replace("{{TODAY_WEEKDAY}}", weekday_map[mdate.weekday()])
+            .replace("{{PREV_TRADE_DATE}}", _prev_trade_date(mdate).strftime("%Y-%m-%d")))
 
 
 @retry(

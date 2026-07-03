@@ -11,6 +11,7 @@ Usage (called by GitHub Actions every 5 minutes):
 import os
 import sys
 import json
+import logging
 import time
 import argparse
 from pathlib import Path
@@ -21,11 +22,17 @@ import requests
 from google import genai
 from google.genai import types
 
+from logging_config import setup_logging
+from report_store import ReportStore
+
+log = logging.getLogger("bot")
+
 TPE = timezone(timedelta(hours=8))
 STATE_FILE = Path(__file__).parent.parent / "bot_state.json"
 SYSTEM_PROMPT = """你是一位專業的台股 / 美股市場分析師助理。
 使用者剛收到一份市場日報，現在想針對報告追問問題。
 請根據報告內容回答，必要時可用市場知識補充。
+若引用了歷史報告節錄，回答時標明日期（例如「根據 6/28 美股收盤報告…」）。
 
 【Telegram 格式排版規則】
 1. 禁止輸出任何 Markdown 標題標籤（絕對不要使用 #, ##, ###, ####）。
@@ -122,37 +129,37 @@ def ask_gemini(question: str, report_context: str, portfolio_context: str, model
     return resp.text
 
 
-# ── Report cache: look for today's report in reports/ dir ────────────────────
+# ── Report context: latest report + FTS-matched history from report_store ────
 
-def get_latest_report() -> str | None:
-    reports_dir = Path(__file__).parent.parent / "reports"
-    if not reports_dir.exists():
-        return None
-    files = sorted(reports_dir.glob("*.md"), reverse=True)
-    if not files:
-        return None
-    return files[0].read_text(encoding="utf-8")
+def build_context(store: ReportStore, question: str) -> str:
+    parts = []
+    if (latest := store.latest()):
+        mdate = latest[0]
+        parts.append(f"【今日最新報告 {mdate[:4]}-{mdate[4:6]}-{mdate[6:]}】\n{latest[1]}")
+    parts += store.search(question, limit=2)  # multi-day reasoning context
+    return "\n\n".join(parts) or "(報告內容不可用，請根據你的市場知識回答)"
 
 
 # ── Main polling loop ────────────────────────────────────────────────────────
 
 def poll(token: str, chat_id: str, model: str, duration: int) -> None:
     state = load_state()
+    state.pop("latest_report", None)  # legacy field — context now in reports.db
     offset = state.get("offset", 0)
     deadline = time.time() + duration
 
-    # Also store the latest report text in state for context
-    latest_report = get_latest_report()
-    if latest_report:
-        state["latest_report"] = latest_report
+    base_dir = Path(__file__).parent.parent
+    store = ReportStore(base_dir / "data" / "reports.db")
+    store.ingest_dir(base_dir / "reports")   # pick up reports committed since last run
+    store.prune(keep_days=30)
 
-    print(f"[bot] polling for {duration}s, offset={offset}")
+    log.info("polling started", extra={"duration": duration, "offset": offset})
 
     while time.time() < deadline:
         try:
             result = tg(token, "getUpdates", offset=offset, timeout=20, allowed_updates=["message"])
-        except Exception as exc:
-            print(f"[bot] getUpdates error: {exc}")
+        except Exception:
+            log.warning("getUpdates error", exc_info=True)
             time.sleep(5)
             continue
 
@@ -176,29 +183,24 @@ def poll(token: str, chat_id: str, model: str, duration: int) -> None:
                 continue
             if from_chat != str(chat_id):
                 # Only respond to configured chat
-                print(f"[bot] Ignored unauthorized message from chat: {from_chat}")
+                log.warning("ignored unauthorized message", extra={"chat": from_chat})
                 continue
 
             question = text[5:].strip() if is_ask_cmd else text
             if not question:
                 continue
 
-            # Get report context: prefer the report from the replied-to message,
-            # fall back to state["latest_report"]
-            report_ctx = state.get("latest_report", "")
-            if not report_ctx:
-                report_ctx = "(報告內容不可用，請根據你的市場知識回答)"
-
+            report_ctx = build_context(store, question)
             portfolio_ctx = _load_portfolio_context()
 
-            print(f"[bot] answering: {question[:60]}...")
+            log.info("answering question", extra={"question": question[:60]})
             try:
                 answer = ask_gemini(question, report_ctx, portfolio_ctx, model)
                 cleaned_answer = _clean_markdown_for_tg(answer)
                 send_message(token, from_chat, cleaned_answer, reply_to=msg.get("message_id"))
-                print(f"[bot] replied to message {msg.get('message_id')}")
+                log.info("replied", extra={"message_id": msg.get("message_id")})
             except Exception as exc:
-                print(f"[bot] error answering: {exc}")
+                log.error("error answering", exc_info=True)
                 send_message(token, from_chat, f"⚠️ 處理問題時發生錯誤：{exc}", reply_to=msg.get("message_id"))
 
         state["offset"] = offset
@@ -210,12 +212,14 @@ def poll(token: str, chat_id: str, model: str, duration: int) -> None:
             break
         time.sleep(min(2, remaining))
 
-    print(f"[bot] done, final offset={offset}")
+    store.close()
+    log.info("polling done", extra={"final_offset": offset})
 
 
 # ── Entry point ──────────────────────────────────────────────────────────────
 
 def main() -> None:
+    setup_logging()
     parser = argparse.ArgumentParser(description="Telegram Q&A bot for market reports")
     parser.add_argument("--duration", type=int, default=270,
                         help="How many seconds to poll (default: 270 = 4.5 min)")
@@ -226,10 +230,10 @@ def main() -> None:
     model = os.getenv("REPORT_MODEL", "gemini-2.0-flash")
 
     if not token or not chat_id:
-        print("[bot] TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set — exiting")
+        log.error("TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set — exiting")
         sys.exit(1)
     if not os.getenv("GEMINI_API_KEY"):
-        print("[bot] GEMINI_API_KEY not set — exiting")
+        log.error("GEMINI_API_KEY not set — exiting")
         sys.exit(1)
 
     poll(token, chat_id, model, args.duration)
