@@ -34,21 +34,43 @@ SYSTEM_PROMPT = """你是一位專業的台股 / 美股市場分析師助理。
 請根據報告內容回答，必要時可用市場知識補充。
 若引用了歷史報告節錄，回答時標明日期（例如「根據 6/28 美股收盤報告…」）。
 
-【Telegram 格式排版規則】
-1. 禁止輸出任何 Markdown 標題標籤（絕對不要使用 #, ##, ###, ####）。
-2. 如果要表示標題或強調重點，請直接用粗體並換行，例如：*今日操作建議*。
-3. 嚴禁使用三個星號（***）或深層嵌套符號，保持字句乾淨。
-4. 使用繁體中文回答，段落之間適度留空行以提升可讀性。
-5. 回答請簡潔、具體、有操作性，字數控制在 350 字內。
+【Telegram 訊息美化與排版極嚴格規則】
+1. 嚴禁輸出任何標題標籤（絕對不要使用 #, ##, ###, ####），也嚴禁輸出 "## **" 這種混亂格式。
+2. 善用 Emoji 來增加資訊結構與視覺舒適度：
+   - 📌 表示核心重點或結論。
+   - 💡 表示操作建議或關鍵提醒。
+   - 📈 / 📉 / 📊 表示市場數據、股價走勢或統計。
+   - 🔍 表示分析或補充判斷。
+3. 善用「粗體」作為段落標題或重點標示。
+4. 每一小段落之間「務必空一行」，避免字堆擠在一起，提升視覺可讀性。
+5. 字數控制在 350 字以內，語氣專業、清晰、好讀。
+
+【排版範例參考】
+📌 *今日記憶體族群下跌主因*
+美光 (MU) 盤後財報展望不如預期，拖累整體半導體板塊走弱...
+
+📈 *相關個股觀察*
+* 台積電 (2330)：今日回檔修正 %...
+* 南亞科 (2408)：面臨均線壓力...
+
+💡 *後續操作建議*
+短線上不建議急於抄底，宜靜待融資餘額沉澱...
 """
 
 def _clean_markdown_for_tg(text: str) -> str:
-    """Clean up markdown text to make it clean and readable in Telegram."""
-    # 1. Convert ### Heading to bold: *Heading*
+    """Clean up markdown text to make it clean, beautiful, and stable in Telegram."""
+    # 1. Scrub header tags wrapped with bold stars (e.g. ## **Title** -> *Title*)
+    text = re.sub(r'^\s*#+\s*\**([^*]+)\**\s*$', r'*\1*', text, flags=re.MULTILINE)
+    # 2. Convert standard markdown headers to simple bold: # Title -> *Title*
     text = re.sub(r'^\s*#+\s*(.*)$', r'*\1*', text, flags=re.MULTILINE)
-    # 2. Convert *** or ** to a single asterisk * for simple Telegram bold
+    # 3. Explicitly remove residual raw Markdown headers
+    text = text.replace("## **", "*").replace("### **", "*").replace("#### **", "*")
+    text = text.replace("** ##", "*").replace("** ###", "*")
+    # 4. Convert all *** or ** to a single asterisk * for simple Telegram bold
     text = text.replace("***", "*").replace("**", "*")
-    return text
+    # 5. Collapse multiple consecutive newlines (3 or more) to exactly two
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text.strip()
 
 
 # ── State (last seen message_id + cached reports) ────────────────────────────
