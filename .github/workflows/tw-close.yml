@@ -1,10 +1,6 @@
 name: 台股收盤日報
 
 on:
-  schedule:
-    # 台北時間 16:30（週一～週五）= UTC 08:30
-    # 等三大法人 / 外資買賣超數據完整公布後再執行
-    - cron: "30 8 * * 1-5"
   repository_dispatch:
     types: [trigger-tw-close]
   workflow_dispatch:

@@ -54,6 +54,11 @@ def get_market_date(report_type: str) -> datetime:
     now = datetime.now(tz=TPE)
     if report_type == "us_close":
         return now - timedelta(days=1)
+    elif report_type == "us_open":
+        # If us_open runs past midnight TPE (00:00-06:00 next day) due to delays,
+        # its market date belongs to the previous day.
+        if now.hour < 6:
+            return now - timedelta(days=1)
     return now
 
 # ── Core ───────────────────────────────────────────────────────────────────────
