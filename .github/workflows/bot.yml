@@ -1,10 +1,11 @@
 name: Telegram Q&A Bot
 
 on:
-  schedule:
-    # Run every 5 minutes on weekdays (UTC 00:00-15:55 = TPE 08:00-23:55)
-    - cron: "*/5 0-15 * * 1-5"
   workflow_dispatch:
+
+concurrency:
+  group: telegram-bot
+  cancel-in-progress: true
 
 jobs:
   run-bot:
