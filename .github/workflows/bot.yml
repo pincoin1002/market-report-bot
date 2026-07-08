@@ -5,7 +5,7 @@ on:
 
 concurrency:
   group: telegram-bot
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   run-bot:
@@ -41,13 +41,13 @@ jobs:
             echo "PORTFOLIO_JSON secret not set — running without portfolio context"
           fi
 
-      - name: Run Telegram bot (270s polling)
+      - name: Run Telegram bot (40s polling)
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           REPORT_MODEL: ${{ vars.REPORT_MODEL }}
-        run: python scripts/telegram_bot.py --duration 270
+        run: python scripts/telegram_bot.py --duration 40
 
       - name: Commit and push bot state
         run: |
