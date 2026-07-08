@@ -89,14 +89,35 @@ def load_prompt(report_type: str) -> str:
 
 
 @retry(
-        reraise=True,
-        stop=stop_after_attempt(5),
-        wait=wait_exponential(multiplier=2, min=4, max=60),
-        retry=retry_if_exception(lambda e: isinstance(e, Exception) and any(err in str(e).lower() for err in ("503", "500", "502", "504", "429", "resourceexhausted", "quota", "unavailable", "connection", "timeout"))),
+    reraise=True,
+    stop=stop_after_attempt(5),
+    wait=wait_exponential(multiplier=2, min=4, max=60),
+    retry=retry_if_exception(lambda e: isinstance(e, Exception)),
 )
 def generate_report(prompt: str, model: str, report_type: str) -> str:
     client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
     max_tokens = MAX_OUTPUT_TOKENS.get(report_type, 16000)
+    
+    # Disable safety filters to prevent false positives on stock market terms (e.g. crash, sell-off)
+    safety_settings = [
+        types.SafetySetting(
+            category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+            threshold=types.HarmBlockThreshold.BLOCK_NONE,
+        ),
+        types.SafetySetting(
+            category=types.HarmCategory.HARM_CATEGORY_HARASSMENT,
+            threshold=types.HarmBlockThreshold.BLOCK_NONE,
+        ),
+        types.SafetySetting(
+            category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+            threshold=types.HarmBlockThreshold.BLOCK_NONE,
+        ),
+        types.SafetySetting(
+            category=types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+            threshold=types.HarmBlockThreshold.BLOCK_NONE,
+        ),
+    ]
+
     response = client.models.generate_content(
         model=model,
         contents=prompt,
@@ -104,6 +125,7 @@ def generate_report(prompt: str, model: str, report_type: str) -> str:
             tools=[types.Tool(google_search=types.GoogleSearch())],
             temperature=0.1,
             max_output_tokens=max_tokens,
+            safety_settings=safety_settings,
         ),
     )
     if not response or not response.text:
