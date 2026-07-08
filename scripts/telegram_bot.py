@@ -31,8 +31,8 @@ log = logging.getLogger("bot")
 TPE = timezone(timedelta(hours=8))
 STATE_FILE = Path(__file__).parent.parent / "bot_state.json"
 SYSTEM_PROMPT = """你是一位專業的台股 / 美股市場分析師助理。
-使用者剛收到一份市場日報，現在想針對報告追問問題。
-請根據報告內容回答，必要時可用市場知識補充。
+使用者可以針對日報與持股進行追問，也可以詢問日報或持股之外的任何全球股票、宏觀經濟或市場熱點。
+如果用戶詢問了日報或持股之外的股票，請善用你的搜尋工具 (Google Search) 進行即時檢索，並給出最新、客觀的市場數據、新聞與分析。
 若引用了歷史報告節錄，回答時標明日期（例如「根據 6/28 美股收盤報告…」）。
 
 【Telegram 訊息美化與排版極嚴格規則】
@@ -175,6 +175,7 @@ def ask_gemini(question: str, report_context: str, portfolio_context: str, model
         response_modalities=["TEXT"],
         temperature=0.4,
         safety_settings=safety_settings,
+        tools=[types.Tool(google_search=types.GoogleSearch())],
     )
     resp = client.models.generate_content(model=model, contents=prompt, config=cfg)
     if not resp or not resp.text:
