@@ -21,6 +21,7 @@ import re
 import requests
 from google import genai
 from google.genai import types
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from logging_config import setup_logging
 from report_store import ReportStore
@@ -139,15 +140,45 @@ def _load_portfolio_context() -> str:
     return ""
 
 
+@retry(
+    reraise=True,
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=2, min=2, max=10),
+    retry=retry_if_exception(lambda e: isinstance(e, Exception)),
+)
 def ask_gemini(question: str, report_context: str, portfolio_context: str, model: str) -> str:
     api_key = os.environ["GEMINI_API_KEY"]
     client = genai.Client(api_key=api_key)
     prompt = f"{SYSTEM_PROMPT}\n{portfolio_context}\n=== 今日市場報告 ===\n{report_context}\n=== 報告結束 ===\n\n使用者問題：{question}"
+    
+    # Disable safety filters for stock vocabulary
+    safety_settings = [
+        types.SafetySetting(
+            category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+            threshold=types.HarmBlockThreshold.BLOCK_NONE,
+        ),
+        types.SafetySetting(
+            category=types.HarmCategory.HARM_CATEGORY_HARASSMENT,
+            threshold=types.HarmBlockThreshold.BLOCK_NONE,
+        ),
+        types.SafetySetting(
+            category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+            threshold=types.HarmBlockThreshold.BLOCK_NONE,
+        ),
+        types.SafetySetting(
+            category=types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+            threshold=types.HarmBlockThreshold.BLOCK_NONE,
+        ),
+    ]
+
     cfg = types.GenerateContentConfig(
         response_modalities=["TEXT"],
         temperature=0.4,
+        safety_settings=safety_settings,
     )
     resp = client.models.generate_content(model=model, contents=prompt, config=cfg)
+    if not resp or not resp.text:
+        raise ValueError("Gemini API returned empty response text")
     return resp.text
 
 
