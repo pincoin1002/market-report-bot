@@ -271,6 +271,60 @@ def _split_message(text: str, max_len: int = 4096) -> list[str]:
     return chunks
 
 
+def _clean_markdown_for_telegram_report(text: str) -> str:
+    """Format markdown report specifically to look beautiful, table-free, and header-clean on Telegram."""
+    import re
+    # 1. Parse tables into structured bullet points
+    lines = text.splitlines()
+    cleaned_lines = []
+    in_table = False
+    headers = []
+    
+    for line in lines:
+        stripped = line.strip()
+        # Detect table separator row (e.g. |---|---|)
+        if stripped.startswith("|") and "-" in stripped and not any(c.isalnum() for c in stripped):
+            continue
+        # Parse active table data row
+        if stripped.startswith("|") and stripped.endswith("|"):
+            parts = [p.strip() for p in stripped.split("|")[1:-1]]
+            if not in_table:
+                # This is the header row
+                headers = parts
+                in_table = True
+                cleaned_lines.append("")
+                continue
+            else:
+                # This is a data row, convert to bulleted text
+                row_items = []
+                for header, val in zip(headers, parts):
+                    if val and val != "⚠️ 未取得" and val != "None":
+                        row_items.append(f"{header}: *{val}*")
+                if row_items:
+                    cleaned_lines.append(f"• " + ", ".join(row_items))
+                continue
+        else:
+            if in_table:
+                in_table = False
+                cleaned_lines.append("")
+            
+        # 2. Scrub headers wrapped with bold (e.g. ## **Title** -> *Title*)
+        line = re.sub(r'^\s*#+\s*\**([^*]+)\**\s*$', r'*\1*', line)
+        # 3. Scrub standard markdown headers (e.g. ## Title -> *Title*)
+        line = re.sub(r'^\s*#+\s*(.*)$', r'*\1*', line)
+        # 4. Filter residual raw heading artifacts
+        line = line.replace("## **", "*").replace("### **", "*").replace("#### **", "*")
+        line = line.replace("** ##", "*").replace("** ###", "*")
+        # 5. Convert *** and ** to simple asterisk * for TG bold
+        line = line.replace("***", "*").replace("**", "*")
+        cleaned_lines.append(line)
+
+    cleaned_text = "\n".join(cleaned_lines)
+    # Collapse multiple blank lines
+    cleaned_text = re.sub(r'\n{3,}', '\n\n', cleaned_text)
+    return cleaned_text.strip()
+
+
 def send_telegram(report: str, report_type: str) -> None:
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
@@ -280,13 +334,15 @@ def send_telegram(report: str, report_type: str) -> None:
 
     title = REPORT_TITLES[report_type]
     now_str = datetime.now(tz=TPE).strftime("%Y-%m-%d %H:%M TPE")
-    header = f"📊 {title}｜{now_str}\n{'─' * 38}\n\n"
-    chunks = _split_message(header + report)
+    header = f"📊 *{title}* ｜ {now_str}\n{'─' * 30}\n\n"
+    
+    cleaned_report = _clean_markdown_for_telegram_report(report)
+    chunks = _split_message(header + cleaned_report)
 
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     for i, chunk in enumerate(chunks):
         try:
-            resp = requests.post(url, json={"chat_id": chat_id, "text": chunk}, timeout=30)
+            resp = requests.post(url, json={"chat_id": chat_id, "text": chunk, "parse_mode": "Markdown"}, timeout=30)
             resp.raise_for_status()
             log.info("Telegram chunk sent", extra={"chunk": i + 1, "total": len(chunks)})
         except requests.RequestException:
