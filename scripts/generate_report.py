@@ -90,11 +90,11 @@ def load_prompt(report_type: str) -> str:
 
 @retry(
     reraise=True,
-    stop=stop_after_attempt(5),
-    wait=wait_exponential(multiplier=2, min=4, max=60),
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=2, min=4, max=30),
     retry=retry_if_exception(lambda e: isinstance(e, Exception)),
 )
-def generate_report(prompt: str, model: str, report_type: str) -> str:
+def _call_gemini_api(prompt: str, model: str, report_type: str, use_search: bool) -> str:
     client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
     max_tokens = MAX_OUTPUT_TOKENS.get(report_type, 16000)
     
@@ -118,11 +118,13 @@ def generate_report(prompt: str, model: str, report_type: str) -> str:
         ),
     ]
 
+    tools = [types.Tool(google_search=types.GoogleSearch())] if use_search else None
+
     response = client.models.generate_content(
         model=model,
         contents=prompt,
         config=types.GenerateContentConfig(
-            tools=[types.Tool(google_search=types.GoogleSearch())],
+            tools=tools,
             temperature=0.1,
             max_output_tokens=max_tokens,
             safety_settings=safety_settings,
@@ -131,6 +133,15 @@ def generate_report(prompt: str, model: str, report_type: str) -> str:
     if not response or not response.text:
         raise ValueError("Gemini API returned empty response text")
     return response.text
+
+
+def generate_report(prompt: str, model: str, report_type: str) -> str:
+    try:
+        return _call_gemini_api(prompt, model, report_type, use_search=True)
+    except Exception as exc:
+        log.warning("Generate report with Google Search failed. Retrying without search...", extra={"error": str(exc)})
+        # If search failed (e.g. search quota or network issues), retry without search grounding
+        return _call_gemini_api(prompt, model, report_type, use_search=False)
 
 
 def _build_snapshot_block(snapshot: Snapshot) -> str:

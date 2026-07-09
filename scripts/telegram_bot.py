@@ -146,7 +146,7 @@ def _load_portfolio_context() -> str:
     wait=wait_exponential(multiplier=2, min=2, max=10),
     retry=retry_if_exception(lambda e: isinstance(e, Exception)),
 )
-def ask_gemini(question: str, report_context: str, portfolio_context: str, model: str) -> str:
+def _call_gemini_api(question: str, report_context: str, portfolio_context: str, model: str, use_search: bool) -> str:
     api_key = os.environ["GEMINI_API_KEY"]
     client = genai.Client(api_key=api_key)
     prompt = f"{SYSTEM_PROMPT}\n{portfolio_context}\n=== 今日市場報告 ===\n{report_context}\n=== 報告結束 ===\n\n使用者問題：{question}"
@@ -171,16 +171,27 @@ def ask_gemini(question: str, report_context: str, portfolio_context: str, model
         ),
     ]
 
+    tools = [types.Tool(google_search=types.GoogleSearch())] if use_search else None
+
     cfg = types.GenerateContentConfig(
         response_modalities=["TEXT"],
         temperature=0.4,
         safety_settings=safety_settings,
-        tools=[types.Tool(google_search=types.GoogleSearch())],
+        tools=tools,
     )
     resp = client.models.generate_content(model=model, contents=prompt, config=cfg)
     if not resp or not resp.text:
         raise ValueError("Gemini API returned empty response text")
     return resp.text
+
+
+def ask_gemini(question: str, report_context: str, portfolio_context: str, model: str) -> str:
+    try:
+        return _call_gemini_api(question, report_context, portfolio_context, model, use_search=True)
+    except Exception as exc:
+        log.warning("Ask Gemini with search failed. Retrying without search...", extra={"error": str(exc)})
+        # Fallback to local context only if Google Search Grounding encounters an error
+        return _call_gemini_api(question, report_context, portfolio_context, model, use_search=False)
 
 
 # ── Report context: latest report + FTS-matched history from report_store ────
