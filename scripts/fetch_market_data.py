@@ -18,6 +18,9 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 import holidays
+from google import genai
+from google.genai import types
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from logging_config import setup_logging
 from models import NamedQuote, Snapshot
@@ -112,8 +115,63 @@ FOREX: dict[str, tuple[str, str, str]] = {
 
 # ── Holiday / weekend helpers ──────────────────────────────────────────────────
 
+@retry(
+    reraise=True,
+    stop=stop_after_attempt(2),
+    wait=wait_exponential(multiplier=2, min=2, max=6),
+    retry=retry_if_exception(lambda e: isinstance(e, Exception)),
+)
+def _call_gemini_market_check(market_name: str, today_date: str) -> str:
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        return "OPEN"
+    client = genai.Client(api_key=api_key)
+    prompt = (
+        f"今天是 {today_date}。請利用 Google 搜尋查證："
+        f"今天「{market_name}」有開市交易嗎？是否因為颱風（Typhoon）、國定假日或任何其他緊急因素宣布休市（不交易）？\n"
+        "請嚴格只回覆三個字：\n"
+        "若確定休市，請回覆：CLOSED\n"
+        "若照常交易，請回覆：OPEN\n"
+        "若不確定或查無休市新聞，請回覆：OPEN\n"
+        "不需要任何解釋說明。"
+    )
+    
+    # Disable safety filters for standard market vocabulary checks
+    safety_settings = [
+        types.SafetySetting(category=c, threshold=types.HarmBlockThreshold.BLOCK_NONE)
+        for c in [
+            types.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+            types.HarmCategory.HARM_CATEGORY_HARASSMENT,
+            types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+            types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT
+        ]
+    ]
+    
+    response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            tools=[types.Tool(google_search=types.GoogleSearch())],
+            temperature=0.1,
+            safety_settings=safety_settings,
+        )
+    )
+    return response.text.strip().upper() if response and response.text else "OPEN"
+
+
+def check_market_closed_via_gemini(market_name: str, today_date: str) -> bool:
+    """Ask Gemini via Google Search if the market is closed today due to typhoon or other emergencies."""
+    try:
+        answer = _call_gemini_market_check(market_name, today_date)
+        log.info(f"Gemini market closed check for {market_name} returned: {answer}")
+        return "CLOSED" in answer
+    except Exception as e:
+        log.warning(f"Failed to check market status via Gemini for {market_name}: {e}")
+        return False
+
+
 def is_tw_market_closed(report_type: str) -> bool:
-    """Return True if the Taiwan stock market is closed today."""
+    """Return True if the Taiwan stock market is closed today (checks weekend, holidays, and typhoon days)."""
     if report_type in ("us_open", "us_close"):
         return False  # US-only reports skip TW holiday check
     today = datetime.now(tz=TPE)
@@ -125,6 +183,12 @@ def is_tw_market_closed(report_type: str) -> bool:
     if today.date() in tw_cal:
         log.info("TW market closed (holiday)", extra={
             "date": today.strftime("%Y-%m-%d"), "holiday": tw_cal.get(today.date())})
+        return True
+
+    # Real-time validation for Typhoon days or unscheduled TWSE market closures
+    today_str = today.strftime("%Y-%m-%d")
+    if check_market_closed_via_gemini("台灣證券交易所 (TWSE)", today_str):
+        log.info("TW market closed (detected typhoon / unscheduled closure via Gemini)", extra={"date": today_str})
         return True
     return False
 
@@ -143,6 +207,12 @@ def is_us_market_closed(report_type: str) -> bool:
     if today.date() in nyse_cal:
         log.info("US market closed (holiday)", extra={
             "date": today.strftime("%Y-%m-%d"), "holiday": nyse_cal.get(today.date())})
+        return True
+
+    # Real-time validation for emergency US market closures
+    today_str = today.strftime("%Y-%m-%d")
+    if check_market_closed_via_gemini("紐約證券交易所 (NYSE)", today_str):
+        log.info("US market closed (detected unscheduled closure via Gemini)", extra={"date": today_str})
         return True
     return False
 
