@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Telegram Q&A bot for market reports.
 
-Polls Telegram for replies to report messages and answers follow-up questions
-using the original report as context with Google Gemini.
+Polls Telegram and answers every text message in the authorized chat,
+using recent reports (via report_store) as context with Google Gemini.
 
-Usage (called by GitHub Actions every 5 minutes):
-    python scripts/telegram_bot.py --duration 270
+Usage (called by GitHub Actions):
+    python scripts/telegram_bot.py --duration 240
 """
 
 import os
@@ -205,6 +205,28 @@ def build_context(store: ReportStore, question: str) -> str:
     return "\n\n".join(parts) or "(報告內容不可用，請根據你的市場知識回答)"
 
 
+# ── Message filtering ────────────────────────────────────────────────────────
+
+def _extract_question(text: str) -> str | None:
+    """Return the question in a message, or None if it should be ignored.
+
+    Every plain text message in the authorized chat is a question — users
+    naturally type questions directly instead of replying or using /ask.
+    Commands other than /ask (e.g. /start) are ignored; /ask and /ask@botname
+    both work.
+    """
+    text = text.strip()
+    if not text:
+        return None
+    if text.startswith("/"):
+        cmd, _, rest = text.partition(" ")
+        cmd = cmd.split("@", 1)[0].lower()   # "/ask@MyBot" → "/ask"
+        if cmd == "/ask":
+            return rest.strip() or None
+        return None
+    return text
+
+
 # ── Main polling loop ────────────────────────────────────────────────────────
 
 def poll(token: str, chat_id: str, model: str, duration: int) -> None:
@@ -222,54 +244,51 @@ def poll(token: str, chat_id: str, model: str, duration: int) -> None:
 
     while time.time() < deadline:
         try:
-            result = tg(token, "getUpdates", offset=offset, timeout=20, allowed_updates=["message"])
+            result = tg(token, "getUpdates", offset=offset, timeout=20,
+                        allowed_updates=["message", "channel_post"])
         except Exception:
             log.warning("getUpdates error", exc_info=True)
             time.sleep(5)
             continue
 
-        updates = result.get("result", [])
-        for upd in updates:
+        for upd in result.get("result", []):
+            # Advance + persist the offset FIRST: a message that crashes the
+            # handler must never be re-fetched forever (poison-message loop).
             offset = upd["update_id"] + 1
-            msg = upd.get("message", {})
-            text = msg.get("text", "").strip()
-            from_chat = str(msg.get("chat", {}).get("id", ""))
-            reply_to_msg = msg.get("reply_to_message", {})
+            state["offset"] = offset
+            save_state(state)
 
-            # Only respond to:
-            # 1. Direct /ask command: /ask <question>
-            # 2. Reply to any message in the channel/chat
-            is_reply = bool(reply_to_msg)
-            is_ask_cmd = text.lower().startswith("/ask ")
-
-            if not text:
-                continue
-            if not (is_reply or is_ask_cmd):
-                continue
-            if from_chat != str(chat_id):
-                # Only respond to configured chat
-                log.warning("ignored unauthorized message", extra={"chat": from_chat})
-                continue
-
-            question = text[5:].strip() if is_ask_cmd else text
-            if not question:
-                continue
-
-            report_ctx = build_context(store, question)
-            portfolio_ctx = _load_portfolio_context()
-
-            log.info("answering question", extra={"question": question[:60]})
             try:
-                answer = ask_gemini(question, report_ctx, portfolio_ctx, model)
-                cleaned_answer = _clean_markdown_for_tg(answer)
-                send_message(token, from_chat, cleaned_answer, reply_to=msg.get("message_id"))
-                log.info("replied", extra={"message_id": msg.get("message_id")})
-            except Exception as exc:
-                log.error("error answering", exc_info=True)
-                send_message(token, from_chat, f"⚠️ 處理問題時發生錯誤：{exc}", reply_to=msg.get("message_id"))
+                msg = upd.get("message") or upd.get("channel_post") or {}
+                text = msg.get("text", "")
+                from_chat = str(msg.get("chat", {}).get("id", ""))
 
-        state["offset"] = offset
-        save_state(state)
+                if from_chat != str(chat_id):
+                    if from_chat:
+                        log.warning("ignored unauthorized message", extra={"chat": from_chat})
+                    continue
+
+                question = _extract_question(text)
+                if not question:
+                    continue
+
+                report_ctx = build_context(store, question)
+                portfolio_ctx = _load_portfolio_context()
+
+                log.info("answering question", extra={"question": question[:60]})
+                try:
+                    answer = ask_gemini(question, report_ctx, portfolio_ctx, model)
+                    cleaned_answer = _clean_markdown_for_tg(answer)
+                    send_message(token, from_chat, cleaned_answer, reply_to=msg.get("message_id"))
+                    log.info("replied", extra={"message_id": msg.get("message_id")})
+                except Exception as exc:
+                    log.error("error answering", exc_info=True)
+                    send_message(token, from_chat,
+                                 f"⚠️ 處理問題時發生錯誤：{exc}", reply_to=msg.get("message_id"))
+            except Exception:
+                # Never let one bad update kill the polling loop
+                log.error("update handling failed — skipped", exc_info=True,
+                          extra={"update_id": upd.get("update_id")})
 
         # Sleep briefly to avoid hammering the API
         remaining = deadline - time.time()

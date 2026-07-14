@@ -2,6 +2,10 @@ name: Telegram Q&A Bot
 
 on:
   workflow_dispatch:
+  schedule:
+    # Backup heartbeat: keeps the bot alive if the external per-minute
+    # dispatcher ever dies. Concurrency below dedupes overlapping runs.
+    - cron: "*/5 * * * *"
 
 concurrency:
   group: telegram-bot
@@ -11,8 +15,7 @@ jobs:
   run-bot:
     name: Poll Telegram and answer questions
     runs-on: ubuntu-latest
-    timeout-minutes: 6
-    continue-on-error: true
+    timeout-minutes: 8
 
     permissions:
       contents: write
@@ -26,9 +29,10 @@ jobs:
         with:
           python-version: "3.12"
           cache: "pip"
+          cache-dependency-path: requirements-bot.txt
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt
+      - name: Install dependencies (bot-only, fast)
+        run: pip install -r requirements-bot.txt
 
       - name: Materialize portfolio from secret
         env:
@@ -41,19 +45,25 @@ jobs:
             echo "PORTFOLIO_JSON secret not set — running without portfolio context"
           fi
 
-      - name: Run Telegram bot (40s polling)
+      - name: Run Telegram bot (240s polling)
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           REPORT_MODEL: ${{ vars.REPORT_MODEL }}
-        run: python scripts/telegram_bot.py --duration 40
+        run: python scripts/telegram_bot.py --duration 240
 
       - name: Commit and push bot state
+        # State commit must survive races with report workflows pushing
+        # concurrently — retry the rebase+push a few times.
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add bot_state.json data/reports.db
           git commit -m "chore: update telegram bot state [skip ci]" || exit 0
-          git pull --rebase
-          git push
+          for i in 1 2 3; do
+            git pull --rebase && git push && exit 0
+            echo "push attempt $i failed — retrying"
+            sleep 5
+          done
+          echo "::warning::bot state push failed after 3 attempts (offset is confirmed server-side; next run self-heals)"
