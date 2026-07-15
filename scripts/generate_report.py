@@ -338,10 +338,13 @@ def _clean_markdown_for_telegram_report(text: str) -> str:
 
 def send_telegram(report: str, report_type: str) -> None:
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-    chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
-    if not token or not chat_id:
+    chat_id_raw = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+    if not token or not chat_id_raw:
         log.info("Telegram not configured — skipping")
         return
+
+    # Support multiple comma-separated chat/user IDs
+    chat_ids = [cid.strip() for cid in chat_id_raw.split(",") if cid.strip()]
 
     title = REPORT_TITLES[report_type]
     now_str = datetime.now(tz=TPE).strftime("%Y-%m-%d %H:%M TPE")
@@ -351,16 +354,17 @@ def send_telegram(report: str, report_type: str) -> None:
     chunks = _split_message(header + cleaned_report)
 
     url = f"https://api.telegram.org/bot{token}/sendMessage"
-    for i, chunk in enumerate(chunks):
-        try:
-            resp = requests.post(url, json={"chat_id": chat_id, "text": chunk, "parse_mode": "Markdown"}, timeout=30)
-            resp.raise_for_status()
-            log.info("Telegram chunk sent", extra={"chunk": i + 1, "total": len(chunks)})
-        except requests.RequestException:
-            log.error("Telegram send failed", exc_info=True,
-                      extra={"chunk": i + 1, "total": len(chunks)})
-        if i < len(chunks) - 1:
-            time.sleep(0.5)
+    for cid in chat_ids:
+        for i, chunk in enumerate(chunks):
+            try:
+                resp = requests.post(url, json={"chat_id": cid, "text": chunk, "parse_mode": "Markdown"}, timeout=30)
+                resp.raise_for_status()
+                log.info("Telegram chunk sent", extra={"chat_id": cid, "chunk": i + 1, "total": len(chunks)})
+            except requests.RequestException:
+                log.error("Telegram send failed", exc_info=True,
+                          extra={"chat_id": cid, "chunk": i + 1, "total": len(chunks)})
+            if i < len(chunks) - 1:
+                time.sleep(0.5)
 
 # ── Email ──────────────────────────────────────────────────────────────────────
 

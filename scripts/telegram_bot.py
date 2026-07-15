@@ -263,7 +263,9 @@ def poll(token: str, chat_id: str, model: str, duration: int) -> None:
                 text = msg.get("text", "")
                 from_chat = str(msg.get("chat", {}).get("id", ""))
 
-                if from_chat != str(chat_id):
+                # Support comma-separated list of allowed chat/user IDs
+                allowed_chats = {cid.strip() for cid in chat_id.split(",") if cid.strip()}
+                if from_chat not in allowed_chats:
                     if from_chat:
                         log.warning("ignored unauthorized message", extra={"chat": from_chat})
                     continue
