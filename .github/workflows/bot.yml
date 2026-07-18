@@ -34,22 +34,13 @@ jobs:
       - name: Install dependencies (bot-only, fast)
         run: pip install -r requirements-bot.txt
 
-      - name: Materialize portfolio from secret
-        env:
-          PORTFOLIO_JSON: ${{ secrets.PORTFOLIO_JSON }}
-        run: |
-          if [ -n "$PORTFOLIO_JSON" ]; then
-            printf '%s' "$PORTFOLIO_JSON" > portfolio.json
-            echo "portfolio.json materialized"
-          else
-            echo "PORTFOLIO_JSON secret not set — running without portfolio context"
-          fi
-
       - name: Run Telegram bot (240s polling)
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # Decrypts portfolio.json.enc in-repo; plaintext never exists in CI
+          PORTFOLIO_KEY: ${{ secrets.PORTFOLIO_KEY }}
           REPORT_MODEL: ${{ vars.REPORT_MODEL }}
         run: python scripts/telegram_bot.py --duration 240
 
@@ -60,6 +51,7 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add bot_state.json data/reports.db
+          git add portfolio.json.enc 2>/dev/null || true
           git commit -m "chore: update telegram bot state [skip ci]" || exit 0
           for i in 1 2 3; do
             git pull --rebase && git push && exit 0

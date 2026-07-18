@@ -5,3 +5,4 @@ tenacity>=8.0.0
 markdown>=3.6
 holidays>=0.47
 pydantic>=2.7
+cryptography>=42.0

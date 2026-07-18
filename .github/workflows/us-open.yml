@@ -35,17 +35,6 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Materialize portfolio from secret
-        env:
-          PORTFOLIO_JSON: ${{ secrets.PORTFOLIO_JSON }}
-        run: |
-          if [ -n "$PORTFOLIO_JSON" ]; then
-            printf '%s' "$PORTFOLIO_JSON" > portfolio.json
-            echo "portfolio.json materialized"
-          else
-            echo "PORTFOLIO_JSON secret not set — running without portfolio context"
-          fi
-
       - name: Fetch market snapshot
         id: fetch
         run: |
@@ -71,6 +60,7 @@ jobs:
         if: steps.fetch.outputs.market_closed != 'true'
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          PORTFOLIO_KEY: ${{ secrets.PORTFOLIO_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           EMAIL_SMTP_SERVER: ${{ secrets.EMAIL_SMTP_SERVER }}

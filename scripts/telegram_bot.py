@@ -25,6 +25,7 @@ from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponen
 
 from logging_config import setup_logging
 from report_store import ReportStore
+import portfolio_store
 
 log = logging.getLogger("bot")
 
@@ -112,32 +113,28 @@ def send_message(token: str, chat_id: str, text: str, reply_to: int | None = Non
 # ── Gemini Q&A ───────────────────────────────────────────────────────────────
 
 def _load_portfolio_context() -> str:
-    portfolio_path = Path(__file__).parent.parent / "portfolio.json"
-    if portfolio_path.exists():
-        try:
-            portfolio = json.loads(portfolio_path.read_text(encoding="utf-8"))
-            lines = ["\n=== 使用者目前持股與部位數據 ==="]
-            tw = portfolio.get("tw_positions", [])
-            if tw:
-                lines.append("台股持股:")
-                for p in tw:
-                    lines.append(f"- {p['name']}({p['ticker']}): {p['shares']}股, 均價{p['cost_basis']} TWD")
-            us = portfolio.get("us_positions", [])
-            if us:
-                lines.append("美股持股:")
-                for p in us:
-                    lines.append(f"- {p['name']}({p['ticker']}): {p['shares']}股, 均價{p['cost_basis']} USD")
-            
-            cash = portfolio.get("available_cash")
-            if cash:
-                lines.append(f"可用資金 (Available Cash): {cash}")
-            else:
-                lines.append("可用資金 (Available Cash): ⚠️ 未設定。請提示用戶，若提供可用資金，您可以計算精確的倉位加減碼數量。")
-            lines.append("=== 持股資訊結束 ===\n")
-            return "\n".join(lines)
-        except Exception:
-            pass
-    return ""
+    try:
+        portfolio = portfolio_store.load_portfolio()
+    except Exception:
+        log.error("portfolio load failed", exc_info=True)
+        return ""
+    if not portfolio:
+        return ""
+    lines = ["\n=== 使用者目前持股與部位數據 ==="]
+    for bucket, label, cur in (("tw_positions", "台股持股", "TWD"),
+                               ("us_positions", "美股持股", "USD")):
+        positions = portfolio.get(bucket, [])
+        if positions:
+            lines.append(f"{label}:")
+            for p in positions:
+                lines.append(f"- {p['name']}({p['ticker']}): {p['shares']}股, 均價{p['cost_basis']} {cur}")
+    cash = portfolio.get("available_cash")
+    if cash:
+        lines.append(f"可用資金 (Available Cash): {cash}")
+    else:
+        lines.append("可用資金 (Available Cash): ⚠️ 未設定。請提示用戶，若提供可用資金，您可以計算精確的倉位加減碼數量。")
+    lines.append("=== 持股資訊結束 ===\n")
+    return "\n".join(lines)
 
 
 @retry(
@@ -205,6 +202,67 @@ def build_context(store: ReportStore, question: str) -> str:
     return "\n\n".join(parts) or "(報告內容不可用，請根據你的市場知識回答)"
 
 
+# ── Portfolio commands (/portfolio /buy /sell /cash) ─────────────────────────
+
+PORTFOLIO_HELP = (
+    "💼 *持股指令*\n\n"
+    "/portfolio — 查看目前部位\n"
+    "/buy 代號 股數 價格 [名稱] — 買進（新倉或加碼，自動算新均價）\n"
+    "/sell 代號 股數 — 賣出（賣光自動移除）\n"
+    "/cash 金額 — 更新可用資金\n\n"
+    "例：/buy 2330 1000 1050 台積電\n"
+    "　　/buy NVDA 20 195\n"
+    "　　/sell 2330 500"
+)
+
+
+def handle_portfolio_command(text: str) -> str | None:
+    """Handle portfolio commands; return reply text, or None if not one."""
+    parts = text.strip().split()
+    if not parts:
+        return None
+    cmd = parts[0].split("@", 1)[0].lower()
+    if cmd not in ("/portfolio", "/buy", "/sell", "/cash", "/help"):
+        return None
+
+    if cmd == "/help":
+        return PORTFOLIO_HELP
+
+    portfolio = portfolio_store.load_portfolio()
+    if cmd == "/portfolio":
+        if portfolio is None:
+            return ("⚠️ 尚未設定加密持股（PORTFOLIO_KEY 未設定或無法解密）。\n"
+                    "設定完成後用 /buy 建立部位。\n\n" + PORTFOLIO_HELP)
+        return portfolio_store.format_portfolio(portfolio)
+
+    # Mutating commands need a working encrypted store
+    if portfolio is None:
+        portfolio = dict(portfolio_store.EMPTY)
+    try:
+        if cmd == "/buy":
+            if len(parts) < 4:
+                return "格式：/buy 代號 股數 價格 [名稱]\n例：/buy 2330 1000 1050 台積電"
+            ticker = parts[1].upper()
+            shares, price = float(parts[2]), float(parts[3])
+            name = parts[4] if len(parts) > 4 else None
+            reply = portfolio_store.apply_buy(portfolio, ticker, shares, price, name)
+        elif cmd == "/sell":
+            if len(parts) < 3:
+                return "格式：/sell 代號 股數\n例：/sell 2330 500"
+            reply = portfolio_store.apply_sell(portfolio, parts[1].upper(), float(parts[2]))
+        else:  # /cash
+            if len(parts) < 2:
+                return "格式：/cash 金額\n例：/cash 500000"
+            reply = portfolio_store.apply_cash(portfolio, float(parts[1]))
+    except ValueError:
+        return "⚠️ 數字格式錯誤，請確認股數 / 價格 / 金額為數值"
+
+    if not portfolio_store.save_portfolio(portfolio):
+        return ("⚠️ 無法儲存：PORTFOLIO_KEY 未設定（GitHub Secret）。"
+                "部位變更未生效。")
+    return reply + "\n\n（已加密儲存，下一份日報開始生效）"
+
+
 # ── Message filtering ────────────────────────────────────────────────────────
 
 def _extract_question(text: str) -> str | None:
@@ -268,6 +326,13 @@ def poll(token: str, chat_id: str, model: str, duration: int) -> None:
                 if from_chat not in allowed_chats:
                     if from_chat:
                         log.warning("ignored unauthorized message", extra={"chat": from_chat})
+                    continue
+
+                # Portfolio commands are handled locally — no Gemini call
+                cmd_reply = handle_portfolio_command(text)
+                if cmd_reply:
+                    send_message(token, from_chat, cmd_reply, reply_to=msg.get("message_id"))
+                    log.info("portfolio command handled", extra={"cmd": text.split()[0]})
                     continue
 
                 question = _extract_question(text)

@@ -25,6 +25,7 @@ from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponen
 
 from logging_config import setup_logging
 from models import Portfolio, Snapshot
+import portfolio_store
 
 log = logging.getLogger("generate")
 
@@ -439,6 +440,117 @@ def send_email(report: str, report_type: str) -> None:
     except Exception:
         log.error("Email send failed", exc_info=True)
 
+# ── Private portfolio advice (Telegram/Email only — NEVER saved to reports/) ──
+
+ADVICE_MARKET_FOCUS = {
+    "tw_open":  "台股持股為主（給出今日開盤後的操作計畫），美股持股一句話帶過",
+    "tw_close": "台股持股為主（給出隔日操作計畫），美股持股一句話帶過",
+    "us_open":  "美股持股為主（給出今晚開盤後的操作計畫），台股持股一句話帶過",
+    "us_close": "美股持股為主（檢討昨夜表現並給出後續計畫），台股持股一句話帶過",
+}
+
+
+def _build_advice_prompt(report: str, portfolio: Portfolio,
+                         snapshot: "Snapshot | None", report_type: str) -> str:
+    parts = [
+        "你是專業投資組合顧問。根據以下市場報告與使用者實際持股，"
+        "針對每一檔持股給出具體操作建議。",
+        "",
+        "規則（必須遵守）：",
+        f"- 本次重點：{ADVICE_MARKET_FOCUS.get(report_type, '全部持股')}",
+        "- 每檔持股必含：方向（加碼/減碼/續抱/出場）、觸發價位（相對現價的具體數字）、失效條件",
+        "- 有可用資金時，加碼建議換算成可執行股數",
+        "- 禁止「視情況而定」「建議觀望」等無觸發條件的建議",
+        "- 持股若在報告或快照中有價格，以該價格為準；沒有的標「⚠️ 未取得」，禁止估算",
+        "- Telegram 格式：禁止 # 標題，用粗體與 📌💡📈📉 emoji 分段，段落間空行，600 字內",
+        "",
+    ]
+    if snapshot:
+        parts.append(_build_snapshot_block(snapshot))
+    parts += [
+        _build_portfolio_block(portfolio),
+        "=== 今日市場報告 ===",
+        report,
+        "=== 報告結束 ===",
+        "",
+        "請輸出持股操作建議：",
+    ]
+    return "\n".join(parts)
+
+
+def send_advice_telegram(advice: str, report_type: str) -> None:
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+    chat_id_raw = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+    if not token or not chat_id_raw:
+        return
+    chat_ids = [cid.strip() for cid in chat_id_raw.split(",") if cid.strip()]
+    now_str = datetime.now(tz=TPE).strftime("%Y-%m-%d %H:%M TPE")
+    header = f"💼 *持股操作建議*（私訊限定）｜ {now_str}\n{'─' * 30}\n\n"
+    chunks = _split_message(header + _clean_markdown_for_telegram_report(advice))
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    for cid in chat_ids:
+        for i, chunk in enumerate(chunks):
+            try:
+                resp = requests.post(url, json={"chat_id": cid, "text": chunk,
+                                                "parse_mode": "Markdown"}, timeout=30)
+                if resp.status_code != 200:   # Markdown parse issues → plain text
+                    resp = requests.post(url, json={"chat_id": cid, "text": chunk}, timeout=30)
+                resp.raise_for_status()
+            except requests.RequestException:
+                log.error("advice Telegram send failed", exc_info=True, extra={"chat_id": cid})
+            if i < len(chunks) - 1:
+                time.sleep(0.5)
+    log.info("portfolio advice sent via Telegram", extra={"chats": len(chat_ids)})
+
+
+def send_advice_email(advice: str, report_type: str) -> None:
+    smtp_server = os.getenv("EMAIL_SMTP_SERVER", "").strip()
+    username = os.getenv("EMAIL_USERNAME", "").strip()
+    password = os.getenv("EMAIL_PASSWORD", "").strip()
+    email_to_raw = os.getenv("EMAIL_TO", "").strip()
+    if not (smtp_server and username and password and email_to_raw):
+        return
+    recipients = [e.strip() for e in email_to_raw.split(",") if e.strip()]
+    smtp_port = int(os.getenv("EMAIL_SMTP_PORT", "587") or "587")
+    date_str = get_market_date(report_type).strftime("%Y-%m-%d")
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = f"【持股建議】{REPORT_TITLES[report_type]} {date_str}"
+    msg["From"] = username
+    msg["To"] = ", ".join(recipients)
+    msg.attach(MIMEText(advice, "plain", "utf-8"))
+    msg.attach(MIMEText(_md_to_html(advice), "html", "utf-8"))
+    try:
+        with smtplib.SMTP(smtp_server, smtp_port, timeout=30) as srv:
+            srv.ehlo()
+            srv.starttls()
+            srv.login(username, password)
+            srv.sendmail(username, recipients, msg.as_string())
+        log.info("portfolio advice sent via Email")
+    except Exception:
+        log.error("advice Email send failed", exc_info=True)
+
+
+def run_portfolio_advice(report: str, report_type: str,
+                         snapshot: "Snapshot | None", model: str) -> None:
+    """Generate position-aware advice and deliver privately. The advice text is
+    never written to reports/ nor committed — the repo is public."""
+    raw = portfolio_store.load_portfolio()
+    if not portfolio_store.has_positions(raw):
+        log.info("no portfolio positions — advice stage skipped")
+        return
+    try:
+        portfolio = Portfolio.model_validate(raw)
+    except ValidationError:
+        log.error("portfolio data invalid — advice stage skipped", exc_info=True)
+        return
+
+    prompt = _build_advice_prompt(report, portfolio, snapshot, report_type)
+    log.info("generating portfolio advice", extra={"report_type": report_type})
+    advice = generate_report(prompt, model, report_type)
+    send_advice_telegram(advice, report_type)
+    send_advice_email(advice, report_type)
+
+
 # ── Entry point ────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -460,17 +572,11 @@ def main() -> None:
 
     prompt = load_prompt(report_type)
 
-    portfolio_path = Path(__file__).parent.parent / "portfolio.json"
-    if portfolio_path.exists():
-        try:
-            portfolio = Portfolio.model_validate_json(
-                portfolio_path.read_text(encoding="utf-8"))
-            prompt = _build_portfolio_block(portfolio) + prompt
-            log.info("portfolio injected", extra={"report_type": report_type})
-        except ValidationError:
-            log.error("portfolio.json invalid — skipping portfolio injection",
-                      exc_info=True)
+    # NOTE: the portfolio is deliberately NOT injected into the main report —
+    # reports are committed to a public repo. Position-aware advice is generated
+    # separately below and delivered via Telegram/Email only.
 
+    snapshot: Snapshot | None = None
     snapshot_path = Path(__file__).parent.parent / "data" / "market_snapshot.json"
     try:
         snapshot = Snapshot.model_validate_json(
@@ -498,6 +604,13 @@ def main() -> None:
 
     send_telegram(report, report_type)
     send_email(report, report_type)
+
+    # ── Private portfolio advice — Telegram/Email only, never committed ──────
+    try:
+        run_portfolio_advice(report, report_type, snapshot, model)
+    except Exception:
+        log.error("portfolio advice stage failed (report already delivered)",
+                  exc_info=True)
 
     log.info("done", extra={"report_type": report_type})
 
