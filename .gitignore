@@ -1,6 +1,8 @@
 # Generated reports are committed by workflows (idempotency check + bot context).
 # Runtime data (market snapshot, validation results) stays artifact-only:
 data/*.json
+data/reports.db
+
 
 # Python
 __pycache__/

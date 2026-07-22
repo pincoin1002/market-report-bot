@@ -50,12 +50,16 @@ jobs:
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add bot_state.json data/reports.db
+          git add bot_state.json
           git add portfolio.json.enc 2>/dev/null || true
-          git commit -m "chore: update telegram bot state [skip ci]" || exit 0
-          for i in 1 2 3; do
-            git pull --rebase && git push && exit 0
-            echo "push attempt $i failed — retrying"
-            sleep 5
-          done
-          echo "::warning::bot state push failed after 3 attempts (offset is confirmed server-side; next run self-heals)"
+          if ! git diff --quiet --cached; then
+            git commit -m "chore: update telegram bot state [skip ci]"
+            for i in 1 2 3; do
+              git pull --rebase && git push && exit 0
+              echo "push attempt $i failed — retrying"
+              sleep 5
+            done
+            echo "::warning::bot state push failed after 3 attempts (offset is confirmed server-side; next run self-heals)"
+          else
+            echo "No state changes detected — skipping git commit and push."
+          fi
