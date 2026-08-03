@@ -359,6 +359,12 @@ def send_telegram(report: str, report_type: str) -> None:
         for i, chunk in enumerate(chunks):
             try:
                 resp = requests.post(url, json={"chat_id": cid, "text": chunk, "parse_mode": "Markdown"}, timeout=30)
+                if resp.status_code != 200:
+                    log.warning("Telegram Markdown send failed; retrying as plain text",
+                                extra={"chat_id": cid, "chunk": i + 1,
+                                       "total": len(chunks), "status": resp.status_code,
+                                       "response": resp.text[:500]})
+                    resp = requests.post(url, json={"chat_id": cid, "text": chunk}, timeout=30)
                 resp.raise_for_status()
                 log.info("Telegram chunk sent", extra={"chat_id": cid, "chunk": i + 1, "total": len(chunks)})
             except requests.RequestException:
