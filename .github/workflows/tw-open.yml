@@ -1,6 +1,9 @@
 name: 台股開盤戰報
 
 on:
+  schedule:
+    # 07:50 TPE, Monday-Friday
+    - cron: "50 23 * * 0-4"
   repository_dispatch:
     types: [trigger-tw-open]
   workflow_dispatch:

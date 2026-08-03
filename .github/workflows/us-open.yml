@@ -1,6 +1,9 @@
 name: 美股開盤日報
 
 on:
+  schedule:
+    # 21:00 TPE, Monday-Friday (US daylight saving time)
+    - cron: "0 13 * * 1-5"
   repository_dispatch:
     types: [trigger-us-open]
   workflow_dispatch:

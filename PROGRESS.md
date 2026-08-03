@@ -12,3 +12,9 @@
 - Current gap for Shane's goal: initialize/refresh actual holdings from screenshot without committing plaintext, then verify `/portfolio` and one daily report private advice run.
 - Initialized encrypted portfolio from three brokerage screenshots: 6 TW positions, 10 US positions, cash unset.
 - Verified temporary plaintext `portfolio.json` was removed and encrypted file decrypts/schema-validates locally with `.env` `PORTFOLIO_KEY`.
+
+## 2026-08-04
+
+- Investigated missing US open report: latest `us-open` run was `2026-07-29T13:00:23Z`; no runs after that.
+- Root cause: report workflows only had `repository_dispatch` / `workflow_dispatch`; GitHub-native `schedule` triggers had been removed, leaving delivery dependent on local/external dispatch.
+- Restored GitHub Actions cron schedules for all four report workflows so the system is cloud-scheduled again.
