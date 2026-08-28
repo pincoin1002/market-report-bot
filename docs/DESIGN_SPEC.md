@@ -714,10 +714,11 @@ def load_prompt(report_type: str) -> str:
    holdings, `_common.md` defines what "actionable" means once, precisely:
 
 ```
-- 涉及使用者持股的個股，操作建議必須包含：方向（加碼/減碼/續抱/出場）、
-  觸發價位（相對現價的具體數字）、失效條件（什麼情況下此建議作廢）
-- 有 available_cash 時，加碼建議必須換算成可執行股數
-- 禁止「視情況而定」「建議觀望」等無觸發條件的建議
+- V2 supersedes this old actionability contract.
+- Daily private output is monitoring only: NO_MATERIAL_CHANGE / WATCH /
+  ACTION_REVIEW / DATA_BLOCKED.
+- Exact ADD/TRIM/BUY/SELL sizing stays SIZE_NOT_COMPUTED unless a future PIOS
+  integration supplies verified portfolio, cash, price, and sizing-rule authority.
 ```
 
 Acceptance: run `wc -l prompts/*.md` before/after; expect ≥ 35% total-line
