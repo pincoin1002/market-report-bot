@@ -76,9 +76,9 @@ jobs:
         run: |
           if [ "$DRY_RUN" = "true" ]; then
             echo "=== DRY RUN: notifications disabled ==="
-            TELEGRAM_BOT_TOKEN="" EMAIL_SMTP_SERVER="" python scripts/generate_report.py tw_close
+            python scripts/generate_report.py tw_close --generate-only
           else
-            python scripts/generate_report.py tw_close
+            python scripts/generate_report.py tw_close --generate-only
           fi
 
       - name: Skip report (market closed)
@@ -87,11 +87,25 @@ jobs:
 
       - name: Validate report prices
         if: steps.fetch.outputs.market_closed != 'true'
-        continue-on-error: true
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           REPORT_MODEL: ${{ vars.REPORT_MODEL }}
         run: python scripts/validate_report.py tw_close
+
+      - name: Deliver validated Taiwan Close Report
+        if: steps.fetch.outputs.market_closed != 'true' && (github.event.inputs.dry_run || 'false') != 'true'
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          PORTFOLIO_KEY: ${{ secrets.PORTFOLIO_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          EMAIL_SMTP_SERVER: ${{ secrets.EMAIL_SMTP_SERVER }}
+          EMAIL_SMTP_PORT: ${{ secrets.EMAIL_SMTP_PORT }}
+          EMAIL_USERNAME: ${{ secrets.EMAIL_USERNAME }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          REPORT_MODEL: ${{ vars.REPORT_MODEL }}
+        run: python scripts/generate_report.py tw_close --deliver-existing
 
       - name: Prepare review package
         if: steps.fetch.outputs.market_closed != 'true'
@@ -134,7 +148,12 @@ jobs:
           name: tw-close-data-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             data/market_snapshot.json
+            data/market_context.json
+            data/market_report_draft.json
             data/report_summary.json
             data/validation_results.json
+            data/portfolio_advice_audit.json
+            data/portfolio_action_brief.json
+            data/delivery_state.json
           retention-days: 30
           if-no-files-found: ignore

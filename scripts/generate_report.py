@@ -11,6 +11,8 @@ import sys
 import smtplib
 import time
 import argparse
+import json
+import re
 from datetime import datetime, timezone, timedelta
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -24,8 +26,17 @@ from pydantic import ValidationError
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from logging_config import setup_logging
-from models import Portfolio, Snapshot
+import delivery_state
+from instrument_registry import resolve_instrument
+from market_context import build_market_context
+from market_session import human_session_label, report_market_date
+from models import MarketContext, Portfolio, Snapshot
 import portfolio_store
+from portfolio_context import EncryptedPortfolioProvider
+from structured_reports import (
+    build_action_brief, build_public_draft, render_action_brief,
+    validate_action_brief, validate_public_draft,
+)
 
 log = logging.getLogger("generate")
 
@@ -52,15 +63,8 @@ TPE = timezone(timedelta(hours=8))
 
 def get_market_date(report_type: str) -> datetime:
     """Return the financial market date for this report type relative to TPE time."""
-    now = datetime.now(tz=TPE)
-    if report_type == "us_close":
-        return now - timedelta(days=1)
-    elif report_type == "us_open":
-        # If us_open runs past midnight TPE (00:00-06:00 next day) due to delays,
-        # its market date belongs to the previous day.
-        if now.hour < 6:
-            return now - timedelta(days=1)
-    return now
+    date_str = report_market_date(report_type)
+    return datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=TPE)
 
 # ── Core ───────────────────────────────────────────────────────────────────────
 
@@ -141,8 +145,20 @@ def generate_report(prompt: str, model: str, report_type: str) -> str:
         return _call_gemini_api(prompt, model, report_type, use_search=True)
     except Exception as exc:
         log.warning("Generate report with Google Search failed. Retrying without search...", extra={"error": str(exc)})
-        # If search failed (e.g. search quota or network issues), retry without search grounding
-        return _call_gemini_api(prompt, model, report_type, use_search=False)
+        if os.getenv("ALLOW_UNGROUNDED_NEWS_FALLBACK", "").lower() == "true":
+            return _call_gemini_api(prompt, model, report_type, use_search=False)
+        return _verified_data_only_report(prompt, report_type)
+
+
+def _verified_data_only_report(prompt: str, report_type: str) -> str:
+    title = REPORT_TITLES[report_type]
+    now_str = datetime.now(tz=TPE).strftime("%Y-%m-%d %H:%M TPE")
+    return (
+        f"# {title} {now_str}\n\n"
+        "⚠️ 新聞搜尋目前不可用。本次不使用未 grounding 的模型記憶生成即時市場敘事。\n\n"
+        "以下僅保留系統已抓取並注入 prompt 的驗證行情資料；缺少新聞脈絡時，不產生事件歸因或交易推論。\n\n"
+        f"{prompt[:6000]}"
+    )
 
 
 def _build_snapshot_block(snapshot: Snapshot) -> str:
@@ -188,6 +204,20 @@ def _build_snapshot_block(snapshot: Snapshot) -> str:
             lines.append(f"- {q.name}: {q.price:.4f} ({q.change_pct:+.2f}%)")
         lines.append("")
 
+    if snapshot.quote_observations:
+        lines += [
+            "**Quote Semantics / Data Quality**",
+            "| Symbol | Session | Market Date | Retrieved | Provider | Quality | Quote ID |",
+            "|--------|---------|-------------|-----------|----------|---------|----------|",
+        ]
+        for key, obs in snapshot.quote_observations.items():
+            lines.append(
+                f"| {key} | {obs.session} | {obs.market_date} | "
+                f"{obs.retrieved_at.strftime('%Y-%m-%d %H:%M %Z')} | "
+                f"{obs.provider} | {obs.quality_status} | {obs.quote_id} |"
+            )
+        lines.append("")
+
     lines += [
         "**重要：上述快照數字即為最終答案，撰寫報告時直接使用，禁止搜尋或修改。**",
         "---",
@@ -196,12 +226,22 @@ def _build_snapshot_block(snapshot: Snapshot) -> str:
     return "\n".join(lines)
 
 
+def load_market_context(report_type: str, snapshot: Snapshot | None = None) -> MarketContext:
+    context_path = Path(__file__).parent.parent / "data" / "market_context.json"
+    if context_path.exists():
+        return MarketContext.model_validate_json(context_path.read_text(encoding="utf-8"))
+    if snapshot is None:
+        snapshot_path = Path(__file__).parent.parent / "data" / "market_snapshot.json"
+        snapshot = Snapshot.model_validate_json(snapshot_path.read_text(encoding="utf-8"))
+    return build_market_context(snapshot, report_type)
+
+
 
 def _build_portfolio_block(portfolio: Portfolio) -> str:
     """Format the portfolio as a prompt preamble."""
     lines = [
         "## ⚠️ 您的目前持股與投資部位 — 供今日交易計畫決策參考",
-        "請務必針對以下持股進行具體的走勢評估，並給出加減碼或出場的操作建議：",
+        "請針對以下持股輸出 monitoring status，不要生成每日買賣指令：",
         "",
     ]
 
@@ -228,7 +268,7 @@ def _build_portfolio_block(portfolio: Portfolio) -> str:
     if portfolio.available_cash:
         lines.append(f"**可用資金 (Available Cash)**: {portfolio.available_cash}")
     else:
-        lines.append("**可用資金 (Available Cash)**: ⚠️ 用戶未設定可用資金。請在日報的交易計畫中，主動詢問用戶目前可操作的金額，例如提示：'如果您能提供目前的可操作金額，我將能為您估算更精確的加減碼股數與部位配比。'")
+        lines.append("**可用資金 (Available Cash)**: ⚠️ 未設定；禁止換算精確買進股數，標示 SIZE_NOT_COMPUTED。")
     lines.append("")
 
     if portfolio.portfolio_notes:
@@ -242,9 +282,13 @@ def _build_portfolio_block(portfolio: Portfolio) -> str:
 
 def check_report_already_generated(report_type: str) -> bool:
     """Return True if a report of report_type for the same market date already exists."""
+    return bool(reports_for_market_date(report_type))
+
+
+def reports_for_market_date(report_type: str) -> list[Path]:
     reports_dir = Path(__file__).parent.parent / "reports"
     if not reports_dir.exists():
-        return False
+        return []
     mdate = get_market_date(report_type)
     date_str = mdate.strftime("%Y%m%d")
     files = list(reports_dir.glob(f"{report_type}_{date_str}_*.md"))
@@ -254,8 +298,7 @@ def check_report_already_generated(report_type: str) -> bool:
         log.info("report already exists for market date — skipping duplicate delivery",
                  extra={"report_type": report_type, "market_date": date_str,
                         "existing": files[0].name})
-        return True
-    return False
+    return sorted(files, reverse=True)
 
 
 def save_report(report: str, report_type: str) -> Path:
@@ -454,21 +497,34 @@ ADVICE_MARKET_FOCUS = {
     "us_open":  "美股持股為主（給出今晚開盤後的操作計畫），台股持股一句話帶過",
     "us_close": "美股持股為主（檢討昨夜表現並給出後續計畫），台股持股一句話帶過",
 }
+ADVICE_STATUSES = ("NO_MATERIAL_CHANGE", "WATCH", "ACTION_REVIEW", "DATA_BLOCKED")
 
 
 def _build_advice_prompt(report: str, portfolio: Portfolio,
                          snapshot: "Snapshot | None", report_type: str) -> str:
     parts = [
-        "你是專業投資組合顧問。根據以下市場報告與使用者實際持股，"
-        "針對每一檔持股給出具體操作建議。",
+        "你是專業投資組合監控助理。根據已驗證市場快照、使用者實際持股與今日市場報告，"
+        "產出短版 PORTFOLIO ACTION BRIEF。",
         "",
         "規則（必須遵守）：",
         f"- 本次重點：{ADVICE_MARKET_FOCUS.get(report_type, '全部持股')}",
-        "- 每檔持股必含：方向（加碼/減碼/續抱/出場）、觸發價位（相對現價的具體數字）、失效條件",
-        "- 有可用資金時，加碼建議換算成可執行股數",
-        "- 禁止「視情況而定」「建議觀望」等無觸發條件的建議",
-        "- 持股若在報告或快照中有價格，以該價格為準；沒有的標「⚠️ 未取得」，禁止估算",
+        "- 只能使用以下狀態：NO_MATERIAL_CHANGE / WATCH / ACTION_REVIEW / DATA_BLOCKED",
+        "- 不要每天硬給買進、賣出、停損；多數持股可歸入 NO_MATERIAL_CHANGE",
+        "- ACTION_REVIEW 僅用於新資訊、財報、估值、組合風險或重大事件已明顯改變時",
+        "- 數字觸發條件必須有 trigger_basis 與 source；不可憑直覺編支撐/壓力/停損",
+        "- available_cash 缺失時，不得換算精確加碼股數，標示 SIZE_NOT_COMPUTED",
+        "- cost_basis 僅供紀錄，不得把帳面損益本身當主要買賣理由",
+        "- 所有持股價格只能引用快照 QuoteObservation；缺失或 DATA_BLOCKED 時不得產生數字建議",
         "- Telegram 格式：禁止 # 標題，用粗體與 📌💡📈📉 emoji 分段，段落間空行，600 字內",
+        "",
+        "輸出結構固定：",
+        "💼 持股 Action Brief",
+        "As of / Market session / Data quality",
+        "1. ACTION QUEUE（只列需要決策的持股）",
+        "2. WATCHLIST（有事件但不需立即動作）",
+        "3. NO MATERIAL CHANGE（ticker 簡表）",
+        "4. UPCOMING PORTFOLIO EVENTS",
+        "5. DATA QUALITY（只有限制時顯示）",
         "",
     ]
     if snapshot:
@@ -536,13 +592,116 @@ def send_advice_email(advice: str, report_type: str) -> None:
         log.error("advice Email send failed", exc_info=True)
 
 
+def send_operational_notice(text: str, report_type: str) -> None:
+    title = REPORT_TITLES[report_type]
+    msg = f"⚠️ {title}｜持股操作建議暫停\n\n{text}"
+    send_telegram(msg, report_type)
+    send_email(msg, report_type)
+
+
+def _portfolio_tickers(raw: dict | None) -> set[str]:
+    if not raw:
+        return set()
+    tickers: set[str] = set()
+    for bucket in ("tw_positions", "us_positions"):
+        for pos in raw.get(bucket, []):
+            ticker = str(pos.get("ticker", "")).upper().strip()
+            if ticker:
+                tickers.add(resolve_instrument(ticker).canonical_symbol)
+    return tickers
+
+
+def validate_portfolio_quotes(raw: dict | None, snapshot: "Snapshot | None") -> tuple[bool, str]:
+    if not portfolio_store.has_positions(raw):
+        return False, "加密持股不存在或沒有持股，略過持股操作建議。"
+    if snapshot is None:
+        return False, "缺少 market_snapshot.json，無法驗證持股行情。"
+    if snapshot.portfolio_quote_coverage is None:
+        return False, "snapshot 未包含 portfolio_quote_coverage，無法確認持股行情覆蓋。"
+    if snapshot.portfolio_quote_coverage < 1.0:
+        return False, f"持股行情覆蓋率 {snapshot.portfolio_quote_coverage:.0%}，低於 100%。"
+    bad: list[str] = []
+    for ticker in _portfolio_tickers(raw):
+        obs = snapshot.quote_observations.get(ticker)
+        if obs is None:
+            bad.append(f"{ticker}: missing quote observation")
+        elif obs.quality_status not in ("VALID",):
+            bad.append(f"{ticker}: {obs.quality_status}")
+    if bad:
+        return False, "持股行情驗證未通過：" + "; ".join(sorted(bad))
+    return True, "OK"
+
+
+def _position_quantities(raw: dict | None) -> dict[str, float]:
+    quantities: dict[str, float] = {}
+    if not raw:
+        return quantities
+    for bucket in ("tw_positions", "us_positions"):
+        for pos in raw.get(bucket, []):
+            ticker = str(pos.get("ticker", "")).upper().strip()
+            if ticker:
+                key = resolve_instrument(ticker).canonical_symbol
+                quantities[key] = quantities.get(key, 0.0) + float(pos.get("shares", 0) or 0)
+    return quantities
+
+
+def validate_private_advice_text(advice: str, raw: dict | None,
+                                 snapshot: "Snapshot | None") -> tuple[bool, str]:
+    if not any(status in advice for status in ADVICE_STATUSES):
+        return False, "private advice 未包含 PortfolioMonitoringStatus，可能仍是舊式任意交易建議。"
+
+    cash_missing = not raw or raw.get("available_cash") in (None, "", "未設定")
+    if cash_missing and re.search(r"(加碼|買進)\s*[0-9,.]+(?:\s*)(股|shares?)", advice, flags=re.I):
+        return False, "available_cash 缺失，但 private advice 仍產生精確買進股數。"
+
+    quantities = _position_quantities(raw)
+    for ticker, owned in quantities.items():
+        pattern = rf"{re.escape(ticker)}[\s\S]{{0,80}}(?:賣出|減碼)[^\d]{{0,20}}([0-9,.]+)\s*(?:股|shares?)"
+        for match in re.finditer(pattern, advice, flags=re.I):
+            proposed = float(match.group(1).replace(",", ""))
+            if proposed > owned:
+                return False, f"{ticker} 建議賣出 {proposed:g} 股，超過持股 {owned:g} 股。"
+
+    if snapshot:
+        missing_refs = []
+        for ticker in quantities:
+            if ticker not in snapshot.quote_observations:
+                missing_refs.append(ticker)
+        if missing_refs:
+            return False, "private advice 引用缺少 QuoteObservation 的持股：" + ", ".join(sorted(missing_refs))
+
+    return True, "OK"
+
+
+def write_advice_audit(report_type: str, status: str, reason: str,
+                       snapshot: "Snapshot | None") -> None:
+    data_dir = Path(__file__).parent.parent / "data"
+    data_dir.mkdir(exist_ok=True)
+    payload = {
+        "report_type": report_type,
+        "status": status,
+        "reason": reason,
+        "generated_at": datetime.now(tz=TPE).isoformat(),
+        "portfolio_quote_coverage": snapshot.portfolio_quote_coverage if snapshot else None,
+        "data_quality": snapshot.data_quality if snapshot else {},
+    }
+    (data_dir / "portfolio_advice_audit.json").write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
 def run_portfolio_advice(report: str, report_type: str,
                          snapshot: "Snapshot | None", model: str) -> None:
     """Generate position-aware advice and deliver privately. The advice text is
     never written to reports/ nor committed — the repo is public."""
     raw = portfolio_store.load_portfolio()
-    if not portfolio_store.has_positions(raw):
-        log.info("no portfolio positions — advice stage skipped")
+    ok, reason = validate_portfolio_quotes(raw, snapshot)
+    if not ok:
+        log.warning("portfolio advice blocked", extra={"reason": reason})
+        write_advice_audit(report_type, "BLOCKED", reason, snapshot)
+        if portfolio_store.ENC_PATH.exists() or portfolio_store.has_positions(raw):
+            send_operational_notice(f"{reason}\n\n已停止產生持股建議，避免用錯誤或缺漏價格下判斷。", report_type)
         return
     try:
         portfolio = Portfolio.model_validate(raw)
@@ -550,9 +709,27 @@ def run_portfolio_advice(report: str, report_type: str,
         log.error("portfolio data invalid — advice stage skipped", exc_info=True)
         return
 
-    prompt = _build_advice_prompt(report, portfolio, snapshot, report_type)
-    log.info("generating portfolio advice", extra={"report_type": report_type})
-    advice = generate_report(prompt, model, report_type)
+    del portfolio, model
+    context = load_market_context(report_type, snapshot)
+    provider = EncryptedPortfolioProvider()
+    portfolio_context = provider.load()
+    brief = build_action_brief(context, portfolio_context)
+    ok, reason = validate_action_brief(brief, context, portfolio_context)
+    if not ok:
+        log.warning("private advice validation failed", extra={"reason": reason})
+        write_advice_audit(report_type, "BLOCKED", reason, snapshot)
+        send_operational_notice(f"{reason}\n\n已停止傳送持股建議。", report_type)
+        return
+    write_advice_audit(report_type, "VALIDATED", reason, snapshot)
+    data_dir = Path(__file__).parent.parent / "data"
+    (data_dir / "portfolio_action_brief.json").write_text(brief.model_dump_json(indent=2), encoding="utf-8")
+    advice = render_action_brief(brief)
+    ok, reason = validate_private_advice_text(advice, raw, snapshot)
+    if not ok:
+        log.warning("rendered private advice validation failed", extra={"reason": reason})
+        write_advice_audit(report_type, "BLOCKED", reason, snapshot)
+        send_operational_notice(f"{reason}\n\n已停止傳送持股建議。", report_type)
+        return
     send_advice_telegram(advice, report_type)
     send_advice_email(advice, report_type)
 
@@ -563,6 +740,10 @@ def main() -> None:
     setup_logging()
     parser = argparse.ArgumentParser(description="Institutional market report generator")
     parser.add_argument("report_type", choices=REPORT_TYPES, help="Report type to generate")
+    parser.add_argument("--generate-only", action="store_true",
+                        help="Generate and save report without delivery")
+    parser.add_argument("--deliver-existing", action="store_true",
+                        help="Deliver latest saved report after validation")
     args = parser.parse_args()
 
     if not os.getenv("GEMINI_API_KEY"):
@@ -572,8 +753,62 @@ def main() -> None:
     model = (os.getenv("REPORT_MODEL") or "gemini-2.0-flash").strip()
     report_type: str = args.report_type
 
+    if args.generate_only and args.deliver_existing:
+        log.error("--generate-only and --deliver-existing are mutually exclusive")
+        sys.exit(2)
+
+    if args.deliver_existing:
+        reports_dir = Path(__file__).parent.parent / "reports"
+        files = sorted(reports_dir.glob(f"{report_type}_*.md"), reverse=True)
+        if not files:
+            log.error("no saved report to deliver", extra={"report_type": report_type})
+            sys.exit(1)
+        same_day_reports = reports_for_market_date(report_type)
+        if len(same_day_reports) > 1:
+            duplicate_path = same_day_reports[0]
+            duplicate_path.unlink(missing_ok=True)
+            log.info("same-day report already existed before this run — skipping duplicate delivery",
+                     extra={"report_type": report_type, "removed_duplicate": duplicate_path.name,
+                            "existing": same_day_reports[-1].name})
+            return
+        report = files[0].read_text(encoding="utf-8")
+        snapshot = None
+        snapshot_path = Path(__file__).parent.parent / "data" / "market_snapshot.json"
+        try:
+            snapshot = Snapshot.model_validate_json(snapshot_path.read_text(encoding="utf-8"))
+        except Exception:
+            log.warning("snapshot unavailable during delivery", exc_info=True)
+        idempotency_key = f"{report_type}:{get_market_date(report_type).strftime('%Y%m%d')}"
+        if delivery_state.already_delivered(idempotency_key):
+            log.info("delivery already completed for idempotency key", extra={"key": idempotency_key})
+            return
+        delivery_state.mark_state(idempotency_key, "VALIDATING")
+        try:
+            context = load_market_context(report_type, snapshot)
+            draft_path = Path(__file__).parent.parent / "data" / "market_report_draft.json"
+            if draft_path.exists():
+                from models import MarketReportDraft
+                draft = MarketReportDraft.model_validate_json(draft_path.read_text(encoding="utf-8"))
+                ok, reason = validate_public_draft(draft, context)
+                if not ok:
+                    delivery_state.mark_state(idempotency_key, "BLOCKED")
+                    log.error("public draft validation failed before delivery", extra={"reason": reason})
+                    sys.exit(1)
+        except Exception:
+            delivery_state.mark_state(idempotency_key, "BLOCKED")
+            log.error("market context unavailable before delivery", exc_info=True)
+            sys.exit(1)
+        delivery_state.mark_state(idempotency_key, "VALIDATED")
+        delivery_state.mark_state(idempotency_key, "DELIVERING")
+        send_telegram(report, report_type)
+        send_email(report, report_type)
+        run_portfolio_advice(report, report_type, snapshot, model)
+        delivery_state.mark_state(idempotency_key, "DELIVERED")
+        log.info("delivered validated report", extra={"report_type": report_type, "path": str(files[0])})
+        return
+
     # Prevent duplicate runs for the same market date
-    if check_report_already_generated(report_type):
+    if not args.generate_only and check_report_already_generated(report_type):
         sys.exit(0)
 
     prompt = load_prompt(report_type)
@@ -583,10 +818,12 @@ def main() -> None:
     # separately below and delivered via Telegram/Email only.
 
     snapshot: Snapshot | None = None
+    context: MarketContext | None = None
     snapshot_path = Path(__file__).parent.parent / "data" / "market_snapshot.json"
     try:
         snapshot = Snapshot.model_validate_json(
             snapshot_path.read_text(encoding="utf-8"))
+        context = load_market_context(report_type, snapshot)
         prompt = _build_snapshot_block(snapshot) + prompt
         log.info("snapshot injected", extra={
             "report_type": report_type,
@@ -595,18 +832,37 @@ def main() -> None:
             "us": len(snapshot.us_markets),
             "fx": len(snapshot.forex)})
     except FileNotFoundError:
-        log.warning("no snapshot found — pure search mode",
+        log.warning("no snapshot found — blocking report generation",
                     extra={"report_type": report_type})
     except ValidationError:
-        log.error("snapshot invalid — pure search mode", exc_info=True)
+        log.error("snapshot invalid — blocking report generation", exc_info=True)
 
     max_tokens = MAX_OUTPUT_TOKENS.get(report_type, 16000)
     log.info("calling Gemini API", extra={
         "report_type": report_type, "model": model, "max_tokens": max_tokens})
     report = generate_report(prompt, model, report_type)
+    if context is None:
+        log.error("MarketContext missing — blocking report generation")
+        sys.exit(1)
+
+    if "新聞搜尋目前不可用" in report:
+        context.degraded_mode = True
+    session_note = f"\n\nMarket session: {human_session_label(report_type, context.market_session)}"
+    draft = build_public_draft(context, report + session_note)
+    ok, reason = validate_public_draft(draft, context)
+    if not ok:
+        log.error("public draft validation failed", extra={"reason": reason})
+        sys.exit(1)
+    data_dir = Path(__file__).parent.parent / "data"
+    (data_dir / "market_report_draft.json").write_text(draft.model_dump_json(indent=2), encoding="utf-8")
+    report = draft.rendered_markdown
 
     filepath = save_report(report, report_type)
     log.info("report saved", extra={"path": str(filepath)})
+
+    if args.generate_only:
+        log.info("generate-only mode: delivery deferred until validation passes")
+        return
 
     send_telegram(report, report_type)
     send_email(report, report_type)

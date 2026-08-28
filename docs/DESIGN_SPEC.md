@@ -1,3 +1,138 @@
+# market-report-bot — V2 Design Specification
+
+**Version:** 2.0
+**Date:** 2026-08-28
+**Scope:** `scripts/`, `prompts/`, `.github/workflows/`
+
+## V2 Architecture
+
+market-report-bot is a monitoring and market-context system. It is not the
+Personal Investment OS, not an Investment Committee, and never performs
+automatic trading.
+
+Final data flow:
+
+```
+FETCH QUOTES
+→ VALIDATE RAW QUOTES
+→ BUILD MarketContext
+→ GENERATE MarketReportDraft
+→ VALIDATE PUBLIC DRAFT
+→ RENDER PUBLIC REPORT
+→ DELIVER PUBLIC REPORT
+→ BUILD PortfolioActionBrief
+→ VALIDATE PRIVATE BRIEF
+→ DELIVER PRIVATE BRIEF OR BLOCK WITH NOTICE
+→ ARCHIVE NON-SENSITIVE METADATA
+```
+
+Quotes are deterministic and session-aware. Google Search is only for narrative
+and event context. LLM output interprets already-validated context; it is not a
+price authority. Validation happens before delivery.
+
+## Quote Semantics
+
+Each quote that can appear in a report is represented as `QuoteObservation`:
+
+- `instrument_id` / `canonical_symbol` bind the quote to the instrument registry.
+- `session` is one of `PREMARKET`, `REGULAR`, `AFTER_HOURS`, `PREVIOUS_CLOSE`,
+  `CLOSED_REFERENCE`.
+- `provider_timestamp`, `retrieved_at`, `market_date`, `provider`, `quote_type`,
+  and `quote_id` preserve provenance.
+- `quality_status` is one of `VALID`, `STALE`, `SUSPECT`, `CONFLICTING`,
+  `UNAVAILABLE`.
+
+US equities and ETFs first use Yahoo chart minute bars with
+`includePrePost=true` for timestamped extended-hours observations. Daily-close
+providers remain fallback/reference only. Previous close is never relabeled as
+premarket.
+
+## Instrument Registry
+
+`scripts/instrument_registry.py` is the deterministic ticker identity source.
+The quote universe is:
+
+```
+CORE_MARKET_UNIVERSE ∪ CURRENT_PORTFOLIO_INSTRUMENTS
+```
+
+`GOOG` and `GOOGL` are separate instruments sharing Alphabet as
+`economic_entity`. `DRAM` is Roundhill Memory ETF, not an invalid industry
+label. Taiwan symbols store provider symbols such as `2330.TW`; numeric ticker
+fallback is compatibility only, not authoritative design.
+
+## MarketContext
+
+`data/market_context.json` is built before generation and contains:
+
+- `run_id`, `report_type`, `market_date`, `generated_at`, `market_session`
+- `quotes`, `macro_observations`
+- `market_quote_coverage`, `portfolio_quote_coverage`
+- `provider_health`, `data_quality`, `event_facts`
+- `material_changes`, `missing_required_items`, `degraded_mode`
+
+Reports consume this context. Missing or invalid context blocks delivery.
+
+## Structured Reports
+
+Public reports are represented as `MarketReportDraft` before rendering. Quote
+numbers appear as `PriceReference` objects tied to `QuoteObservation.quote_id`.
+Quote validation compares `quote_id`, instrument, session, and deterministic
+rounding tolerance (`0.005` absolute), not a generic 5% range.
+
+`ACTION_TRIGGER`, `TECHNICAL_LEVEL`, and `VALUATION` are distinct from quote
+references and are not compared as current prices.
+
+## Private Action Brief
+
+Private portfolio output is `PortfolioActionBrief`, with allowed statuses:
+
+- `NO_MATERIAL_CHANGE`
+- `WATCH`
+- `ACTION_REVIEW`
+- `DATA_BLOCKED`
+
+The brief is monitoring output. It does not generate daily BUY/SELL/ADD/TRIM
+instructions, arbitrary 50% cuts, or exact share quantities. Default sizing is
+`SIZE_NOT_COMPUTED`. Triggers must include basis, source IDs, generator, and
+validity. The small V1 trigger engine only creates deterministic monitoring
+evidence, not trading commands.
+
+## Portfolio Boundary
+
+`PortfolioContextProvider` defines the future integration boundary.
+`EncryptedPortfolioProvider` preserves compatibility with `portfolio.json.enc`
+and `PORTFOLIO_KEY`. `PIOSPortfolioProvider` is intentionally a stub; PIOS will
+remain the future capital-allocation authority.
+
+Portfolio plaintext remains ignored and must never be committed. Structured
+private artifacts are runner-only / GitHub artifact data and are ignored by Git.
+
+## Delivery Safety
+
+Workflows are ordered physically:
+
+```
+Generate --generate-only
+→ Validate report prices
+→ Deliver validated report
+```
+
+Critical validation is blocking. Public report validation and private brief
+validation are independent: a valid public report may send while a private
+Action Brief blocks with a short operational notice.
+
+US open runs at both `13:00 UTC` and `14:00 UTC`; a runtime New York guard keeps
+only the correct 09:00 ET run. Delivery state uses an idempotency key such as
+`us_open:YYYYMMDD`.
+
+## Historical Note
+
+The legacy v1 refactoring plan below is retained only as history. V2 supersedes
+its old pure-search fallback and LLM price-extraction tolerance design.
+
+---
+
 # market-report-bot — Design Specification & Refactoring Plan
 
 **Version:** 1.0

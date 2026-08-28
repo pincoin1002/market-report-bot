@@ -7,14 +7,17 @@ via plain requests for everything else — survives yfinance library breakage).
 """
 
 import logging
-from datetime import datetime
+import math
+from datetime import datetime, timezone
 from typing import Protocol
 
 import requests
 import yfinance as yf
 from tenacity import retry, stop_after_attempt, wait_exponential_jitter
 
-from models import Quote
+from market_session import NY, classify_us_session
+from models import InstrumentSpec, Quote, QuoteObservation, Session
+from quote_quality import validate_observation
 
 log = logging.getLogger("providers")
 
@@ -158,6 +161,105 @@ class YahooChartProvider:
         return out
 
 
+class YahooExtendedHoursProvider:
+    """Timestamped Yahoo chart path for US equities/ETFs.
+
+    It uses minute bars with includePrePost=true. If no extended-hours trade is
+    available, callers should fall back to the daily-close chain and label that
+    result PREVIOUS_CLOSE/CLOSED_REFERENCE.
+    """
+    name = "yahoo_chart_extended"
+    URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+
+    def _one(self, spec: InstrumentSpec, expected_session: Session) -> QuoteObservation | None:
+        symbol = spec.provider_symbols["yfinance"]
+        resp = requests.get(self.URL.format(symbol=symbol),
+                            params={"range": "5d", "interval": "1m", "includePrePost": "true"},
+                            headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
+        resp.raise_for_status()
+        result = resp.json()["chart"]["result"][0]
+        meta = result.get("meta", {})
+        currency = meta.get("currency") or spec.currency
+        previous_close = float(meta.get("chartPreviousClose") or meta.get("previousClose") or 0)
+        quote = result["indicators"]["quote"][0]
+        timestamps = result.get("timestamp") or []
+        closes = quote.get("close") or []
+        obs_time = None
+        price = None
+        for ts, close in reversed(list(zip(timestamps, closes))):
+            if close is None:
+                continue
+            value = float(close)
+            if math.isfinite(value) and value > 0:
+                obs_time = datetime.fromtimestamp(int(ts), tz=timezone.utc).astimezone(NY)
+                price = value
+                break
+        if obs_time is None or price is None or previous_close <= 0:
+            return None
+        actual_session = classify_us_session(obs_time, extended_quote_available=True)
+        if actual_session not in ("PREMARKET", "REGULAR", "AFTER_HOURS"):
+            return None
+        change_pct = (price - previous_close) / previous_close * 100
+        quote_id = f"{spec.canonical_symbol}:{obs_time.strftime('%Y-%m-%dT%H:%M:%S%z')}:{actual_session}:{self.name}"
+        obs = QuoteObservation(
+            quote_id=quote_id,
+            instrument_id=spec.canonical_symbol,
+            canonical_symbol=spec.canonical_symbol,
+            price=round(price, spec.price_precision),
+            currency=currency,
+            session=actual_session,
+            market_date=obs_time.strftime("%Y-%m-%d"),
+            observed_at=obs_time,
+            provider_timestamp=obs_time,
+            retrieved_at=datetime.now(tz=NY),
+            provider=self.name,
+            quote_type="TRADE",
+            is_delayed=bool(meta.get("exchangeTimezoneName")),
+            quality_status="VALID",
+            previous_regular_close=round(previous_close, spec.price_precision),
+            change_pct=round(change_pct, 2),
+        )
+        return validate_observation(obs, spec, expected_session=expected_session)
+
+    def fetch_many(self, specs: list[InstrumentSpec], expected_session: Session) -> dict[str, QuoteObservation]:
+        out: dict[str, QuoteObservation] = {}
+        for spec in specs:
+            if spec.market != "US" or spec.asset_type not in ("EQUITY", "ETF"):
+                continue
+            try:
+                obs = self._one(spec, expected_session)
+                if obs:
+                    out[spec.canonical_symbol] = obs
+            except Exception:
+                log.warning("extended-hours fetch failed", extra={"symbol": spec.canonical_symbol})
+        return out
+
+
+def observation_from_daily_quote(spec: InstrumentSpec, q: Quote, provider: str,
+                                 session: Session, retrieved_at: datetime) -> QuoteObservation:
+    observed_at = datetime.fromisoformat(f"{q.data_date[:10].replace('/', '-')}T00:00:00+00:00")
+    quote_id = f"{spec.canonical_symbol}:{q.data_date}:{session}:{provider}"
+    obs = QuoteObservation(
+        quote_id=quote_id,
+        instrument_id=spec.canonical_symbol,
+        canonical_symbol=spec.canonical_symbol,
+        price=round(q.price, spec.price_precision),
+        currency=spec.currency,
+        session=session,
+        market_date=q.data_date,
+        observed_at=observed_at,
+        provider_timestamp=None,
+        retrieved_at=retrieved_at,
+        provider=provider,
+        quote_type="OFFICIAL_CLOSE" if session in ("REGULAR", "PREVIOUS_CLOSE", "CLOSED_REFERENCE") else "REFERENCE",
+        is_delayed=True,
+        quality_status="VALID",
+        previous_regular_close=round(q.prev_close, spec.price_precision),
+        change_pct=q.change_pct,
+    )
+    return validate_observation(obs, spec, expected_session=session)
+
+
 def fetch_with_failover(symbols: list[str]) -> tuple[dict[str, Quote], dict[str, str]]:
     """Return ({symbol: Quote}, {symbol: provider_name}), trying each tier for
     whatever the previous tiers missed."""
@@ -179,3 +281,34 @@ def fetch_with_failover(symbols: list[str]) -> tuple[dict[str, Quote], dict[str,
         log.info("provider tier done", extra={
             "provider": provider.name, "hit": len(got), "miss": len(remaining)})
     return quotes, sources
+
+
+def fetch_session_observations(specs: list[InstrumentSpec], expected_session: Session
+                               ) -> tuple[dict[str, QuoteObservation], dict[str, str]]:
+    observations: dict[str, QuoteObservation] = {}
+    sources: dict[str, str] = {}
+    if expected_session in ("PREMARKET", "REGULAR", "AFTER_HOURS"):
+        extended = YahooExtendedHoursProvider().fetch_many(specs, expected_session)
+        for symbol, obs in extended.items():
+            observations[symbol] = obs
+            sources[specs_by_symbol(specs)[symbol].provider_symbols["yfinance"]] = obs.provider
+
+    remaining_specs = [s for s in specs if s.canonical_symbol not in observations]
+    provider_symbols = [s.provider_symbols["yfinance"] for s in remaining_specs]
+    daily_quotes, daily_sources = fetch_with_failover(provider_symbols)
+    provider_to_spec = {s.provider_symbols["yfinance"]: s for s in remaining_specs}
+    fallback_session: Session = "PREVIOUS_CLOSE" if expected_session in ("PREMARKET", "CLOSED_REFERENCE") else expected_session
+    if expected_session == "AFTER_HOURS":
+        fallback_session = "PREVIOUS_CLOSE"
+    retrieved_at = datetime.now(tz=timezone.utc)
+    for provider_symbol, q in daily_quotes.items():
+        spec = provider_to_spec[provider_symbol]
+        provider = daily_sources.get(provider_symbol, "unknown")
+        observations[spec.canonical_symbol] = observation_from_daily_quote(
+            spec, q, provider, fallback_session, retrieved_at)
+        sources[provider_symbol] = provider
+    return observations, sources
+
+
+def specs_by_symbol(specs: list[InstrumentSpec]) -> dict[str, InstrumentSpec]:
+    return {spec.canonical_symbol: spec for spec in specs}

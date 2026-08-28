@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Fetch verified market prices via yfinance → data/market_snapshot.json.
+"""Fetch verified market prices → data/market_snapshot.json / market_context.json.
 
 Run before generate_report.py so the report has anchored, verified prices.
-If this script fails, generate_report.py falls back to pure search mode.
+If this script fails, the workflow blocks delivery rather than guessing prices.
 
 Exit codes:
   0 = snapshot saved successfully
@@ -16,6 +16,7 @@ import os
 import sys
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import holidays
 from google import genai
@@ -23,95 +24,21 @@ from google.genai import types
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from logging_config import setup_logging
+import portfolio_store
+from instrument_registry import build_universe, quote_symbol
+from market_context import build_market_context
+from market_session import classify_tw_session, classify_us_session
 from models import NamedQuote, Snapshot
-from providers import fetch_with_failover
+from providers import fetch_session_observations
 
 log = logging.getLogger("fetch")
 
 TPE = timezone(timedelta(hours=8))
+NY = ZoneInfo("America/New_York")
 
 # Refuse to write a snapshot anchoring the LLM to badly incomplete data;
-# generate_report.py falls back to pure-search mode when no snapshot exists.
+# Missing/invalid snapshots block delivery; prices are never guessed via search.
 MIN_COVERAGE = 0.70
-
-# ── Ticker configuration ───────────────────────────────────────────────────────
-
-TW_STOCKS: dict[str, str] = {
-    "2330.TW": "台積電",
-    "2317.TW": "鴻海",
-    "2454.TW": "聯發科",
-    "2308.TW": "台達電",
-    "2382.TW": "廣達",
-    "2327.TW": "國巨",
-    "2303.TW": "聯電",
-    "3711.TW": "日月光投控",
-    "2356.TW": "英業達",
-    "3231.TW": "緯創",
-    "2383.TW": "台光電",
-    "4958.TW": "臻鼎-KY",
-    "2368.TW": "金像電",
-    "3017.TW": "奇鋐",
-    "3324.TWO": "雙鴻",
-    "2421.TW": "建準",
-    "2301.TW": "光寶科",
-}
-
-US_MARKETS: dict[str, tuple[str, str, str]] = {
-    # key: (yfinance_symbol, display_name, currency_hint)
-    "SPX":  ("^GSPC",    "S&P 500",     ""),
-    "NDX":  ("^NDX",     "NASDAQ 100",  ""),
-    "DJI":  ("^DJI",     "Dow Jones",   ""),
-    "RUT":  ("^RUT",     "Russell 2000", ""),
-    "SOX":  ("^SOX",     "費城半導體 SOX", ""),
-    "VIX":  ("^VIX",     "VIX",         ""),
-    "TNX":  ("^TNX",     "US10Y Yield", "percent"),
-    "US2Y": ("2YY=F", "US2Y Yield", "percent"),
-    "DXY":  ("DX-Y.NYB", "美元指數",    ""),
-    "BTC":  ("BTC-USD",  "Bitcoin",     "USD"),
-    "TSM":  ("TSM",      "台積電 ADR",  "USD"),
-    "NVDA": ("NVDA",     "NVIDIA",      "USD"),
-    "TAIEX": ("^TWII",    "加權指數",     ""),
-    "GC":   ("GC=F",     "黃金 GC",     "USD"),
-    "CL":   ("CL=F",     "原油 WTI",    "USD"),
-    "AAPL":  ("AAPL",     "Apple",       "USD"),
-    "MSFT":  ("MSFT",     "Microsoft",   "USD"),
-    "META":  ("META",     "Meta",        "USD"),
-    "GOOGL": ("GOOGL",    "Alphabet",    "USD"),
-    "AMZN":  ("AMZN",     "Amazon",      "USD"),
-    "TSLA":  ("TSLA",     "Tesla",       "USD"),
-    "AVGO":  ("AVGO",     "Broadcom",    "USD"),
-    "AMD":   ("AMD",      "AMD",         "USD"),
-    "MRVL":  ("MRVL",     "Marvell",     "USD"),
-    "MU":    ("MU",       "Micron",      "USD"),
-    "ARM":   ("ARM",      "ARM",         "USD"),
-    "ASML":  ("ASML",     "ASML",        "USD"),
-    "SMCI":  ("SMCI",     "Supermicro",  "USD"),
-    "DELL":  ("DELL",     "Dell",        "USD"),
-    "HPE":   ("HPE",      "HPE",         "USD"),
-    "ANET":  ("ANET",     "Arista",      "USD"),
-    "VRT":   ("VRT",      "Vertiv",      "USD"),
-    "COHR":  ("COHR",     "Coherent",    "USD"),
-    "CEG":   ("CEG",      "Constellation Energy", "USD"),
-    "VST":   ("VST",      "Vistra",      "USD"),
-    "ETN":   ("ETN",      "Eaton",       "USD"),
-    "GEV":   ("GEV",      "GE Vernova",  "USD"),
-    "PWR":   ("PWR",      "Quanta Services", "USD"),
-    "OKLO":  ("OKLO",     "Oklo",        "USD"),
-    "SMR":   ("SMR",      "NuScale Power", "USD"),
-    "APLD":  ("APLD",     "Applied Digital", "USD"),
-    "IREN":  ("IREN",     "Iris Energy", "USD"),
-    "FLNC":  ("FLNC",     "Fluence Energy", "USD"),
-    "SPY":   ("SPY",      "SPY ETF",     "USD"),
-    "QQQ":   ("QQQ",      "QQQ ETF",     "USD"),
-    "SOXX":  ("SOXX",     "SOXX ETF",    "USD"),
-    "SMH":   ("SMH",      "SMH ETF",     "USD"),
-    "XLK":   ("XLK",      "XLK ETF",     "USD"),
-    "ARKK":  ("ARKK",     "ARKK ETF",    "USD"),
-}
-
-FOREX: dict[str, tuple[str, str, str]] = {
-    "USDTWD": ("TWD=X", "USD/TWD", "TWD"),
-}
 
 # ── Holiday / weekend helpers ──────────────────────────────────────────────────
 
@@ -194,11 +121,10 @@ def is_tw_market_closed(report_type: str) -> bool:
 
 
 def is_us_market_closed(report_type: str) -> bool:
-    """Return True if the US market is closed today (NYSE calendar, EST)."""
+    """Return True if the US market is closed today (NYSE calendar, New York time)."""
     if report_type in ("tw_open", "tw_close"):
         return False  # TW-only reports skip US holiday check
-    ET = timezone(timedelta(hours=-5))  # conservative: EST year-round
-    today = datetime.now(tz=ET)
+    today = datetime.now(tz=NY)
     if today.weekday() >= 5:
         log.info("US market closed (weekend)", extra={"date": today.strftime("%Y-%m-%d")})
         return True
@@ -225,36 +151,80 @@ def _set_github_output(key: str, value: str) -> None:
             f.write(f"{key}={value}\n")
 
 
+def _should_skip_us_open_duplicate(report_type: str) -> bool:
+    """When us_open is scheduled at both 13:00 and 14:00 UTC, only the run that
+    lands in the 09:00 New York hour should continue. Manual/dispatch runs are
+    always allowed."""
+    if report_type != "us_open" or os.getenv("GITHUB_EVENT_NAME") != "schedule":
+        return False
+    now_ny = datetime.now(tz=NY)
+    if now_ny.hour == 9:
+        return False
+    log.info("US open schedule guard skipped duplicate/non-target run",
+             extra={"ny_time": now_ny.strftime("%Y-%m-%d %H:%M:%S %Z")})
+    _set_github_output("market_closed", "false")
+    _set_github_output("duplicate_skipped", "true")
+    return True
+
+
 # ── Core fetch ─────────────────────────────────────────────────────────────────
 
 def build_snapshot(report_type: str) -> Snapshot:
-    # symbol → (bucket, snapshot key, display name, currency)
-    symbol_meta: dict[str, tuple[str, str, str, str]] = {}
-    for sym, name in TW_STOCKS.items():
-        symbol_meta[sym] = ("tw_stocks", sym.split(".")[0], name, "TWD")
-    for key, (sym, name, cur) in US_MARKETS.items():
-        symbol_meta[sym] = ("us_markets", key, name, cur)
-    for key, (sym, name, cur) in FOREX.items():
-        symbol_meta[sym] = ("forex", key, name, cur)
-
-    quotes, sources = fetch_with_failover(list(symbol_meta))
+    portfolio = portfolio_store.load_portfolio()
+    universe = build_universe(portfolio)
+    expected_session = _expected_session(report_type)
+    observations, sources = fetch_session_observations(list(universe.values()), expected_session)
+    retrieved_at = datetime.now(tz=TPE)
 
     snapshot = Snapshot(
-        generated_at=datetime.now(tz=TPE),
+        generated_at=retrieved_at,
         report_type=report_type,
-        fetch_coverage=round(len(quotes) / len(symbol_meta), 3),
+        fetch_coverage=round(len(observations) / len(universe), 3),
+        market_context_coverage=round(len(observations) / len(universe), 3),
         sources=sources,
     )
-    for sym, q in quotes.items():
-        bucket, key, name, cur = symbol_meta[sym]
+    portfolio_symbols = [key for key, spec in universe.items() if spec.is_portfolio_critical]
+    portfolio_hits = 0
+    for key, obs in observations.items():
+        spec = universe[key]
+        if spec.market == "TW":
+            bucket = "tw_stocks"
+        elif key == "USDTWD":
+            bucket = "forex"
+        else:
+            bucket = "us_markets"
+        if key in portfolio_symbols:
+            portfolio_hits += 1
         getattr(snapshot, bucket)[key] = NamedQuote(
-            name=name, currency=cur, symbol=sym, **q.model_dump())
+            name=spec.display_name,
+            currency=spec.currency,
+            symbol=quote_symbol(spec),
+            price=obs.price,
+            prev_close=obs.previous_regular_close,
+            change_pct=obs.change_pct,
+            data_date=obs.market_date,
+        )
+        snapshot.quote_observations[key] = obs
 
-    missing = [s for s in symbol_meta if s not in quotes]
+    if portfolio_symbols:
+        snapshot.portfolio_quote_coverage = round(portfolio_hits / len(portfolio_symbols), 3)
+    missing = [key for key in universe if key not in observations]
     if missing:
         log.warning("symbols missing after all provider tiers",
                     extra={"missing": missing})
+        snapshot.missing_required_items.extend(sorted(missing))
+    for key, obs in snapshot.quote_observations.items():
+        if obs.quality_status != "VALID":
+            snapshot.data_quality[key] = obs.quality_status
     return snapshot
+
+
+def _expected_session(report_type: str) -> str:
+    if report_type in ("us_close", "tw_close"):
+        return "REGULAR"
+    if report_type.startswith("us_"):
+        return classify_us_session(extended_quote_available=True)
+    return classify_tw_session(report_type=report_type)
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────
@@ -269,6 +239,10 @@ def main() -> None:
     data_dir = Path(__file__).parent.parent / "data"
     data_dir.mkdir(exist_ok=True)
 
+    if _should_skip_us_open_duplicate(report_type):
+        log.info("EXIT 4 — US open duplicate schedule skipped")
+        sys.exit(4)
+
     if is_tw_market_closed(report_type):
         _set_github_output("market_closed", "true")
         log.info("EXIT 2 — TW market closed, report skipped")
@@ -280,6 +254,7 @@ def main() -> None:
         sys.exit(3)
 
     _set_github_output("market_closed", "false")
+    _set_github_output("duplicate_skipped", "false")
 
     log.info("building snapshot", extra={"report_type": report_type})
     snapshot = build_snapshot(report_type)
@@ -287,10 +262,17 @@ def main() -> None:
     if snapshot.fetch_coverage < MIN_COVERAGE:
         log.error("fetch coverage below threshold — refusing to write snapshot",
                   extra={"coverage": snapshot.fetch_coverage, "min": MIN_COVERAGE})
-        sys.exit(1)  # workflow fails; report can rerun or go pure-search mode
+        sys.exit(1)  # workflow fails; report can rerun after providers recover
+
+    if snapshot.portfolio_quote_coverage is not None and snapshot.portfolio_quote_coverage < 1.0:
+        log.warning("portfolio quote coverage below 100% — public report may proceed; private advice will block",
+                    extra={"portfolio_quote_coverage": snapshot.portfolio_quote_coverage,
+                           "missing": snapshot.missing_required_items})
 
     snapshot_path = data_dir / "market_snapshot.json"
     snapshot_path.write_text(snapshot.model_dump_json(indent=2), encoding="utf-8")
+    context = build_market_context(snapshot, report_type)
+    (data_dir / "market_context.json").write_text(context.model_dump_json(indent=2), encoding="utf-8")
     log.info("snapshot saved", extra={
         "path": str(snapshot_path),
         "coverage": snapshot.fetch_coverage,

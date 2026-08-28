@@ -9,7 +9,7 @@
 | 台股開盤戰報 | 07:50 | 週一～週五 | `tw-open.yml` |
 | 美股收盤日報 | 08:30 | 週二～週六 | `us-close.yml` |
 | 台股收盤日報 | 14:30 | 週一～週五 | `tw-close.yml` |
-| 美股開盤日報 | 21:00 | 週一～週五 | `us-open.yml` |
+| 美股開盤日報 | 21:00 / 22:00（依美東夏冬令自動擇一） | 週一～週五 | `us-open.yml` |
 
 ---
 
@@ -151,38 +151,30 @@ git push -u origin main
 | 台股開盤 | `50 23 * * 0-4` | 07:50（週一～五） | UTC 前一天 23:50 |
 | 美股收盤 | `30 0 * * 2-6` | 08:30（週二～六） | UTC 00:30 |
 | 台股收盤 | `30 6 * * 1-5` | 14:30（週一～五） | UTC 06:30 |
-| 美股開盤 | `0 13 * * 1-5` | 21:00（週一～五） | 夏令 UTC 13:00 |
+| 美股開盤 | `0 13 * * 1-5` + `0 14 * * 1-5` | 21:00 / 22:00（週一～五） | runtime guard 只保留正確 09:00 ET |
 
 ---
 
-### Step 8 — 夏令 / 冬令時間調整
+### Step 8 — 夏令 / 冬令時間
 
-美股開盤日報（21:00 台北時間 = 美東盤前 1.5 小時）需要跟著美國夏令/冬令時間調整：
+美股開盤日報使用雙 cron：
 
-**夏令時間（EDT，UTC-4）：**
-- 期間：每年 3 月第二個週日 ～ 11 月第一個週日
-- 美股 9:30 ET = 台北 21:30（夏令）
-- 使用：`cron: "0 13 * * 1-5"`（台北 21:00）
+- `0 13 * * 1-5`
+- `0 14 * * 1-5`
 
-**冬令時間（EST，UTC-5）：**
-- 期間：每年 11 月第一個週日 ～ 3 月第二個週日
-- 美股 9:30 ET = 台北 22:30（冬令）
-- 使用：`cron: "0 14 * * 1-5"`（台北 22:00）
+程式用 `America/New_York` runtime guard 判斷哪一次是 09:00 ET，因此不需要手動切換夏令 / 冬令。非正確時段的重複 run 會自動 skipped。
 
-**調整方法：**
-1. 開啟 `.github/workflows/us-open.yml`
-2. 找到 `cron:` 行，將其中一行取消注釋（去掉 `#`），另一行加上 `#` 注釋掉
-3. 提交並推送更改
+---
 
-```yaml
-# 夏令（啟用此行，另一行加 #）
-- cron: "0 13 * * 1-5"
+## V2 資料完整性與持股監控
 
-# 冬令（啟用此行，另一行加 #）
-# - cron: "0 14 * * 1-5"
-```
-
-> 夏令/冬令切換時間參考：[timeanddate.com/time/dst](https://www.timeanddate.com/time/dst/)
+- 報價來源是 deterministic `QuoteObservation`，包含 ticker identity、session、market date、provider timestamp、quote id、quality status。
+- Google Search 只用於新聞與事件脈絡，不是價格來源。
+- 公開報告會先產生 structured draft，通過 validation 後才送 Telegram / Email。
+- 私人持股輸出是 `PortfolioActionBrief`，狀態只有 `NO_MATERIAL_CHANGE` / `WATCH` / `ACTION_REVIEW` / `DATA_BLOCKED`。
+- daily bot 不會自動產生 BUY / SELL / ADD / TRIM 股數；預設 `SIZE_NOT_COMPUTED`。
+- 若持股報價 coverage 不到 100%，或 quote 是 stale / suspect / conflicting，私人 Action Brief 會 fail closed，不送錯誤建議。
+- `portfolio.json` plaintext、`data/*.json` runtime artifacts 仍不進 Git；`portfolio.json.enc` 繼續搭配 `PORTFOLIO_KEY` 使用。
 
 ---
 

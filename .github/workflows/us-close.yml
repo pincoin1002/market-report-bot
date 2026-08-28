@@ -76,9 +76,9 @@ jobs:
         run: |
           if [ "$DRY_RUN" = "true" ]; then
             echo "=== DRY RUN: notifications disabled ==="
-            TELEGRAM_BOT_TOKEN="" EMAIL_SMTP_SERVER="" python scripts/generate_report.py us_close
+            python scripts/generate_report.py us_close --generate-only
           else
-            python scripts/generate_report.py us_close
+            python scripts/generate_report.py us_close --generate-only
           fi
 
       - name: Send non-trading day notice
@@ -94,12 +94,12 @@ jobs:
         run: |
           python - <<'EOF'
           import os, smtplib, requests
-          from datetime import datetime, timezone, timedelta
+          from datetime import datetime
           from email.mime.multipart import MIMEMultipart
           from email.mime.text import MIMEText
+          from zoneinfo import ZoneInfo
 
-          ET = timezone(timedelta(hours=-5))
-          today = datetime.now(tz=ET).strftime("%Y-%m-%d")
+          today = datetime.now(tz=ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
           msg_text = f"🔴 美股收盤日報｜{today}\n{'─'*38}\n\n今天為美股非交易日（假日或週末），市場休市，無收盤報告。"
 
           token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
@@ -128,11 +128,25 @@ jobs:
 
       - name: Validate report prices
         if: steps.fetch.outputs.market_closed != 'true'
-        continue-on-error: true
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           REPORT_MODEL: ${{ vars.REPORT_MODEL }}
         run: python scripts/validate_report.py us_close
+
+      - name: Deliver validated US Close Report
+        if: steps.fetch.outputs.market_closed != 'true' && (github.event.inputs.dry_run || 'false') != 'true'
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          PORTFOLIO_KEY: ${{ secrets.PORTFOLIO_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          EMAIL_SMTP_SERVER: ${{ secrets.EMAIL_SMTP_SERVER }}
+          EMAIL_SMTP_PORT: ${{ secrets.EMAIL_SMTP_PORT }}
+          EMAIL_USERNAME: ${{ secrets.EMAIL_USERNAME }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          REPORT_MODEL: ${{ vars.REPORT_MODEL }}
+        run: python scripts/generate_report.py us_close --deliver-existing
 
       - name: Prepare review package
         if: steps.fetch.outputs.market_closed != 'true'
@@ -175,7 +189,12 @@ jobs:
           name: us-close-data-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             data/market_snapshot.json
+            data/market_context.json
+            data/market_report_draft.json
             data/report_summary.json
             data/validation_results.json
+            data/portfolio_advice_audit.json
+            data/portfolio_action_brief.json
+            data/delivery_state.json
           retention-days: 30
           if-no-files-found: ignore
