@@ -27,7 +27,7 @@ from logging_config import setup_logging
 import portfolio_store
 from instrument_registry import build_universe, quote_symbol
 from market_context import build_market_context
-from market_session import classify_tw_session, classify_us_session
+from market_session import classify_tw_session, classify_us_session, get_target_market_date
 from models import NamedQuote, Snapshot
 from providers import fetch_session_observations
 
@@ -173,14 +173,25 @@ def build_snapshot(report_type: str) -> Snapshot:
     portfolio = portfolio_store.load_portfolio()
     universe = build_universe(portfolio)
     expected_session = _expected_session(report_type)
-    observations, sources = fetch_session_observations(list(universe.values()), expected_session)
     retrieved_at = datetime.now(tz=TPE)
+    
+    us_target_date = get_target_market_date(report_type, "US", now=retrieved_at)
+    tw_target_date = get_target_market_date(report_type, "TW", now=retrieved_at)
+    expected_dates = {
+        "US": us_target_date,
+        "TW": tw_target_date,
+    }
+    
+    observations, sources = fetch_session_observations(
+        list(universe.values()), expected_session, expected_dates=expected_dates
+    )
 
+    valid_hits = sum(1 for o in observations.values() if o.quality_status == "VALID")
     snapshot = Snapshot(
         generated_at=retrieved_at,
         report_type=report_type,
         fetch_coverage=round(len(observations) / len(universe), 3),
-        market_context_coverage=round(len(observations) / len(universe), 3),
+        market_context_coverage=round(valid_hits / len(universe), 3),
         sources=sources,
     )
     portfolio_symbols = [key for key, spec in universe.items() if spec.is_portfolio_critical]
@@ -195,22 +206,27 @@ def build_snapshot(report_type: str) -> Snapshot:
             bucket = "us_markets"
         if key in portfolio_symbols:
             portfolio_hits += 1
-        getattr(snapshot, bucket)[key] = NamedQuote(
-            name=spec.display_name,
-            currency=spec.currency,
-            symbol=quote_symbol(spec),
-            price=obs.price,
-            prev_close=obs.previous_regular_close,
-            change_pct=obs.change_pct,
-            data_date=obs.market_date,
-        )
+        
+        # Only populate named quotes in snapshot if observation passed validation!
+        # Quotes with DATE_MISMATCH, STALE, or CONFLICTING are excluded from
+        # verified headline pricing tables so they cannot mislead the model.
+        if obs.quality_status == "VALID":
+            getattr(snapshot, bucket)[key] = NamedQuote(
+                name=spec.display_name,
+                currency=spec.currency,
+                symbol=quote_symbol(spec),
+                price=obs.price,
+                prev_close=obs.previous_regular_close,
+                change_pct=obs.change_pct,
+                data_date=obs.market_date,
+            )
         snapshot.quote_observations[key] = obs
 
     if portfolio_symbols:
         snapshot.portfolio_quote_coverage = round(portfolio_hits / len(portfolio_symbols), 3)
-    missing = [key for key in universe if key not in observations]
+    missing = [key for key in universe if key not in observations or observations[key].quality_status != "VALID"]
     if missing:
-        log.warning("symbols missing after all provider tiers",
+        log.warning("symbols missing or invalid after provider tiers",
                     extra={"missing": missing})
         snapshot.missing_required_items.extend(sorted(missing))
     for key, obs in snapshot.quote_observations.items():

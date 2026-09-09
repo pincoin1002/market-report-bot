@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field, field_validator
 
 ReportType = Literal["tw_open", "tw_close", "us_open", "us_close"]
 Session = Literal["PREMARKET", "REGULAR", "AFTER_HOURS", "PREVIOUS_CLOSE", "CLOSED_REFERENCE"]
-QualityStatus = Literal["VALID", "STALE", "CONFLICTING", "SUSPECT", "UNAVAILABLE"]
+QualityStatus = Literal["VALID", "STALE", "CONFLICTING", "SUSPECT", "UNAVAILABLE", "DATE_MISMATCH", "DATA_BLOCKED"]
 QuoteType = Literal["TRADE", "MID", "INDICATIVE", "OFFICIAL_CLOSE", "REFERENCE"]
 PriceReferenceKind = Literal[
     "CURRENT_QUOTE", "PREMARKET_QUOTE", "REGULAR_QUOTE", "AFTER_HOURS_QUOTE",
@@ -89,6 +89,11 @@ class QuoteObservation(BaseModel):
     change_pct: float
     quality_notes: list[str] = Field(default_factory=list)
     corporate_action_note: str | None = None
+    market: str = ""
+
+    @property
+    def trading_date(self) -> str:
+        return self.market_date
 
     @field_validator("market_date")
     @classmethod

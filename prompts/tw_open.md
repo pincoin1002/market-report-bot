@@ -29,11 +29,13 @@ rates, Fed pricing, UST yields, USD/TWD, ETF flow, options positioning, breadth,
 | S&P 500 | | | |
 | Dow Jones | | | |
 | 費城半導體 SOX | | | |
+（注意：美股四大指數必須對應前一已完成美股正規交易時段 {{PREV_TRADE_DATE}}。若快照標記 DATA_BLOCKED 或 DATE_MISMATCH，該欄位一律填「⚠️ 未取得 (DATA_BLOCKED)」，嚴禁使用其他交易日價格或猜測替代。）
 
 **台股映射解讀：**
 - 正面映射：
 - 負面映射：
 - 開盤情境研判（強/弱/分化）：
+（注意：若美股指數數據遭阻斷，開盤情境研判必須說明受美股數據阻斷影響，不進行無依據推論。）
 
 ---
 
@@ -41,9 +43,12 @@ rates, Fed pricing, UST yields, USD/TWD, ETF flow, options positioning, breadth,
 | ADR | 昨收 | 漲跌% | 對應台股影響 |
 |-----|------|-------|------------|
 | TSM（台積電） | | | |
+| UMC（聯電） | | | |
 | 其他主要台廠 | | | |
+（注意：ADR 昨收必須對應前一已完成美股收盤 {{PREV_TRADE_DATE}}。若 TSM 或 UMC 遭 DATA_BLOCKED / DATE_MISMATCH，該列一律填「⚠️ 未取得 (DATA_BLOCKED)」，嚴禁使用舊日期價格，嚴禁將舊價稱為「昨收」。）
 
-**ADR 溢折價分析：**（台積電 ADR vs 現貨換算）
+**ADR 溢折價分析：**
+（必須嚴格直接採用上方快照提供的「系統已驗證 ADR 溢折價」輸出。若顯示「DATA_BLOCKED — TEMPORAL_MISMATCH」，必須完整保留該阻斷宣告，嚴禁自行尋找資料推算或猜測溢折價！）
 
 ---
 

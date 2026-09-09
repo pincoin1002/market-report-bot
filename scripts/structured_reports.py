@@ -44,7 +44,7 @@ def build_material_changes(context: MarketContext) -> list[str]:
     changes = []
     for symbol in ("TNX", "US2Y", "DXY", "SOX", "VIX", "BTC", "TAIEX"):
         obs = context.quotes.get(symbol) or context.macro_observations.get(symbol)
-        if not obs:
+        if not obs or obs.quality_status != "VALID":
             continue
         threshold = 0.5 if symbol in ("TNX", "US2Y") else 1.0
         if abs(obs.change_pct) >= threshold:
@@ -53,7 +53,7 @@ def build_material_changes(context: MarketContext) -> list[str]:
 
 
 def build_public_draft(context: MarketContext, narrative: str | None = None) -> MarketReportDraft:
-    symbols = list(context.quotes)[:12]
+    symbols = [s for s, o in context.quotes.items() if o.quality_status == "VALID"][:12]
     refs = [quote_price_reference(symbol, context) for symbol in symbols]
     title = {
         "us_open": "美股開盤日報",
