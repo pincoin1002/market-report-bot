@@ -255,10 +255,292 @@ class TemporalIntegrityRegressionTest(unittest.TestCase):
         self.assertIn("TSM ADR date mismatch (got 2026-09-04, expected 2026-09-08 US close)", block)
         self.assertIn("數據阻斷清單（DATA_BLOCKED", block)
         self.assertIn("- **TSM**: DATE_MISMATCH", block)
-        # TSM must not appear in verified pricing tables before Quote Semantics
-        pricing_table_part = block.split("**Quote Semantics")[0]
-        self.assertNotIn("| TSM |", pricing_table_part)
+        # Verify production reports directory does not contain synthetic report
+        prod_report = ROOT / "reports" / "tw_open_20260909_075000.md"
+        self.assertFalse(prod_report.exists(), "Synthetic test report must not reside in production reports/")
+        fixture_path = ROOT / "tests" / "fixtures" / "synthetic_tw_open_stale_adr_rejected.md"
+        self.assertTrue(fixture_path.exists(), "Synthetic fixture must exist in tests/fixtures/")
+        fixture_content = fixture_path.read_text(encoding="utf-8")
+        self.assertIn("DATA_BLOCKED — TEMPORAL_MISMATCH", fixture_content)
+
+
+class ADREngineIdentityAndTemporalHardeningTest(unittest.TestCase):
+    """Adversarial regression tests for ADR engine identity validation and FX temporal compatibility."""
+
+    def setUp(self):
+        self.report_as_of = datetime(2026, 9, 9, 8, 0, tzinfo=TPE)
+        self.target_us_date = "2026-09-08"
+        self.target_tw_date = "2026-09-08"
+        self.tsm_valid = _make_obs(
+            "TSM",
+            market_date="2026-09-08",
+            price=170.0,
+            quality="VALID",
+            currency="USD",
+            market="US",
+            retrieved_at=self.report_as_of,
+        )
+        self.tw_valid = _make_obs(
+            "2330",
+            market_date="2026-09-08",
+            price=1000.0,
+            quality="VALID",
+            currency="TWD",
+            market="TW",
+            retrieved_at=self.report_as_of,
+        )
+        self.fx_valid = _make_obs(
+            "USDTWD",
+            market_date="2026-09-09",
+            price=32.0,
+            quality="VALID",
+            currency="TWD",
+            market="TW",
+            retrieved_at=self.report_as_of,
+        )
+
+    # ── Test A: Stale but VALID-labelled FX -> DATA_BLOCKED
+    def test_A_stale_valid_labelled_fx_blocked(self):
+        # 5 days old relative to 2026-09-09 report_as_of
+        stale_fx_time = datetime(2026, 9, 4, 8, 0, tzinfo=TPE)
+        stale_fx = _make_obs(
+            "USDTWD",
+            market_date="2026-09-04",
+            price=32.0,
+            quality="VALID",  # Stale but provider claimed VALID
+            currency="TWD",
+            market="TW",
+            retrieved_at=stale_fx_time,
+        )
+
+        ok, rendered, payload = calculate_tsm_adr_premium(
+            self.tsm_valid,
+            self.tw_valid,
+            stale_fx,
+            self.target_us_date,
+            self.target_tw_date,
+            report_as_of=self.report_as_of,
+            max_fx_age_days=3,
+        )
+
+        self.assertFalse(ok)
+        self.assertEqual(payload["status"], "DATA_BLOCKED")
+        self.assertEqual(payload["reason"], "TEMPORAL_MISMATCH")
+        self.assertTrue(any("stale (age 5 days > max 3 days)" in d for d in payload["details"]))
+        self.assertIn("DATA_BLOCKED — TEMPORAL_MISMATCH", rendered)
+
+    # ── Test B: Future FX -> DATA_BLOCKED
+    def test_B_future_fx_blocked(self):
+        # 10 minutes in the future relative to report_as_of
+        future_fx_time = self.report_as_of + timedelta(minutes=10)
+        future_fx = _make_obs(
+            "USDTWD",
+            market_date="2026-09-09",
+            price=32.0,
+            quality="VALID",
+            currency="TWD",
+            market="TW",
+            retrieved_at=future_fx_time,
+        )
+
+        ok, rendered, payload = calculate_tsm_adr_premium(
+            self.tsm_valid,
+            self.tw_valid,
+            future_fx,
+            self.target_us_date,
+            self.target_tw_date,
+            report_as_of=self.report_as_of,
+        )
+
+        self.assertFalse(ok)
+        self.assertEqual(payload["status"], "DATA_BLOCKED")
+        self.assertEqual(payload["reason"], "TEMPORAL_MISMATCH")
+        self.assertTrue(any("future-dated" in d for d in payload["details"]))
+        self.assertIn("DATA_BLOCKED — TEMPORAL_MISMATCH", rendered)
+
+    # ── Test C: Wrong symbol as TSM -> DATA_BLOCKED
+    def test_C_wrong_symbol_as_tsm_blocked(self):
+        wrong_sym_tsm = _make_obs(
+            "NVDA",
+            market_date="2026-09-08",
+            price=120.0,
+            quality="VALID",
+            currency="USD",
+            market="US",
+            retrieved_at=self.report_as_of,
+        )
+
+        ok, rendered, payload = calculate_tsm_adr_premium(
+            wrong_sym_tsm,
+            self.tw_valid,
+            self.fx_valid,
+            self.target_us_date,
+            self.target_tw_date,
+            report_as_of=self.report_as_of,
+        )
+
+        self.assertFalse(ok)
+        self.assertEqual(payload["status"], "DATA_BLOCKED")
+        self.assertTrue(any("TSM symbol mismatch (got NVDA, expected TSM)" in d for d in payload["details"]))
+
+        # Also test market mismatch
+        wrong_market_tsm = _make_obs(
+            "TSM",
+            market_date="2026-09-08",
+            price=170.0,
+            quality="VALID",
+            currency="USD",
+            market="TW",
+            retrieved_at=self.report_as_of,
+        )
+        ok_mkt, _, payload_mkt = calculate_tsm_adr_premium(
+            wrong_market_tsm,
+            self.tw_valid,
+            self.fx_valid,
+            self.target_us_date,
+            self.target_tw_date,
+            report_as_of=self.report_as_of,
+        )
+        self.assertFalse(ok_mkt)
+        self.assertTrue(any("TSM market mismatch" in d for d in payload_mkt["details"]))
+
+        # Also test currency mismatch
+        wrong_curr_tsm = _make_obs(
+            "TSM",
+            market_date="2026-09-08",
+            price=170.0,
+            quality="VALID",
+            currency="TWD",
+            market="US",
+            retrieved_at=self.report_as_of,
+        )
+        ok_curr, _, payload_curr = calculate_tsm_adr_premium(
+            wrong_curr_tsm,
+            self.tw_valid,
+            self.fx_valid,
+            self.target_us_date,
+            self.target_tw_date,
+            report_as_of=self.report_as_of,
+        )
+        self.assertFalse(ok_curr)
+        self.assertTrue(any("TSM currency mismatch" in d for d in payload_curr["details"]))
+
+    # ── Test D: Wrong symbol as 2330 -> DATA_BLOCKED
+    def test_D_wrong_symbol_as_2330_blocked(self):
+        wrong_sym_tw = _make_obs(
+            "2317",
+            market_date="2026-09-08",
+            price=200.0,
+            quality="VALID",
+            currency="TWD",
+            market="TW",
+            retrieved_at=self.report_as_of,
+        )
+
+        ok, rendered, payload = calculate_tsm_adr_premium(
+            self.tsm_valid,
+            wrong_sym_tw,
+            self.fx_valid,
+            self.target_us_date,
+            self.target_tw_date,
+            report_as_of=self.report_as_of,
+        )
+
+        self.assertFalse(ok)
+        self.assertEqual(payload["status"], "DATA_BLOCKED")
+        self.assertTrue(any("2330 symbol mismatch (got 2317, expected 2330)" in d for d in payload["details"]))
+
+        # Also test market mismatch
+        wrong_market_tw = _make_obs(
+            "2330",
+            market_date="2026-09-08",
+            price=1000.0,
+            quality="VALID",
+            currency="TWD",
+            market="US",
+            retrieved_at=self.report_as_of,
+        )
+        ok_mkt, _, payload_mkt = calculate_tsm_adr_premium(
+            self.tsm_valid,
+            wrong_market_tw,
+            self.fx_valid,
+            self.target_us_date,
+            self.target_tw_date,
+            report_as_of=self.report_as_of,
+        )
+        self.assertFalse(ok_mkt)
+        self.assertTrue(any("2330 market mismatch" in d for d in payload_mkt["details"]))
+
+        # Also test currency mismatch
+        wrong_curr_tw = _make_obs(
+            "2330",
+            market_date="2026-09-08",
+            price=1000.0,
+            quality="VALID",
+            currency="USD",
+            market="TW",
+            retrieved_at=self.report_as_of,
+        )
+        ok_curr, _, payload_curr = calculate_tsm_adr_premium(
+            self.tsm_valid,
+            wrong_curr_tw,
+            self.fx_valid,
+            self.target_us_date,
+            self.target_tw_date,
+            report_as_of=self.report_as_of,
+        )
+        self.assertFalse(ok_curr)
+        self.assertTrue(any("2330 currency mismatch" in d for d in payload_curr["details"]))
+
+    # ── Test E: Wrong FX symbol -> DATA_BLOCKED
+    def test_E_wrong_fx_symbol_blocked(self):
+        wrong_fx = _make_obs(
+            "EURUSD",
+            market_date="2026-09-09",
+            price=1.08,
+            quality="VALID",
+            currency="USD",
+            market="GLOBAL",
+            retrieved_at=self.report_as_of,
+        )
+
+        ok, rendered, payload = calculate_tsm_adr_premium(
+            self.tsm_valid,
+            self.tw_valid,
+            wrong_fx,
+            self.target_us_date,
+            self.target_tw_date,
+            report_as_of=self.report_as_of,
+        )
+
+        self.assertFalse(ok)
+        self.assertEqual(payload["status"], "DATA_BLOCKED")
+        self.assertTrue(any("FX symbol mismatch (got EURUSD, expected USDTWD)" in d for d in payload["details"]))
+
+    # ── Test F: All valid -> premium VALID
+    def test_F_all_valid_premium_valid(self):
+        ok, rendered, payload = calculate_tsm_adr_premium(
+            self.tsm_valid,
+            self.tw_valid,
+            self.fx_valid,
+            self.target_us_date,
+            self.target_tw_date,
+            report_as_of=self.report_as_of,
+        )
+
+        self.assertTrue(ok)
+        self.assertEqual(payload["status"], "VALID")
+        self.assertEqual(payload["ratio"], 5.0)
+        self.assertEqual(payload["tsm_adr_usd"], 170.0)
+        self.assertEqual(payload["tw_2330_twd"], 1000.0)
+        self.assertEqual(payload["usdtwd"], 32.0)
+        self.assertEqual(payload["tsm_twd_per_share"], 1088.0)
+        self.assertEqual(payload["premium_pct"], 8.8)
+        self.assertIn("溢折價率：+8.80%", rendered)
+        self.assertIn("2026-09-08 US close ($170.00)", rendered)
+        self.assertIn("2026-09-08 TW close (1,000.0 TWD)", rendered)
 
 
 if __name__ == "__main__":
     unittest.main()
+

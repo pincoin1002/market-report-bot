@@ -223,7 +223,9 @@ def _build_snapshot_block(snapshot: Snapshot) -> str:
         tsm_obs = snapshot.quote_observations.get("TSM")
         tw_obs = snapshot.quote_observations.get("2330")
         fx_obs = snapshot.quote_observations.get("USDTWD")
-        _, adr_text, _ = calculate_tsm_adr_premium(tsm_obs, tw_obs, fx_obs, target_us_date, target_tw_date)
+        _, adr_text, _ = calculate_tsm_adr_premium(
+            tsm_obs, tw_obs, fx_obs, target_us_date, target_tw_date, report_as_of=snapshot.generated_at
+        )
         lines += [
             "### 系統已驗證 ADR 溢折價（唯一真相 — 禁止修改、禁止重新計算）",
             adr_text,

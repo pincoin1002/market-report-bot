@@ -35,3 +35,8 @@ portfolio*.json
 .vscode/
 *.swp
 *.swo
+
+# Local archives & diagnostics
+Diagnostics/
+claude-system/
+
