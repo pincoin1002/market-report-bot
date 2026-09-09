@@ -221,7 +221,8 @@ class YahooExtendedHoursProvider:
         )
         return validate_observation(obs, spec, expected_session=expected_session)
 
-    def fetch_many(self, specs: list[InstrumentSpec], expected_session: Session) -> dict[str, QuoteObservation]:
+    def fetch_many(self, specs: list[InstrumentSpec], expected_session: Session,
+                   expected_dates: dict[str, str] | None = None) -> dict[str, QuoteObservation]:
         out: dict[str, QuoteObservation] = {}
         for spec in specs:
             if spec.market != "US" or spec.asset_type not in ("EQUITY", "ETF"):
@@ -229,6 +230,9 @@ class YahooExtendedHoursProvider:
             try:
                 obs = self._one(spec, expected_session)
                 if obs:
+                    exp_date = (expected_dates or {}).get(spec.canonical_symbol) or (expected_dates or {}).get(spec.market)
+                    if exp_date and obs.market_date != exp_date:
+                        obs = validate_observation(obs, spec, expected_session=expected_session, expected_date=exp_date)
                     out[spec.canonical_symbol] = obs
             except Exception:
                 log.warning("extended-hours fetch failed", extra={"symbol": spec.canonical_symbol})
@@ -236,7 +240,8 @@ class YahooExtendedHoursProvider:
 
 
 def observation_from_daily_quote(spec: InstrumentSpec, q: Quote, provider: str,
-                                 session: Session, retrieved_at: datetime) -> QuoteObservation:
+                                 session: Session, retrieved_at: datetime,
+                                 expected_date: str | None = None) -> QuoteObservation:
     observed_at = datetime.fromisoformat(f"{q.data_date[:10].replace('/', '-')}T00:00:00+00:00")
     quote_id = f"{spec.canonical_symbol}:{q.data_date}:{session}:{provider}"
     obs = QuoteObservation(
@@ -256,8 +261,9 @@ def observation_from_daily_quote(spec: InstrumentSpec, q: Quote, provider: str,
         quality_status="VALID",
         previous_regular_close=round(q.prev_close, spec.price_precision),
         change_pct=q.change_pct,
+        market=spec.market,
     )
-    return validate_observation(obs, spec, expected_session=session)
+    return validate_observation(obs, spec, expected_session=session, expected_date=expected_date)
 
 
 def fetch_with_failover(symbols: list[str]) -> tuple[dict[str, Quote], dict[str, str]]:
@@ -283,12 +289,13 @@ def fetch_with_failover(symbols: list[str]) -> tuple[dict[str, Quote], dict[str,
     return quotes, sources
 
 
-def fetch_session_observations(specs: list[InstrumentSpec], expected_session: Session
+def fetch_session_observations(specs: list[InstrumentSpec], expected_session: Session,
+                               expected_dates: dict[str, str] | None = None
                                ) -> tuple[dict[str, QuoteObservation], dict[str, str]]:
     observations: dict[str, QuoteObservation] = {}
     sources: dict[str, str] = {}
     if expected_session in ("PREMARKET", "REGULAR", "AFTER_HOURS"):
-        extended = YahooExtendedHoursProvider().fetch_many(specs, expected_session)
+        extended = YahooExtendedHoursProvider().fetch_many(specs, expected_session, expected_dates=expected_dates)
         for symbol, obs in extended.items():
             observations[symbol] = obs
             sources[specs_by_symbol(specs)[symbol].provider_symbols["yfinance"]] = obs.provider
@@ -304,8 +311,9 @@ def fetch_session_observations(specs: list[InstrumentSpec], expected_session: Se
     for provider_symbol, q in daily_quotes.items():
         spec = provider_to_spec[provider_symbol]
         provider = daily_sources.get(provider_symbol, "unknown")
+        exp_date = (expected_dates or {}).get(spec.canonical_symbol) or (expected_dates or {}).get(spec.market)
         observations[spec.canonical_symbol] = observation_from_daily_quote(
-            spec, q, provider, fallback_session, retrieved_at)
+            spec, q, provider, fallback_session, retrieved_at, expected_date=exp_date)
         sources[provider_symbol] = provider
     return observations, sources
 

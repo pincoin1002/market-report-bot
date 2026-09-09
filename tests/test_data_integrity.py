@@ -33,16 +33,18 @@ NY = ZoneInfo("America/New_York")
 
 
 def _obs(symbol: str, quality: str = "VALID", session: str = "REGULAR",
-         price: float = 100, prev: float = 99, currency: str = "USD") -> QuoteObservation:
+         price: float = 100, prev: float = 99, currency: str = "USD",
+         market_date: str | None = None) -> QuoteObservation:
     now = datetime.now(tz=timezone.utc)
+    mdate = market_date or now.strftime("%Y-%m-%d")
     return QuoteObservation(
-        quote_id=f"{symbol}:2026-08-26:{session}:test",
+        quote_id=f"{symbol}:{mdate}:{session}:test",
         instrument_id=symbol,
         canonical_symbol=symbol,
         price=price,
         currency=currency,
         session=session,
-        market_date="2026-08-26",
+        market_date=mdate,
         observed_at=now,
         provider_timestamp=None,
         retrieved_at=now,
@@ -160,7 +162,7 @@ class SnapshotBuildTest(unittest.TestCase):
             del symbols
 
         with patch.object(fetch_market_data.portfolio_store, "load_portfolio", return_value=raw):
-            def fake_observations(specs, expected_session):
+            def fake_observations(specs, expected_session, *args, **kwargs):
                 del expected_session
                 requested_symbols.extend([s.provider_symbols["yfinance"] for s in specs])
                 return {s.canonical_symbol: _obs(s.canonical_symbol, currency=s.currency) for s in specs}, {

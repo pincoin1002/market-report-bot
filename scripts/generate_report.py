@@ -29,7 +29,8 @@ from logging_config import setup_logging
 import delivery_state
 from instrument_registry import resolve_instrument
 from market_context import build_market_context
-from market_session import human_session_label, report_market_date
+from market_session import human_session_label, report_market_date, get_target_market_date
+from adr_engine import calculate_tsm_adr_premium
 from models import MarketContext, Portfolio, Snapshot
 import portfolio_store
 from portfolio_context import EncryptedPortfolioProvider
@@ -68,13 +69,9 @@ def get_market_date(report_type: str) -> datetime:
 
 # ── Core ───────────────────────────────────────────────────────────────────────
 
-def _prev_trade_date(mdate: datetime) -> datetime:
-    """Previous weekday. Approximation for search queries only — holidays are
-    acceptable noise since prices come from the snapshot, not from search."""
-    prev = mdate - timedelta(days=1)
-    while prev.weekday() >= 5:
-        prev -= timedelta(days=1)
-    return prev
+def _prev_trade_date(mdate: datetime, market: str = "US") -> str:
+    """Return the previous completed trading date using calendar-aware resolution."""
+    return get_target_market_date("tw_open", market, now=mdate)
 
 
 def load_prompt(report_type: str) -> str:
@@ -87,10 +84,11 @@ def load_prompt(report_type: str) -> str:
     text = common + "\n\n" + body
     mdate = get_market_date(report_type)
     weekday_map = {0: "週一", 1: "週二", 2: "週三", 3: "週四", 4: "週五", 5: "週六", 6: "週日"}
+    target_us_date = get_target_market_date(report_type, "US", now=datetime.now(tz=TPE))
     return (text
             .replace("{{TODAY_DATE}}", mdate.strftime("%Y-%m-%d"))
             .replace("{{TODAY_WEEKDAY}}", weekday_map[mdate.weekday()])
-            .replace("{{PREV_TRADE_DATE}}", _prev_trade_date(mdate).strftime("%Y-%m-%d")))
+            .replace("{{PREV_TRADE_DATE}}", target_us_date))
 
 
 @retry(
@@ -218,8 +216,41 @@ def _build_snapshot_block(snapshot: Snapshot) -> str:
             )
         lines.append("")
 
+    # Deterministic ADR premium calculation for tw_open
+    if snapshot.report_type == "tw_open":
+        target_us_date = get_target_market_date("tw_open", "US", now=snapshot.generated_at)
+        target_tw_date = get_target_market_date("tw_open", "TW", now=snapshot.generated_at)
+        tsm_obs = snapshot.quote_observations.get("TSM")
+        tw_obs = snapshot.quote_observations.get("2330")
+        fx_obs = snapshot.quote_observations.get("USDTWD")
+        _, adr_text, _ = calculate_tsm_adr_premium(
+            tsm_obs, tw_obs, fx_obs, target_us_date, target_tw_date, report_as_of=snapshot.generated_at
+        )
+        lines += [
+            "### 系統已驗證 ADR 溢折價（唯一真相 — 禁止修改、禁止重新計算）",
+            adr_text,
+            "",
+        ]
+
+    blocked_quotes = [
+        obs for obs in snapshot.quote_observations.values()
+        if obs.quality_status != "VALID"
+    ]
+    if blocked_quotes:
+        lines += [
+            "### ⚠️ 數據阻斷清單（DATA_BLOCKED / 嚴禁使用舊價或猜測）",
+            "以下標的未通過時間一致性或資料驗證，報告中對應欄位一律填「⚠️ 未取得 (DATA_BLOCKED)」，禁止計算漲跌幅或納入映射：",
+        ]
+        for obs in blocked_quotes:
+            notes_str = ", ".join(obs.quality_notes) if obs.quality_notes else obs.quality_status
+            lines.append(f"- **{obs.canonical_symbol}**: {obs.quality_status} (交易日: {obs.market_date} | 說明: {notes_str})")
+        lines.append("")
+
     lines += [
-        "**重要：上述快照數字即為最終答案，撰寫報告時直接使用，禁止搜尋或修改。**",
+        "**重要紀律守則：**",
+        "1. 僅有 Quality 為 VALID 且列於上方快照表格的數字為有效收盤價，報告中引用時必須完全一致。",
+        "2. 列於「數據阻斷清單」或快照中未列出的標的，報告中對應欄位一律填「⚠️ 未取得 (DATA_BLOCKED)」，嚴禁使用相近交易日價格、嚴禁稱舊資料為「昨收」、嚴禁推估其漲跌幅。",
+        "3. ADR 表現與溢折價分析段落必須嚴格採用上方「系統已驗證 ADR 溢折價」內容；若呈現「DATA_BLOCKED — TEMPORAL_MISMATCH」，必須完整保留該阻斷訊息，嚴禁自行尋找資料推算溢價！",
         "---",
         "",
     ]
