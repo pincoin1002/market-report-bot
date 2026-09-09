@@ -1,5 +1,14 @@
 # PROGRESS
 
+## 2026-09-10
+
+- Final date-alignment hardening continued on branch `fix-adr-market-data-date-alignment` from recovered clean state `43fe19030ea6aabddd2ccbc752f8b7d00b5d72eb` in isolated checkout `/private/tmp/market-report-bot-date-alignment`; main was not touched.
+- Hardened `calculate_tsm_adr_premium()` so identity failures return `INPUT_IDENTITY_MISMATCH` and temporal/freshness failures return `TEMPORAL_MISMATCH`; FX now requires a timezone-aware observation timestamp, rejects future observations, and applies the existing `max_fx_age_days` freshness window against explicit `report_as_of`.
+- Added adversarial ADR regressions for VALID-labelled stale FX, future FX, timezone-naive FX, missing FX timestamp, wrong TSM identity, wrong 2330 identity, wrong FX identity, VALID-labelled identity/date mismatch, and the exact 1:5 ADR premium calculation.
+- Local validation status so far: `.venv/bin/python -m unittest tests.test_temporal_integrity` PASS with 19 tests; `.venv/bin/python -m unittest tests.test_data_integrity` PASS with 50 tests; `.venv/bin/python -m unittest discover -s tests` PASS with 69 tests; `.venv/bin/python -m py_compile scripts/*.py` PASS; `scripts/dry_run_v2.py` PASS for all four report types; `git diff --check` PASS.
+- Synthetic stale ADR regression report remains only under `tests/fixtures/synthetic_tw_open_stale_adr_rejected.md`; no matching synthetic/stale fixture file exists under production `reports/`.
+- `scripts/validate_report.py` against existing committed production reports still reports `structured artifacts unavailable` because the matching transient `data/market_context.json` and `data/market_report_draft.json` artifacts are not present in the checkout; no fake structured artifacts were created to force this gate green.
+
 ## 2026-08-03
 
 - Confirmed active repo is `/Users/chenpinxuan/Projects/03_market_report_bot`; `/Users/chenpinxuan/Projects/market-report-bot` is not present locally.

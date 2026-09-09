@@ -381,7 +381,9 @@ class ADREngineIdentityAndTemporalHardeningTest(unittest.TestCase):
 
         self.assertFalse(ok)
         self.assertEqual(payload["status"], "DATA_BLOCKED")
+        self.assertEqual(payload["reason"], "INPUT_IDENTITY_MISMATCH")
         self.assertTrue(any("TSM symbol mismatch (got NVDA, expected TSM)" in d for d in payload["details"]))
+        self.assertIn("DATA_BLOCKED — INPUT_IDENTITY_MISMATCH", rendered)
 
         # Also test market mismatch
         wrong_market_tsm = _make_obs(
@@ -402,6 +404,7 @@ class ADREngineIdentityAndTemporalHardeningTest(unittest.TestCase):
             report_as_of=self.report_as_of,
         )
         self.assertFalse(ok_mkt)
+        self.assertEqual(payload_mkt["reason"], "INPUT_IDENTITY_MISMATCH")
         self.assertTrue(any("TSM market mismatch" in d for d in payload_mkt["details"]))
 
         # Also test currency mismatch
@@ -423,6 +426,7 @@ class ADREngineIdentityAndTemporalHardeningTest(unittest.TestCase):
             report_as_of=self.report_as_of,
         )
         self.assertFalse(ok_curr)
+        self.assertEqual(payload_curr["reason"], "INPUT_IDENTITY_MISMATCH")
         self.assertTrue(any("TSM currency mismatch" in d for d in payload_curr["details"]))
 
     # ── Test D: Wrong symbol as 2330 -> DATA_BLOCKED
@@ -448,7 +452,9 @@ class ADREngineIdentityAndTemporalHardeningTest(unittest.TestCase):
 
         self.assertFalse(ok)
         self.assertEqual(payload["status"], "DATA_BLOCKED")
+        self.assertEqual(payload["reason"], "INPUT_IDENTITY_MISMATCH")
         self.assertTrue(any("2330 symbol mismatch (got 2317, expected 2330)" in d for d in payload["details"]))
+        self.assertIn("DATA_BLOCKED — INPUT_IDENTITY_MISMATCH", rendered)
 
         # Also test market mismatch
         wrong_market_tw = _make_obs(
@@ -469,6 +475,7 @@ class ADREngineIdentityAndTemporalHardeningTest(unittest.TestCase):
             report_as_of=self.report_as_of,
         )
         self.assertFalse(ok_mkt)
+        self.assertEqual(payload_mkt["reason"], "INPUT_IDENTITY_MISMATCH")
         self.assertTrue(any("2330 market mismatch" in d for d in payload_mkt["details"]))
 
         # Also test currency mismatch
@@ -490,6 +497,7 @@ class ADREngineIdentityAndTemporalHardeningTest(unittest.TestCase):
             report_as_of=self.report_as_of,
         )
         self.assertFalse(ok_curr)
+        self.assertEqual(payload_curr["reason"], "INPUT_IDENTITY_MISMATCH")
         self.assertTrue(any("2330 currency mismatch" in d for d in payload_curr["details"]))
 
     # ── Test E: Wrong FX symbol -> DATA_BLOCKED
@@ -515,7 +523,9 @@ class ADREngineIdentityAndTemporalHardeningTest(unittest.TestCase):
 
         self.assertFalse(ok)
         self.assertEqual(payload["status"], "DATA_BLOCKED")
+        self.assertEqual(payload["reason"], "INPUT_IDENTITY_MISMATCH")
         self.assertTrue(any("FX symbol mismatch (got EURUSD, expected USDTWD)" in d for d in payload["details"]))
+        self.assertIn("DATA_BLOCKED — INPUT_IDENTITY_MISMATCH", rendered)
 
     # ── Test F: All valid -> premium VALID
     def test_F_all_valid_premium_valid(self):
@@ -540,7 +550,92 @@ class ADREngineIdentityAndTemporalHardeningTest(unittest.TestCase):
         self.assertIn("2026-09-08 US close ($170.00)", rendered)
         self.assertIn("2026-09-08 TW close (1,000.0 TWD)", rendered)
 
+    # ── Test G: Timezone-naive FX timestamp -> DATA_BLOCKED
+    def test_G_naive_fx_timestamp_blocked(self):
+        naive_time = datetime(2026, 9, 9, 8, 0)
+        naive_fx = _make_obs(
+            "USDTWD",
+            market_date="2026-09-09",
+            price=32.0,
+            quality="VALID",
+            currency="TWD",
+            market="TW",
+            retrieved_at=naive_time,
+        )
+
+        ok, rendered, payload = calculate_tsm_adr_premium(
+            self.tsm_valid,
+            self.tw_valid,
+            naive_fx,
+            self.target_us_date,
+            self.target_tw_date,
+            report_as_of=self.report_as_of,
+        )
+
+        self.assertFalse(ok)
+        self.assertEqual(payload["status"], "DATA_BLOCKED")
+        self.assertEqual(payload["reason"], "TEMPORAL_MISMATCH")
+        self.assertTrue(any("timestamp missing timezone info" in d for d in payload["details"]))
+        self.assertIn("DATA_BLOCKED — TEMPORAL_MISMATCH", rendered)
+
+    # ── Test H: Missing FX observation timestamp -> DATA_BLOCKED
+    def test_H_missing_fx_timestamp_blocked(self):
+        missing_time_fx = self.fx_valid.model_copy(
+            update={"provider_timestamp": None, "observed_at": None, "retrieved_at": None}
+        )
+
+        ok, rendered, payload = calculate_tsm_adr_premium(
+            self.tsm_valid,
+            self.tw_valid,
+            missing_time_fx,
+            self.target_us_date,
+            self.target_tw_date,
+            report_as_of=self.report_as_of,
+        )
+
+        self.assertFalse(ok)
+        self.assertEqual(payload["status"], "DATA_BLOCKED")
+        self.assertEqual(payload["reason"], "TEMPORAL_MISMATCH")
+        self.assertTrue(any("USD/TWD timestamp missing" in d for d in payload["details"]))
+        self.assertIn("DATA_BLOCKED — TEMPORAL_MISMATCH", rendered)
+
+    # ── Test I: Upstream VALID labels cannot override identity/date contracts
+    def test_I_valid_quality_label_does_not_override_contracts(self):
+        wrong_date_tsm = _make_obs(
+            "TSM",
+            market_date="2026-09-04",
+            price=170.0,
+            quality="VALID",
+            currency="USD",
+            market="US",
+            retrieved_at=self.report_as_of,
+        )
+        wrong_identity_fx = _make_obs(
+            "USDJPY",
+            market_date="2026-09-09",
+            price=145.0,
+            quality="VALID",
+            currency="JPY",
+            market="GLOBAL",
+            retrieved_at=self.report_as_of,
+        )
+
+        ok, rendered, payload = calculate_tsm_adr_premium(
+            wrong_date_tsm,
+            self.tw_valid,
+            wrong_identity_fx,
+            self.target_us_date,
+            self.target_tw_date,
+            report_as_of=self.report_as_of,
+        )
+
+        self.assertFalse(ok)
+        self.assertEqual(payload["status"], "DATA_BLOCKED")
+        self.assertEqual(payload["reason"], "INPUT_IDENTITY_MISMATCH")
+        self.assertTrue(any("date mismatch" in d for d in payload["details"]))
+        self.assertTrue(any("FX symbol mismatch" in d for d in payload["details"]))
+        self.assertIn("DATA_BLOCKED — INPUT_IDENTITY_MISMATCH", rendered)
+
 
 if __name__ == "__main__":
     unittest.main()
-
