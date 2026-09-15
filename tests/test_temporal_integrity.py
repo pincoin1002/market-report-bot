@@ -151,6 +151,7 @@ class TemporalIntegrityRegressionTest(unittest.TestCase):
             fx_obs=fx_obs,
             target_us_date="2026-09-08",
             target_tw_date="2026-09-08",
+            report_as_of=retrieved,
         )
 
         self.assertFalse(ok)
@@ -175,6 +176,7 @@ class TemporalIntegrityRegressionTest(unittest.TestCase):
             fx_obs=fx_obs,
             target_us_date="2026-09-08",
             target_tw_date="2026-09-08",
+            report_as_of=retrieved,
         )
 
         self.assertTrue(ok)

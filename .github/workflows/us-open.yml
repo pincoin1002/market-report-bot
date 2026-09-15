@@ -65,17 +65,12 @@ jobs:
           fi
 
       - name: Generate US Open Report
-        if: steps.fetch.outputs.market_closed != 'true' && steps.fetch.outputs.duplicate_skipped != 'true'
+        if: steps.fetch.outputs.market_closed != 'true'
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           PORTFOLIO_KEY: ${{ secrets.PORTFOLIO_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          EMAIL_SMTP_SERVER: ${{ secrets.EMAIL_SMTP_SERVER }}
-          EMAIL_SMTP_PORT: ${{ secrets.EMAIL_SMTP_PORT }}
-          EMAIL_USERNAME: ${{ secrets.EMAIL_USERNAME }}
-          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
-          EMAIL_TO: ${{ secrets.EMAIL_TO }}
           REPORT_MODEL: ${{ vars.REPORT_MODEL }}
           DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
         run: |
@@ -91,17 +86,10 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          EMAIL_SMTP_SERVER: ${{ secrets.EMAIL_SMTP_SERVER }}
-          EMAIL_SMTP_PORT: ${{ secrets.EMAIL_SMTP_PORT }}
-          EMAIL_USERNAME: ${{ secrets.EMAIL_USERNAME }}
-          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
-          EMAIL_TO: ${{ secrets.EMAIL_TO }}
         run: |
           python - <<'EOF'
-          import os, smtplib, requests
+          import os, requests
           from datetime import datetime
-          from email.mime.multipart import MIMEMultipart
-          from email.mime.text import MIMEText
           from zoneinfo import ZoneInfo
 
           today = datetime.now(tz=ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
@@ -113,22 +101,6 @@ jobs:
               requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
                             json={"chat_id": chat_id, "text": msg_text}, timeout=30)
               print("[notice] Telegram sent")
-
-          smtp = os.getenv("EMAIL_SMTP_SERVER", "").strip()
-          user = os.getenv("EMAIL_USERNAME", "").strip()
-          pwd  = os.getenv("EMAIL_PASSWORD", "").strip()
-          to   = os.getenv("EMAIL_TO", "").strip()
-          if smtp and user and pwd and to:
-              recipients = [e.strip() for e in to.split(",") if e.strip()]
-              m = MIMEMultipart("alternative")
-              m["Subject"] = f"【市場報告】美股開盤日報 {today} — 今天非交易日"
-              m["From"] = user
-              m["To"] = ", ".join(recipients)
-              m.attach(MIMEText(msg_text, "plain", "utf-8"))
-              with smtplib.SMTP(smtp, int(os.getenv("EMAIL_SMTP_PORT","587")), timeout=30) as s:
-                  s.ehlo(); s.starttls(); s.login(user, pwd)
-                  s.sendmail(user, recipients, m.as_string())
-              print("[notice] Email sent")
           EOF
 
       - name: Validate report prices
@@ -145,11 +117,6 @@ jobs:
           PORTFOLIO_KEY: ${{ secrets.PORTFOLIO_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          EMAIL_SMTP_SERVER: ${{ secrets.EMAIL_SMTP_SERVER }}
-          EMAIL_SMTP_PORT: ${{ secrets.EMAIL_SMTP_PORT }}
-          EMAIL_USERNAME: ${{ secrets.EMAIL_USERNAME }}
-          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
-          EMAIL_TO: ${{ secrets.EMAIL_TO }}
           REPORT_MODEL: ${{ vars.REPORT_MODEL }}
         run: python scripts/generate_report.py us_open --deliver-existing
 

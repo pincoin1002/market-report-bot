@@ -6,14 +6,14 @@
 
 ## 專案是什麼
 
-自動生成台股／美股每日報告，推送到 **Telegram + Email**。
+自動生成台股／美股每日報告，推送到 **Telegram**（Email 已停用）。
 硬性需求：**全雲端跑，不能依賴我的電腦開機**。
 
 ## 架構
 
 - 產文：**Gemini API**（免費層，key 從 aistudio.google.com 拿）
 - 排程與執行：**GitHub Actions**（免費、雲端）
-- 推送：Telegram Bot + Gmail SMTP
+- 推送：Telegram Bot（Email 已停用）
 
 四個 workflow：`tw-open`、`tw-close`、`us-open`、`us-close`
 
