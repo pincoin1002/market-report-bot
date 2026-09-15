@@ -60,7 +60,7 @@ You are reviewing an **institutional-grade automated market report** generated b
 ### System Overview
 - **Report type**: `{report_type}` — {name}
 - **Generator**: Google Gemini API (`gemini-2.0-flash`) + Google Search grounding
-- **Distribution**: Telegram + Email
+- **Distribution**: Telegram
 - **Language**: Traditional Chinese (繁體中文)
 
 ### Required Report Structure
@@ -73,7 +73,7 @@ Every `{report_type}` report must contain: {sections_desc}
 3. **No filler phrases** — "市場情緒樂觀", "投資者信心增強" etc. are banned.
 4. **Driver / Risk / Signal structure** — every analytical conclusion should include a driver,
    a risk condition, and a confirmation signal.
-5. **No URL citations** — this is a Telegram/Email report, not a research paper.
+5. **No URL citations** — this is a Telegram report, not a research paper.
 6. **Snapshot prices are final** — if the prompt header contained a "系統提供的市場快照",
    those numbers are ground truth and must appear verbatim in the report.
 

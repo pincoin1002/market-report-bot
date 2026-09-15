@@ -484,6 +484,10 @@ strong{{color:#1a1a2e}}
 
 
 def send_email(report: str, report_type: str) -> None:
+    if os.getenv("ENABLE_EMAIL", "false").lower() not in ("true", "1", "yes"):
+        log.info("Email delivery disabled (ENABLE_EMAIL not set to true) — skipping")
+        return
+
     smtp_server = os.getenv("EMAIL_SMTP_SERVER", "").strip()
     if not smtp_server:
         log.info("Email not configured — skipping")
@@ -597,6 +601,9 @@ def send_advice_telegram(advice: str, report_type: str) -> None:
 
 
 def send_advice_email(advice: str, report_type: str) -> None:
+    if os.getenv("ENABLE_EMAIL", "false").lower() not in ("true", "1", "yes"):
+        log.info("Email advice delivery disabled (ENABLE_EMAIL not set to true) — skipping")
+        return
     smtp_server = os.getenv("EMAIL_SMTP_SERVER", "").strip()
     username = os.getenv("EMAIL_USERNAME", "").strip()
     password = os.getenv("EMAIL_PASSWORD", "").strip()

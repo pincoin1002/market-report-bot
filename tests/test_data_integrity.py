@@ -485,6 +485,45 @@ class SafetyAndWorkflowTest(unittest.TestCase):
         ok, reason = validate_public_draft(draft, context)
         self.assertTrue(ok, reason)
 
+    def test_email_delivery_disabled_by_default(self):
+        import generate_report
+        with patch.dict(os.environ, {
+            "EMAIL_SMTP_SERVER": "smtp.gmail.com",
+            "EMAIL_USERNAME": "test@gmail.com",
+            "EMAIL_PASSWORD": "password123",
+            "EMAIL_TO": "recipient@gmail.com",
+        }, clear=False):
+            # Ensure ENABLE_EMAIL is absent
+            os.environ.pop("ENABLE_EMAIL", None)
+            with patch("smtplib.SMTP") as mock_smtp:
+                generate_report.send_email("report text", "tw_open")
+                generate_report.send_advice_email("advice text", "tw_open")
+                mock_smtp.assert_not_called()
+
+    def test_email_delivery_enabled_only_when_explicit(self):
+        import generate_report
+        with patch.dict(os.environ, {
+            "ENABLE_EMAIL": "true",
+            "EMAIL_SMTP_SERVER": "smtp.gmail.com",
+            "EMAIL_USERNAME": "test@gmail.com",
+            "EMAIL_PASSWORD": "password123",
+            "EMAIL_TO": "recipient@gmail.com",
+        }):
+            with patch("smtplib.SMTP") as mock_smtp:
+                mock_instance = mock_smtp.return_value.__enter__.return_value
+                generate_report.send_email("report text", "tw_open")
+                mock_smtp.assert_called_once_with("smtp.gmail.com", 587, timeout=30)
+                mock_instance.sendmail.assert_called_once()
+
+    def test_workflows_have_no_email_credentials(self):
+        for name in ("tw-open.yml", "tw-close.yml", "us-open.yml", "us-close.yml"):
+            text = (ROOT / ".github/workflows" / name).read_text(encoding="utf-8")
+            self.assertNotIn("secrets.EMAIL_USERNAME", text, f"{name} should not reference EMAIL_USERNAME secret")
+            self.assertNotIn("secrets.EMAIL_PASSWORD", text, f"{name} should not reference EMAIL_PASSWORD secret")
+            self.assertNotIn("secrets.EMAIL_TO", text, f"{name} should not reference EMAIL_TO secret")
+            self.assertNotIn("secrets.EMAIL_SMTP_SERVER", text, f"{name} should not reference EMAIL_SMTP_SERVER secret")
+            self.assertNotIn("smtplib", text, f"{name} should not contain smtplib code")
+
 
 if __name__ == "__main__":
     unittest.main()
