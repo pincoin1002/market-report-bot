@@ -524,6 +524,11 @@ class SafetyAndWorkflowTest(unittest.TestCase):
             self.assertNotIn("secrets.EMAIL_SMTP_SERVER", text, f"{name} should not reference EMAIL_SMTP_SERVER secret")
             self.assertNotIn("smtplib", text, f"{name} should not contain smtplib code")
 
+    def test_us_open_generate_step_guards_against_duplicate_skipped(self):
+        text = (ROOT / ".github/workflows/us-open.yml").read_text(encoding="utf-8")
+        gen_block = text[text.index("name: Generate US Open Report"):text.index("name: Send non-trading day notice")]
+        self.assertIn("steps.fetch.outputs.duplicate_skipped != 'true'", gen_block)
+
 
 if __name__ == "__main__":
     unittest.main()

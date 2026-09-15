@@ -872,8 +872,10 @@ def main() -> None:
     except FileNotFoundError:
         log.warning("no snapshot found — blocking report generation",
                     extra={"report_type": report_type})
+        sys.exit(1)
     except ValidationError:
         log.error("snapshot invalid — blocking report generation", exc_info=True)
+        sys.exit(1)
 
     max_tokens = MAX_OUTPUT_TOKENS.get(report_type, 16000)
     log.info("calling Gemini API", extra={

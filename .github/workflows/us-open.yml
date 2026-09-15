@@ -65,7 +65,7 @@ jobs:
           fi
 
       - name: Generate US Open Report
-        if: steps.fetch.outputs.market_closed != 'true'
+        if: steps.fetch.outputs.market_closed != 'true' && steps.fetch.outputs.duplicate_skipped != 'true'
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           PORTFOLIO_KEY: ${{ secrets.PORTFOLIO_KEY }}
