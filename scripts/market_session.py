@@ -60,12 +60,12 @@ def get_target_market_date(report_type: str, market: str, now: datetime | None =
         if market.upper() in ("US", "NYSE", "NASDAQ"):
             date_str, _ = get_most_recent_completed_session("US", as_of=now)
             return date_str
-        local = (now or datetime.now(tz=TPE)).astimezone(TPE)
-        return local.strftime("%Y-%m-%d")
+        date_str, _ = get_most_recent_completed_session("TW", as_of=now)
+        return date_str
     if report_type.startswith("us_"):
         if report_type == "us_close":
-            local = (now or datetime.now(tz=NY)).astimezone(NY)
-            return local.strftime("%Y-%m-%d")
+            date_str, _ = get_most_recent_completed_session("US", as_of=now)
+            return date_str
         # us_open
         if market.upper() == "TW":
             date_str, _ = get_most_recent_completed_session("TW", as_of=now)

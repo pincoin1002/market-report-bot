@@ -236,8 +236,14 @@ def build_snapshot(report_type: str) -> Snapshot:
 
 
 def _expected_session(report_type: str) -> str:
-    if report_type in ("us_close", "tw_close"):
-        return "REGULAR"
+    if report_type == "tw_close":
+        now = datetime.now(tz=TPE)
+        target = get_target_market_date(report_type, "TW", now=now)
+        return "REGULAR" if target == now.strftime("%Y-%m-%d") else "PREVIOUS_CLOSE"
+    if report_type == "us_close":
+        now = datetime.now(tz=NY)
+        target = get_target_market_date(report_type, "US", now=now)
+        return "REGULAR" if target == now.strftime("%Y-%m-%d") else "PREVIOUS_CLOSE"
     if report_type.startswith("us_"):
         return classify_us_session(extended_quote_available=True)
     return classify_tw_session(report_type=report_type)
@@ -279,6 +285,16 @@ def main() -> None:
         log.error("fetch coverage below threshold — refusing to write snapshot",
                   extra={"coverage": snapshot.fetch_coverage, "min": MIN_COVERAGE})
         sys.exit(1)  # workflow fails; report can rerun after providers recover
+
+    primary_market = "TW" if report_type.startswith("tw_") else "US"
+    primary_valid = sum(
+        1 for obs in snapshot.quote_observations.values()
+        if obs.market == primary_market and obs.quality_status == "VALID"
+    )
+    if primary_valid == 0:
+        log.error("no valid primary-market quotes — refusing to build report",
+                  extra={"report_type": report_type, "primary_market": primary_market})
+        sys.exit(1)
 
     if snapshot.portfolio_quote_coverage is not None and snapshot.portfolio_quote_coverage < 1.0:
         log.warning("portfolio quote coverage below 100% — public report may proceed; private advice will block",

@@ -8,7 +8,8 @@
 - Removed mandatory empty/filler sections and internal `DATE_MISMATCH` ticker lists from public rendering; optional sections are omitted when no verified content exists.
 - Replaced fixed-position Telegram splitting with paragraph/line-aware chunking that preserves all content.
 - Reduced the GitHub Actions Telegram backup heartbeat from every five minutes to hourly and moved `tw-close` to an off-peak minute to reduce scheduled-event throttling.
-- Regression gate: `python -m unittest discover -s tests -v` PASS with 78 tests; `python -m py_compile scripts/*.py` PASS; workflow YAML parse PASS; `scripts/dry_run_v2.py` PASS for `tw_open`, `tw_close`, `us_open`, and `us_close` with both public/private structured validation green.
+- Regression gate: `python -m unittest discover -s tests -v` PASS with 80 tests; `python -m py_compile scripts/*.py` PASS; workflow YAML parse PASS; `scripts/dry_run_v2.py` PASS for `tw_open`, `tw_close`, `us_open`, and `us_close` with both public/private structured validation green.
+- First cloud dry run exposed an off-window edge case: a morning manual `tw_close` treated the current incomplete session as REGULAR. Close-report target dates now resolve to the latest completed exchange session, and report generation fails closed if no valid quote exists for the report's primary market. Speculative/blocked narrative phrases are also rejected from public drivers.
 
 ## 2026-09-10
 

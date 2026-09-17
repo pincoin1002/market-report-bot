@@ -96,6 +96,10 @@ def _extract_grounded_drivers(narrative: str | None) -> list[str]:
     """
     if not narrative or "新聞搜尋目前不可用" in narrative:
         return []
+    rejected_phrases = (
+        "DATA_BLOCKED", "DATE_MISMATCH", "數據阻斷", "資料阻斷",
+        "Smart Money", "強烈預期", "利空出盡", "資金回流",
+    )
     lines = [line.strip() for line in narrative.splitlines()]
     start = 0
     for idx, line in enumerate(lines):
@@ -115,6 +119,8 @@ def _extract_grounded_drivers(narrative: str | None) -> list[str]:
         if line.startswith("|") or "DATA_BLOCKED" in plain or "DATE_MISMATCH" in plain:
             continue
         if "Market session:" in plain or len(plain) < 10:
+            continue
+        if any(phrase.lower() in plain.lower() for phrase in rejected_phrases):
             continue
         drivers.append(plain[:600])
         break

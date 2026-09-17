@@ -16,7 +16,7 @@ import fetch_market_data
 from generate_report import validate_portfolio_quotes, validate_private_advice_text
 from instrument_registry import build_universe, resolve_instrument
 from market_context import build_market_context
-from market_session import classify_us_session, report_market_date, us_open_should_run
+from market_session import classify_us_session, get_target_market_date, report_market_date, us_open_should_run
 from models import PortfolioActionBrief, PortfolioActionItem, PriceReference, QuoteObservation, Snapshot, Trigger
 from portfolio_context import EncryptedPortfolioProvider, PortfolioContextProvider
 from providers import observation_from_daily_quote
@@ -217,8 +217,17 @@ class SessionEngineTest(unittest.TestCase):
         self.assertEqual(report_market_date("us_close", dt), "2026-08-27")
 
     def test_close_reports_expect_regular_quotes(self):
-        self.assertEqual(fetch_market_data._expected_session("us_close"), "REGULAR")
-        self.assertEqual(fetch_market_data._expected_session("tw_close"), "REGULAR")
+        with patch("fetch_market_data.datetime") as clock:
+            clock.now.return_value = datetime(2026, 9, 18, 14, 23, tzinfo=ZoneInfo("Asia/Taipei"))
+            self.assertEqual(fetch_market_data._expected_session("tw_close"), "REGULAR")
+            clock.now.return_value = datetime(2026, 9, 17, 16, 30, tzinfo=NY)
+            self.assertEqual(fetch_market_data._expected_session("us_close"), "REGULAR")
+
+    def test_early_manual_close_run_uses_previous_completed_session(self):
+        early_tw = datetime(2026, 9, 18, 9, 0, tzinfo=ZoneInfo("Asia/Taipei"))
+        early_us = datetime(2026, 9, 17, 10, 0, tzinfo=NY)
+        self.assertEqual(get_target_market_date("tw_close", "TW", now=early_tw), "2026-09-17")
+        self.assertEqual(get_target_market_date("us_close", "US", now=early_us), "2026-09-16")
 
 
 class QuoteQualityTest(unittest.TestCase):
@@ -472,6 +481,13 @@ class SafetyAndWorkflowTest(unittest.TestCase):
         self.assertEqual(draft.rendered_markdown.count("台股收盤日報"), 1)
         self.assertNotIn("指數與市場概況", draft.rendered_markdown)
         self.assertNotIn("99999", draft.rendered_markdown)
+
+    def test_speculative_or_blocked_driver_is_rejected(self):
+        context = build_market_context(_snapshot({"2330": _obs("2330")}), "tw_close", run_id="test")
+        narrative = "## 1. 今日一句話\n因數據阻斷，Smart Money 對後市多頭抱持強烈預期。"
+        draft = build_public_draft(context, narrative)
+        self.assertEqual(draft.drivers, [])
+        self.assertNotIn("Smart Money", draft.rendered_markdown)
 
     def test_empty_optional_sections_are_omitted(self):
         context = build_market_context(_snapshot({"2330": _obs("2330")}), "tw_close", run_id="test")
