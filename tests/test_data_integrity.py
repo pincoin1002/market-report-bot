@@ -4,7 +4,7 @@ import os
 import inspect
 import subprocess
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from pathlib import Path
 from unittest.mock import patch
@@ -445,6 +445,56 @@ class SafetyAndWorkflowTest(unittest.TestCase):
         result = check_structure(text, "us_open")
         self.assertFalse(result.truncated)
         self.assertFalse(result.sections_missing)
+
+    def test_daily_close_uses_exchange_close_timestamp_not_retrieval_time(self):
+        from providers import observation_from_daily_quote
+        from models import Quote
+
+        retrieved = datetime(2026, 9, 17, 19, 58, tzinfo=timezone(timedelta(hours=8)))
+        obs = observation_from_daily_quote(
+            resolve_instrument("2330"),
+            Quote(price=2425, prev_close=2400, change_pct=1.04, data_date="2026-09-17"),
+            "twse_openapi", "REGULAR", retrieved, expected_date="2026-09-17",
+        )
+        self.assertEqual(obs.provider_timestamp.hour, 13)
+        self.assertEqual(obs.provider_timestamp.minute, 30)
+        self.assertEqual(obs.provider_timestamp.utcoffset(), timedelta(hours=8))
+        context = build_market_context(_snapshot({"2330": obs}), "tw_close", run_id="test")
+        rendered = build_public_draft(context).rendered_markdown
+        self.assertIn("2026-09-17 13:30 UTC+08:00", rendered)
+        self.assertNotIn("19:58", rendered)
+
+    def test_nested_llm_report_is_reduced_to_one_grounded_driver(self):
+        context = build_market_context(_snapshot({"2330": _obs("2330")}), "tw_close", run_id="test")
+        narrative = """# 台股收盤日報\n\n## 1. 今日一句話\n台積電領軍，指數收高，但成交結構分化。\n\n---\n\n## 2. 指數與市場概況\n| 指標 | 數值 |\n| TAIEX | 99999 |\n\n## 3. 盤中走勢復盤\n不應進入外層報告。"""
+        draft = build_public_draft(context, narrative)
+        self.assertEqual(draft.drivers, ["台積電領軍，指數收高，但成交結構分化。"])
+        self.assertEqual(draft.rendered_markdown.count("台股收盤日報"), 1)
+        self.assertNotIn("指數與市場概況", draft.rendered_markdown)
+        self.assertNotIn("99999", draft.rendered_markdown)
+
+    def test_empty_optional_sections_are_omitted(self):
+        context = build_market_context(_snapshot({"2330": _obs("2330")}), "tw_close", run_id="test")
+        rendered = build_public_draft(context).rendered_markdown
+        self.assertNotIn("Rotation / Regime", rendered)
+        self.assertNotIn("High-Impact Event Calendar", rendered)
+        self.assertNotIn("等待下一份", rendered)
+
+    def test_telegram_chunking_preserves_content_and_line_boundaries(self):
+        from generate_report import _split_message
+
+        text = "\n\n".join(f"段落 {i} " + ("資料" * 90) for i in range(40))
+        chunks = _split_message(text, max_len=500)
+        self.assertTrue(all(len(chunk) <= 500 for chunk in chunks))
+        normalized = "\n\n".join(chunk.strip() for chunk in chunks)
+        self.assertEqual(normalized, text)
+
+    def test_internal_date_mismatch_codes_not_rendered_publicly(self):
+        bad = _obs("AAPL", quality="DATE_MISMATCH")
+        context = build_market_context(_snapshot({"2330": _obs("2330"), "AAPL": bad}), "tw_close", run_id="test")
+        rendered = build_public_draft(context).rendered_markdown
+        self.assertNotIn("DATE_MISMATCH", rendered)
+        self.assertNotIn("AAPL", rendered)
 
     def test_workflow_generation_precedes_validation_and_delivery(self):
         text = (ROOT / ".github/workflows/us-open.yml").read_text(encoding="utf-8")

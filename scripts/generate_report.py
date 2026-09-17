@@ -344,16 +344,32 @@ def save_report(report: str, report_type: str) -> Path:
 # ── Telegram ───────────────────────────────────────────────────────────────────
 
 def _split_message(text: str, max_len: int = 4096) -> list[str]:
+    """Split at paragraph/line boundaries without dropping report content."""
+    if len(text) <= max_len:
+        return [text]
     chunks: list[str] = []
-    while text:
-        if len(text) <= max_len:
-            chunks.append(text)
-            break
-        idx = text.rfind("\n", 0, max_len)
-        if idx <= 0:
-            idx = max_len
-        chunks.append(text[:idx])
-        text = text[idx:].lstrip("\n")
+    current = ""
+    paragraphs = re.split(r"(\n\n+)", text)
+    for part in paragraphs:
+        if not part:
+            continue
+        if len(current) + len(part) <= max_len:
+            current += part
+            continue
+        if current.strip():
+            chunks.append(current.rstrip())
+            current = ""
+        while len(part) > max_len:
+            boundary = part.rfind("\n", 0, max_len)
+            if boundary <= 0:
+                boundary = part.rfind(" ", 0, max_len)
+            if boundary <= 0:
+                boundary = max_len
+            chunks.append(part[:boundary].rstrip())
+            part = part[boundary:].lstrip()
+        current = part
+    if current.strip():
+        chunks.append(current.rstrip())
     return chunks
 
 

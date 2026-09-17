@@ -19,10 +19,10 @@ from structured_reports import validate_public_draft
 log = logging.getLogger("validate")
 
 REQUIRED_SECTIONS = {
-    "tw_open": ["Executive Market State", "What Changed Since Last Report", "Top Market Drivers", "Rotation / Regime", "Watch Into Close"],
-    "tw_close": ["Executive Market State", "What Changed Since Last Report", "Top Market Drivers", "Rotation / Regime", "Watch Into Close"],
-    "us_open": ["Executive Market State", "What Changed Since Last Report", "Top Market Drivers", "Rotation / Regime", "Watch Into Close"],
-    "us_close": ["Executive Market State", "What Changed Since Last Report", "Top Market Drivers", "Rotation / Regime", "Watch Into Close"],
+    "tw_open": ["Executive Market State", "What Changed Since Last Report"],
+    "tw_close": ["Executive Market State", "What Changed Since Last Report"],
+    "us_open": ["Executive Market State", "What Changed Since Last Report"],
+    "us_close": ["Executive Market State", "What Changed Since Last Report"],
 }
 
 

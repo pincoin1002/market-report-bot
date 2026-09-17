@@ -3,9 +3,9 @@ name: Telegram Q&A Bot
 on:
   workflow_dispatch:
   schedule:
-    # Backup heartbeat: keeps the bot alive if the external per-minute
-    # dispatcher ever dies. Concurrency below dedupes overlapping runs.
-    - cron: "*/5 * * * *"
+    # Low-frequency backup for the external dispatcher. A */5 GitHub cron was
+    # heavily throttled and delayed the time-sensitive report workflows.
+    - cron: "17 * * * *"
 
 concurrency:
   group: telegram-bot

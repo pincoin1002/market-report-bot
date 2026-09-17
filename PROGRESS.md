@@ -1,5 +1,15 @@
 # PROGRESS
 
+## 2026-09-18
+
+- Investigated the broken 2026-09-17 Taiwan close Telegram report. GitHub run `35218443315` was a scheduled event created at 11:57 UTC, over five hours after the configured 06:30 UTC cron; the repo's `*/5` Telegram heartbeat was also being throttled into multi-hour intervals.
+- Corrected daily-close timestamp semantics: Taiwan observations now carry the official 13:30 TPE close and US observations the official 16:00 ET close. Retrieval time remains separate and is no longer rendered as quote time.
+- Prevented nested reports by reducing Gemini output to a bounded grounded driver inside the structured draft. Headings, tables, internal quality codes, and the rest of the legacy full-report output cannot enter `Top Market Drivers`.
+- Removed mandatory empty/filler sections and internal `DATE_MISMATCH` ticker lists from public rendering; optional sections are omitted when no verified content exists.
+- Replaced fixed-position Telegram splitting with paragraph/line-aware chunking that preserves all content.
+- Reduced the GitHub Actions Telegram backup heartbeat from every five minutes to hourly and moved `tw-close` to an off-peak minute to reduce scheduled-event throttling.
+- Regression gate: `python -m unittest discover -s tests -v` PASS with 78 tests; `python -m py_compile scripts/*.py` PASS; workflow YAML parse PASS; `scripts/dry_run_v2.py` PASS for `tw_open`, `tw_close`, `us_open`, and `us_close` with both public/private structured validation green.
+
 ## 2026-09-10
 
 - Final date-alignment hardening continued on branch `fix-adr-market-data-date-alignment` from recovered clean state `43fe19030ea6aabddd2ccbc752f8b7d00b5d72eb` in isolated checkout `/private/tmp/market-report-bot-date-alignment`; main was not touched.

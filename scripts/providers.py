@@ -8,14 +8,14 @@ via plain requests for everything else — survives yfinance library breakage).
 
 import logging
 import math
-from datetime import datetime, timezone
+from datetime import datetime, time, timezone
 from typing import Protocol
 
 import requests
 import yfinance as yf
 from tenacity import retry, stop_after_attempt, wait_exponential_jitter
 
-from market_session import NY, classify_us_session
+from market_session import NY, TPE, classify_us_session
 from models import InstrumentSpec, Quote, QuoteObservation, Session
 from quote_quality import validate_observation
 
@@ -242,7 +242,13 @@ class YahooExtendedHoursProvider:
 def observation_from_daily_quote(spec: InstrumentSpec, q: Quote, provider: str,
                                  session: Session, retrieved_at: datetime,
                                  expected_date: str | None = None) -> QuoteObservation:
-    observed_at = datetime.fromisoformat(f"{q.data_date[:10].replace('/', '-')}T00:00:00+00:00")
+    market_day = datetime.strptime(q.data_date[:10].replace("/", "-"), "%Y-%m-%d").date()
+    if spec.market == "TW":
+        observed_at = datetime.combine(market_day, time(13, 30), tzinfo=TPE)
+    elif spec.market == "US":
+        observed_at = datetime.combine(market_day, time(16, 0), tzinfo=NY)
+    else:
+        observed_at = datetime.combine(market_day, time(0, 0), tzinfo=timezone.utc)
     quote_id = f"{spec.canonical_symbol}:{q.data_date}:{session}:{provider}"
     obs = QuoteObservation(
         quote_id=quote_id,
@@ -253,7 +259,9 @@ def observation_from_daily_quote(spec: InstrumentSpec, q: Quote, provider: str,
         session=session,
         market_date=q.data_date,
         observed_at=observed_at,
-        provider_timestamp=None,
+        # Daily providers do not expose the last trade timestamp.  The only
+        # defensible timestamp is the exchange's official regular close.
+        provider_timestamp=observed_at,
         retrieved_at=retrieved_at,
         provider=provider,
         quote_type="OFFICIAL_CLOSE" if session in ("REGULAR", "PREVIOUS_CLOSE", "CLOSED_REFERENCE") else "REFERENCE",

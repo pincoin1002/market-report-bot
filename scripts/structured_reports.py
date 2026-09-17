@@ -46,7 +46,7 @@ def build_material_changes(context: MarketContext) -> list[str]:
         obs = context.quotes.get(symbol) or context.macro_observations.get(symbol)
         if not obs or obs.quality_status != "VALID":
             continue
-        threshold = 0.5 if symbol in ("TNX", "US2Y") else 1.0
+        threshold = 0.5 if symbol in ("TNX", "US2Y", "TAIEX") else 1.0
         if abs(obs.change_pct) >= threshold:
             changes.append(f"{symbol} {obs.change_pct:+.2f}%")
     return changes[:5]
@@ -64,9 +64,9 @@ def build_public_draft(context: MarketContext, narrative: str | None = None) -> 
     session_label = human_session_label(context.report_type, context.market_session)
     material = context.material_changes or build_material_changes(context)
     optional = [
-        OptionalModule(name="FedWatch", state="PARTIAL", summary="僅在搜尋 grounding 可用且找到可靠來源時呈現"),
-        OptionalModule(name="ETF flows", state="PARTIAL", summary="僅在可靠資料可取得時呈現"),
-        OptionalModule(name="options positioning", state="PARTIAL", summary="弱資料不硬填"),
+        OptionalModule(name="FedWatch", state="UNAVAILABLE"),
+        OptionalModule(name="ETF flows", state="UNAVAILABLE"),
+        OptionalModule(name="options positioning", state="UNAVAILABLE"),
     ]
     draft = MarketReportDraft(
         run_id=context.run_id,
@@ -74,16 +74,51 @@ def build_public_draft(context: MarketContext, narrative: str | None = None) -> 
         headline=f"{title} {context.market_date}｜{session_label}",
         market_state=[f"{r.canonical_symbol}: {r.value:g} ({r.session})" for r in refs[:8]],
         material_changes=material,
-        drivers=[],
-        rotation="僅列 verified quote 與 search-grounded material events；弱資料模組不硬填。",
+        drivers=_extract_grounded_drivers(narrative),
+        rotation="",
         event_calendar=[],
         optional_modules=optional,
         watch_signals=material[:5],
         data_quality=[f"{k}: {v}" for k, v in context.data_quality.items()],
         price_references=refs,
     )
-    draft.rendered_markdown = render_public_report(draft, context, narrative)
+    draft.rendered_markdown = render_public_report(draft, context)
     return draft
+
+
+def _extract_grounded_drivers(narrative: str | None) -> list[str]:
+    """Reduce model prose to bounded content, never a nested report.
+
+    Gemini is asked for a report by the legacy prompts.  Until those prompts
+    are fully retired, only the first substantive prose after 今日一句話 is
+    accepted into the structured draft.  Headings, tables and diagnostics are
+    deliberately rejected.
+    """
+    if not narrative or "新聞搜尋目前不可用" in narrative:
+        return []
+    lines = [line.strip() for line in narrative.splitlines()]
+    start = 0
+    for idx, line in enumerate(lines):
+        if "今日一句話" in line:
+            start = idx + 1
+            break
+    drivers: list[str] = []
+    for line in lines[start:]:
+        plain = re.sub(r"^[#>*\-•\s]+", "", line).strip()
+        plain = plain.replace("**", "").replace("__", "")
+        if not plain or plain in ("---", "—"):
+            continue
+        if line.startswith("#") or re.match(r"^\*{0,2}\d+[.、]", plain):
+            if drivers:
+                break
+            continue
+        if line.startswith("|") or "DATA_BLOCKED" in plain or "DATE_MISMATCH" in plain:
+            continue
+        if "Market session:" in plain or len(plain) < 10:
+            continue
+        drivers.append(plain[:600])
+        break
+    return drivers
 
 
 def render_public_report(draft: MarketReportDraft, context: MarketContext,
@@ -100,23 +135,25 @@ def render_public_report(draft: MarketReportDraft, context: MarketContext,
         as_of = (ref.as_of or obs.retrieved_at).strftime("%Y-%m-%d %H:%M %Z")
         lines.append(f"| {ref.canonical_symbol} | {ref.value:g} | {ref.session} | {as_of} | {obs.quality_status} |")
     lines += ["", "## 2. What Changed Since Last Report"]
-    lines += [f"- {item}" for item in (draft.material_changes or ["⚠️ 無達 materiality 門檻的 deterministic delta"])]
-    lines += ["", "## 3. Top Market Drivers"]
-    if narrative and "新聞搜尋目前不可用" not in narrative:
-        lines.append(narrative[:1800])
-    else:
-        lines.append("⚠️ 新聞搜尋目前不可用或未通過 grounding；不產生即時新聞歸因。")
-    lines += ["", "## 4. Rotation / Regime", draft.rotation]
-    lines += ["", "## 5. High-Impact Event Calendar", "⚠️ 僅在可靠搜尋結果可得時呈現；本段不以模型記憶補完。"]
-    lines += ["", "## 6. Watch Into Close / Next Report"]
-    lines += [f"- {item}" for item in (draft.watch_signals or ["等待下一份 validated MarketContext"])]
-    unavailable = [m for m in draft.optional_modules if m.state != "AVAILABLE"]
+    lines += [f"- {item}" for item in (draft.material_changes or ["今日未出現達監控門檻的主要市場變化。"])]
+    if draft.drivers:
+        lines += ["", "## 3. Top Market Drivers"]
+        lines += [f"- {item}" for item in draft.drivers]
+    if draft.rotation:
+        lines += ["", "## 4. Rotation / Regime", draft.rotation]
+    if draft.event_calendar:
+        lines += ["", "## 5. High-Impact Event Calendar"]
+        lines += [f"- {item}" for item in draft.event_calendar]
+    if draft.watch_signals:
+        lines += ["", "## 6. Watch Into Close / Next Report"]
+        lines += [f"- {item}" for item in draft.watch_signals]
+    unavailable = [m for m in draft.optional_modules if m.state != "AVAILABLE" and m.summary]
     if unavailable or draft.data_quality:
         lines += ["", "## 7. Data Limitations"]
         for module in unavailable:
             lines.append(f"- {module.name}: {module.state} — {module.summary}")
-        for issue in draft.data_quality:
-            lines.append(f"- {issue}")
+        if draft.data_quality:
+            lines.append(f"- {len(draft.data_quality)} 項參考行情未通過驗證，已從報告數字與分析中排除。")
     return "\n".join(lines).strip()
 
 
