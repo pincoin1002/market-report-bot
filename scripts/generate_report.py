@@ -202,19 +202,6 @@ def _build_snapshot_block(snapshot: Snapshot) -> str:
             lines.append(f"- {q.name}: {q.price:.4f} ({q.change_pct:+.2f}%)")
         lines.append("")
 
-    if snapshot.quote_observations:
-        lines += [
-            "**Quote Semantics / Data Quality**",
-            "| Symbol | Session | Market Date | Retrieved | Provider | Quality | Quote ID |",
-            "|--------|---------|-------------|-----------|----------|---------|----------|",
-        ]
-        for key, obs in snapshot.quote_observations.items():
-            lines.append(
-                f"| {key} | {obs.session} | {obs.market_date} | "
-                f"{obs.retrieved_at.strftime('%Y-%m-%d %H:%M %Z')} | "
-                f"{obs.provider} | {obs.quality_status} | {obs.quote_id} |"
-            )
-        lines.append("")
 
     # Deterministic ADR premium calculation for tw_open
     if snapshot.report_type == "tw_open":
@@ -398,6 +385,15 @@ def _clean_markdown_for_telegram_report(text: str) -> str:
                 continue
             else:
                 # This is a data row, convert to bulleted text
+                if (headers and len(headers) >= 3 and headers[0] in ("標的", "Symbol", "代號", "股票")
+                        and headers[1] in ("最新報價", "收盤價", "最新", "收盤", "Quote")):
+                    name = parts[0]
+                    price = parts[1]
+                    chg = parts[2]
+                    extra = " ｜ ".join(p for p in parts[3:] if p and p not in ("⚠️ 未取得", "None", "—"))
+                    row_str = f"• *{name}*: {price} ({chg})" + (f" ｜ {extra}" if extra else "")
+                    cleaned_lines.append(row_str)
+                    continue
                 row_items = []
                 for header, val in zip(headers, parts):
                     if val and val != "⚠️ 未取得" and val != "None":

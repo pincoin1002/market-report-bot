@@ -286,14 +286,19 @@ def main() -> None:
                   extra={"coverage": snapshot.fetch_coverage, "min": MIN_COVERAGE})
         sys.exit(1)  # workflow fails; report can rerun after providers recover
 
+    universe = build_universe()
     primary_market = "TW" if report_type.startswith("tw_") else "US"
-    primary_valid = sum(
-        1 for obs in snapshot.quote_observations.values()
-        if obs.market == primary_market and obs.quality_status == "VALID"
+    primary_equities_valid = sum(
+        1 for key, obs in snapshot.quote_observations.items()
+        if obs.market == primary_market
+        and key in universe
+        and universe[key].asset_type in ("EQUITY", "ETF", "INDEX")
+        and obs.quality_status == "VALID"
     )
-    if primary_valid == 0:
-        log.error("no valid primary-market quotes — refusing to build report",
-                  extra={"report_type": report_type, "primary_market": primary_market})
+    if primary_equities_valid < 3:
+        log.error("insufficient valid primary-market equities/indices — refusing to build report",
+                  extra={"report_type": report_type, "primary_market": primary_market,
+                         "valid_equities": primary_equities_valid})
         sys.exit(1)
 
     if snapshot.portfolio_quote_coverage is not None and snapshot.portfolio_quote_coverage < 1.0:

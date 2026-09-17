@@ -61,11 +61,12 @@ def _tw(symbol: str, name: str, provider: str | None = None,
     )
 
 
-def _macro(symbol: str, name: str, provider: str, currency: str = "", market: str = "GLOBAL") -> InstrumentSpec:
+def _macro(symbol: str, name: str, provider: str, currency: str = "",
+           market: str = "GLOBAL", asset_type: str = "MACRO") -> InstrumentSpec:
     return InstrumentSpec(
         canonical_symbol=symbol,
         display_name=name,
-        asset_type="MACRO",
+        asset_type=asset_type,
         exchange="",
         currency=currency,
         market=market,
@@ -141,17 +142,17 @@ REGISTRY: dict[str, InstrumentSpec] = {
     "3324": _tw("3324", "雙鴻", provider="3324.TWO", exchange="TPEX"),
     "2421": _tw("2421", "建準"),
     "2301": _tw("2301", "光寶科"),
-    "SPX": _macro("SPX", "S&P 500", "^GSPC", market="US"),
-    "NDX": _macro("NDX", "NASDAQ 100", "^NDX", market="US"),
-    "DJI": _macro("DJI", "Dow Jones", "^DJI", market="US"),
-    "RUT": _macro("RUT", "Russell 2000", "^RUT", market="US"),
-    "SOX": _macro("SOX", "費城半導體 SOX", "^SOX", market="US"),
+    "SPX": _macro("SPX", "S&P 500", "^GSPC", market="US", asset_type="INDEX"),
+    "NDX": _macro("NDX", "NASDAQ 100", "^NDX", market="US", asset_type="INDEX"),
+    "DJI": _macro("DJI", "Dow Jones", "^DJI", market="US", asset_type="INDEX"),
+    "RUT": _macro("RUT", "Russell 2000", "^RUT", market="US", asset_type="INDEX"),
+    "SOX": _macro("SOX", "費城半導體 SOX", "^SOX", market="US", asset_type="INDEX"),
     "VIX": _macro("VIX", "VIX", "^VIX", market="US"),
     "TNX": _macro("TNX", "US10Y Yield", "^TNX", "percent", market="US"),
     "US2Y": _macro("US2Y", "US2Y Yield", "2YY=F", "percent", market="US"),
     "DXY": _macro("DXY", "美元指數", "DX-Y.NYB", market="US"),
     "BTC": _macro("BTC", "Bitcoin", "BTC-USD", "USD", market="GLOBAL"),
-    "TAIEX": _macro("TAIEX", "加權指數", "^TWII", market="TW"),
+    "TAIEX": _macro("TAIEX", "加權指數", "^TWII", market="TW", asset_type="INDEX"),
     "GC": _macro("GC", "黃金 GC", "GC=F", "USD", market="GLOBAL"),
     "CL": _macro("CL", "原油 WTI", "CL=F", "USD", market="GLOBAL"),
     "USDTWD": _macro("USDTWD", "USD/TWD", "TWD=X", "TWD", market="TW"),
@@ -183,7 +184,7 @@ def quote_symbol(spec: InstrumentSpec) -> str:
     return spec.provider_symbols["yfinance"]
 
 
-def build_universe(portfolio: dict | None) -> dict[str, InstrumentSpec]:
+def build_universe(portfolio: dict | None = None) -> dict[str, InstrumentSpec]:
     symbols = set(CORE_MARKET_SYMBOLS) | set(portfolio_symbols(portfolio))
     universe = {sym: resolve_instrument(sym) for sym in symbols}
     for sym in portfolio_symbols(portfolio):
