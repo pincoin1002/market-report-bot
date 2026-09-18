@@ -98,6 +98,124 @@ def build_material_changes(context: MarketContext) -> list[str]:
     return changes[:6]
 
 
+def derive_taiex_intraday_character(taiex: TaiexMarketSummary, prev_close: float | None = None) -> list[str]:
+    lines = []
+    if taiex.high is not None and taiex.low is not None:
+        pc = prev_close or (taiex.close - taiex.point_change)
+        if pc > 0:
+            high_gain = taiex.high - pc
+            close_gain = taiex.close - pc
+            if high_gain > 50 and close_gain > 0:
+                faded = taiex.high - taiex.close
+                retrace_pct = (faded / high_gain) * 100
+                retrace_tenths = int(round(retrace_pct / 10))
+                if retrace_pct >= 25:
+                    lines.append(f"盤中高點漲幅達 {(high_gain / pc) * 100:+.2f}%，終場回吐約 {retrace_tenths} 成漲幅，收斂至 {taiex.change_pct:+.2f}%。")
+                elif retrace_pct <= 10:
+                    lines.append(f"終場以近全日最高點作收（距高點僅差 {faded:,.2f} 點），買盤貫徹至尾盤。")
+            elif taiex.close < pc and (pc - taiex.low) > 50:
+                low_drop = pc - taiex.low
+                rebound = taiex.close - taiex.low
+                rebound_pct = (rebound / low_drop) * 100
+                if rebound_pct >= 25:
+                    lines.append(f"盤中低點跌幅達 {((taiex.low - pc) / pc) * 100:+.2f}%，尾盤自低點拉升 {rebound:,.2f} 點，跌幅收至 {taiex.change_pct:+.2f}%。")
+    return lines
+
+
+def derive_state_changes(context: MarketContext) -> list[str]:
+    changes = []
+    inst = context.institutional_flows
+    taiex = context.taiex_summary
+
+    if inst and inst.foreign_buy_sell_ntd_billions is not None:
+        curr = inst.foreign_buy_sell_ntd_billions
+        prev = inst.foreign_buy_sell_prev_ntd_billions
+        if prev is not None:
+            if prev < 0 and curr > 0:
+                changes.append(f"外資現貨由賣轉買：前日賣超 {abs(prev):.2f} 億 $\\to$ 今日買超 {curr:.2f} 億台幣。")
+            elif prev > 0 and curr < 0:
+                changes.append(f"外資現貨由買轉賣：前日買超 {prev:.2f} 億 $\\to$ 今日賣超 {abs(curr):.2f} 億台幣。")
+            elif curr > 0 and curr > prev + 50:
+                changes.append(f"外資買超擴大：由 {prev:.2f} 億增至 {curr:.2f} 億台幣。")
+            elif curr < 0 and curr < prev - 50:
+                changes.append(f"外資賣超擴大：由 {abs(prev):.2f} 億擴至 {abs(curr):.2f} 億台幣。")
+        else:
+            action = "買超" if curr >= 0 else "賣超"
+            changes.append(f"外資現貨單日{action} {abs(curr):.2f} 億台幣。")
+
+    if inst and inst.foreign_futures_net_oi is not None:
+        oi = inst.foreign_futures_net_oi
+        chg = inst.foreign_futures_oi_change
+        pos_str = f"淨空單 {abs(oi):,} 口" if oi < 0 else f"淨多單 {oi:,} 口"
+        if chg is not None and abs(chg) >= 500:
+            chg_str = f"增加 {abs(chg):,} 口" if (oi < 0 and chg < 0) or (oi > 0 and chg > 0) else f"減少 {abs(chg):,} 口"
+            changes.append(f"外資台指期{pos_str}（較前日{chg_str}）。")
+        else:
+            changes.append(f"外資台指期維持{pos_str}。")
+
+    if taiex and taiex.turnover_ntd_billions is not None and inst and inst.turnover_prev_ntd_billions is not None:
+        curr_t = taiex.turnover_ntd_billions
+        prev_t = inst.turnover_prev_ntd_billions
+        t_delta = round(curr_t - prev_t, 2)
+        if abs(t_delta) >= 100:
+            dir_str = "擴增" if t_delta > 0 else "萎縮"
+            changes.append(f"成交量{dir_str}：由前日 {prev_t:,.2f} 億{dir_str} {abs(t_delta):,.2f} 億至 {curr_t:,.2f} 億台幣。")
+
+    if taiex:
+        close_p = taiex.close
+        prev_p = close_p - taiex.point_change
+        for round_level in [46000.0, 45000.0, 40000.0, 35000.0, 30000.0, 25000.0, 24000.0, 23000.0, 22000.0, 21000.0, 20000.0]:
+            if prev_p < round_level <= close_p:
+                changes.append(f"指數收復整數關：收在 {close_p:,.2f} 點，站回 {int(round_level):,} 點。")
+                break
+            elif prev_p >= round_level > close_p:
+                changes.append(f"指數失守整數關：收在 {close_p:,.2f} 點，跌破 {int(round_level):,} 點。")
+                break
+
+    if taiex and taiex.advancing is not None and taiex.declining is not None:
+        if taiex.advancing > taiex.declining * 1.5:
+            changes.append(f"市場結構轉強：上漲 {taiex.advancing} 家明顯多於下跌 {taiex.declining} 家，多方擴散良好。")
+        elif taiex.declining > taiex.advancing * 1.5:
+            changes.append(f"市場結構轉弱：下跌 {taiex.declining} 家顯著多於上漲 {taiex.advancing} 家，權值獨撐廣度欠佳。")
+
+    usd_obs = context.quotes.get("USDTWD") or context.macro_observations.get("USDTWD")
+    if usd_obs and usd_obs.quality_status == "VALID":
+        if abs(usd_obs.change_pct) >= 0.1:
+            dir_str = "升值" if usd_obs.change_pct < 0 else "貶值"
+            changes.append(f"新台幣對美元走勢：終場{dir_str}至 {usd_obs.price:.3f}（變動 {usd_obs.change_pct:+.2f}%）。")
+
+    return changes
+
+
+def derive_tomorrow_watch_signals(context: MarketContext) -> list[str]:
+    signals = []
+    taiex = context.taiex_summary
+    inst = context.institutional_flows
+
+    if taiex:
+        for round_level in [46000.0, 45000.0, 40000.0, 35000.0, 30000.0, 25000.0, 24000.0, 23000.0, 22000.0, 21000.0, 20000.0]:
+            if taiex.close >= round_level:
+                signals.append(f"加權指數整數支撐：觀察 {int(round_level):,} 點能否守穩；若失守則今日突破延續性降低。")
+                break
+        if taiex.high and taiex.high > taiex.close + 30:
+            signals.append(f"盤中高點反壓：今日高點 {taiex.high:,.2f} 點留有上影線賣壓，明日需量能維持方具消化動能。")
+
+    if inst and inst.foreign_futures_net_oi is not None and inst.foreign_futures_net_oi < -30000:
+        signals.append(f"外資期貨空單防線：目前淨空單 {abs(inst.foreign_futures_net_oi):,} 口仍處高位，觀察是否出現實質減倉以確認避險情緒放緩。")
+
+    usd_obs = context.quotes.get("USDTWD") or context.macro_observations.get("USDTWD")
+    if usd_obs and usd_obs.quality_status == "VALID":
+        ref_level = 32.0 if usd_obs.price <= 32.2 else 32.5
+        signals.append(f"匯率關鍵水位：觀察 USD/TWD 是否能穩定在 {ref_level:.2f} 下方，若匯價走升將有助於外資現貨買超延續。")
+
+    for event in context.event_facts:
+        summary = event.get("summary") or event.get("event")
+        if summary:
+            signals.append(f"重要事件：關注「{summary}」之後續市場反應與定價。")
+
+    return signals
+
+
 def build_public_draft(context: MarketContext, narrative: str | None = None) -> MarketReportDraft:
     symbols = select_report_symbols(context)
     refs = [quote_price_reference(symbol, context) for symbol in symbols]
@@ -108,7 +226,13 @@ def build_public_draft(context: MarketContext, narrative: str | None = None) -> 
         "tw_close": "台股收盤日報",
     }[context.report_type]
     session_label = human_session_label(context.report_type, context.market_session)
-    material = context.material_changes or build_material_changes(context)
+    if context.report_type == "tw_close":
+        material = context.material_changes or derive_state_changes(context)
+        watch = derive_tomorrow_watch_signals(context)
+    else:
+        material = context.material_changes or build_material_changes(context)
+        watch = material[:5]
+
     optional = [
         OptionalModule(name="FedWatch", state="UNAVAILABLE"),
         OptionalModule(name="ETF flows", state="UNAVAILABLE"),
@@ -124,12 +248,15 @@ def build_public_draft(context: MarketContext, narrative: str | None = None) -> 
         rotation="",
         event_calendar=[],
         optional_modules=optional,
-        watch_signals=material[:5],
+        watch_signals=watch,
         data_quality=[f"{k}: {v}" for k, v in context.data_quality.items()],
         price_references=refs,
+        taiex_summary=context.taiex_summary,
+        institutional_flows=context.institutional_flows,
     )
     draft.rendered_markdown = render_public_report(draft, context, narrative)
     return draft
+
 
 
 def _extract_grounded_drivers(narrative: str | None, context: MarketContext | None = None) -> list[str]:
@@ -168,6 +295,24 @@ def _extract_grounded_drivers(narrative: str | None, context: MarketContext | No
             delta = round(abs(obs.price - obs.previous_regular_close), 2)
             allowed_numbers.add(delta)
             allowed_numbers.add(float(int(delta)))
+        if context.taiex_summary:
+            ts = context.taiex_summary
+            for val in [ts.open, ts.high, ts.low, ts.close, ts.point_change, ts.change_pct,
+                        ts.turnover_ntd_billions, ts.advancing, ts.declining, ts.unchanged]:
+                if val is not None:
+                    allowed_numbers.add(round(float(val), 2))
+                    allowed_numbers.add(round(abs(float(val)), 2))
+                    allowed_numbers.add(float(int(abs(val))))
+        if context.institutional_flows:
+            fl = context.institutional_flows
+            for val in [fl.foreign_buy_sell_ntd_billions, fl.investment_trust_buy_sell_ntd_billions,
+                        fl.dealer_buy_sell_ntd_billions, fl.total_buy_sell_ntd_billions,
+                        fl.foreign_futures_net_oi, fl.foreign_futures_oi_change,
+                        fl.foreign_buy_sell_prev_ntd_billions, fl.turnover_prev_ntd_billions]:
+                if val is not None:
+                    allowed_numbers.add(round(float(val), 2))
+                    allowed_numbers.add(round(abs(float(val)), 2))
+                    allowed_numbers.add(float(int(abs(val))))
 
     lines = [line.strip() for line in narrative.splitlines()]
     start = 0
@@ -213,6 +358,9 @@ def _extract_grounded_drivers(narrative: str | None, context: MarketContext | No
 
 def render_public_report(draft: MarketReportDraft, context: MarketContext,
                          narrative: str | None = None) -> str:
+    if context.report_type == "tw_close":
+        return _render_tw_close_report(draft, context)
+
     lines = [
         f"# {draft.headline}",
         "",
@@ -258,7 +406,6 @@ def render_public_report(draft: MarketReportDraft, context: MarketContext,
             lines.append(f"| {display} | {price_str} | {obs.change_pct:+.2f}% | {session_label} |")
     lines.append("")
 
-
     # Section 2: What Changed Since Last Report
     if draft.material_changes:
         lines.append(f"## {sec_num}. 相較上一交易日變化 (What Changed Since Last Report)")
@@ -303,6 +450,162 @@ def render_public_report(draft: MarketReportDraft, context: MarketContext,
     # Section 7: Data Notes (reader-facing note if degraded, NEVER ticker dumps)
     if context.degraded_mode:
         lines.append(f"## {sec_num}. 資料說明 (Data Notes)")
+        sec_num += 1
+        lines.append("- 部分外部即時新聞檢索受限，本報告行情數據均以交易所已驗證收盤價為準。")
+        lines.append("")
+
+    return "\n".join(lines).strip()
+
+
+def _render_tw_close_report(draft: MarketReportDraft, context: MarketContext) -> str:
+    """Render institutional-grade Taiwan market daily close brief (6 sections)."""
+    lines = [
+        f"# {draft.headline}",
+        "",
+    ]
+    sec_num = 1
+    taiex = context.taiex_summary
+    inst = context.institutional_flows
+
+    # Section 1: 今日市場 (Today's Market)
+    lines.append(f"## {sec_num}. 今日市場")
+    sec_num += 1
+
+    # Render all price references in table format to guarantee table formatting and symbol provenance
+    lines.append("| 標的 | 最新報價 | 漲跌幅 | 狀態 |")
+    lines.append("|---|---:|---:|---|")
+    for ref in draft.price_references:
+        obs = context.quotes.get(ref.canonical_symbol)
+        if not obs:
+            continue
+        spec = resolve_instrument(ref.canonical_symbol)
+        display = f"{spec.display_name} ({ref.canonical_symbol})" if spec.display_name != ref.canonical_symbol else ref.canonical_symbol
+        if spec.currency == "USD" or ref.value >= 1000:
+            price_str = f"{ref.value:,.2f}"
+        elif ref.value >= 100:
+            price_str = f"{ref.value:,.1f}"
+        else:
+            price_str = f"{ref.value:g}"
+        session_label = human_session_label(context.report_type, obs.session)
+        lines.append(f"| {display} | {price_str} | {obs.change_pct:+.2f}% | {session_label} |")
+    lines.append("")
+
+    # Today's market character & stats
+    if taiex:
+        char_lines = derive_taiex_intraday_character(taiex)
+        for cl in char_lines:
+            lines.append(f"- {cl}")
+        stats_parts = []
+        if taiex.open is not None:
+            stats_parts.append(f"開盤 {taiex.open:,.2f}")
+        if taiex.high is not None and taiex.low is not None:
+            stats_parts.append(f"區間 {taiex.low:,.2f}–{taiex.high:,.2f}")
+        if taiex.turnover_ntd_billions is not None:
+            stats_parts.append(f"成交量 {taiex.turnover_ntd_billions:,.2f} 億台幣")
+        if stats_parts:
+            lines.append(f"- 市場量價：{'、'.join(stats_parts)}。")
+        if taiex.advancing is not None and taiex.declining is not None:
+            unchanged_str = f"、平盤 {taiex.unchanged}" if taiex.unchanged is not None else ""
+            lines.append(f"- 大盤廣度：上漲 {taiex.advancing} 家、下跌 {taiex.declining} 家{unchanged_str}。")
+        lines.append("")
+
+    # Section 2: 法人與資金 (Institutional & Liquidity) - omit if no data
+    if inst and any(v is not None for v in (
+        inst.foreign_buy_sell_ntd_billions,
+        inst.investment_trust_buy_sell_ntd_billions,
+        inst.dealer_buy_sell_ntd_billions,
+        inst.total_buy_sell_ntd_billions,
+        inst.foreign_futures_net_oi,
+    )):
+        lines.append(f"## {sec_num}. 法人與資金")
+        sec_num += 1
+
+        flows_parts = []
+        if inst.foreign_buy_sell_ntd_billions is not None:
+            act = "買超" if inst.foreign_buy_sell_ntd_billions >= 0 else "賣超"
+            flows_parts.append(f"外資{act} {abs(inst.foreign_buy_sell_ntd_billions):.2f} 億")
+        if inst.investment_trust_buy_sell_ntd_billions is not None:
+            act = "買超" if inst.investment_trust_buy_sell_ntd_billions >= 0 else "賣超"
+            flows_parts.append(f"投信{act} {abs(inst.investment_trust_buy_sell_ntd_billions):.2f} 億")
+        if inst.dealer_buy_sell_ntd_billions is not None:
+            act = "買超" if inst.dealer_buy_sell_ntd_billions >= 0 else "賣超"
+            flows_parts.append(f"自營商{act} {abs(inst.dealer_buy_sell_ntd_billions):.2f} 億")
+        if inst.total_buy_sell_ntd_billions is not None:
+            act = "買超" if inst.total_buy_sell_ntd_billions >= 0 else "賣超"
+            flows_parts.append(f"三大法人合計{act} {abs(inst.total_buy_sell_ntd_billions):.2f} 億台幣")
+
+        if flows_parts:
+            lines.append(f"- 三大法人現貨：{'，'.join(flows_parts)}。")
+
+        if inst.foreign_futures_net_oi is not None:
+            oi = inst.foreign_futures_net_oi
+            pos_str = f"淨空單 {abs(oi):,} 口" if oi < 0 else f"淨多單 {oi:,} 口"
+            if inst.foreign_futures_oi_change is not None:
+                chg = inst.foreign_futures_oi_change
+                c_act = "增持" if chg > 0 else "減持"
+                lines.append(f"- 台指期部位：外資留倉為{pos_str}（單日{c_act} {abs(chg):,} 口）。")
+            else:
+                lines.append(f"- 台指期部位：外資留倉為{pos_str}。")
+
+        usd_obs = context.quotes.get("USDTWD") or context.macro_observations.get("USDTWD")
+        if usd_obs and usd_obs.quality_status == "VALID":
+            fx_dir = "升值" if usd_obs.change_pct < 0 else "貶值"
+            lines.append(f"- 匯率動態：USD/TWD 收在 {usd_obs.price:.3f}（變動 {usd_obs.change_pct:+.2f}%，新台幣{fx_dir}）。")
+        lines.append("")
+
+    # Section 3: 權值與族群 (Key Components & Sectors)
+    lines.append(f"## {sec_num}. 權值與族群")
+    sec_num += 1
+
+    component_summaries = []
+    weight_symbols = ["2330", "2317", "2454", "2308", "2303", "2382", "3711"]
+    for sym in weight_symbols:
+        obs = context.quotes.get(sym)
+        if obs and obs.quality_status == "VALID":
+            spec = resolve_instrument(sym)
+            component_summaries.append(f"{spec.display_name} ({sym}) {obs.price:,.2f} ({obs.change_pct:+.2f}%)")
+
+    if component_summaries:
+        lines.append(f"- 權值表現：{'、'.join(component_summaries[:5])}。")
+
+    if "2330" in context.quotes and context.quotes["2330"].quality_status == "VALID":
+        q2330 = context.quotes["2330"]
+        delta = round(q2330.price - q2330.previous_regular_close, 2)
+        dir_t = "上漲" if delta > 0 else "下跌"
+        lines.append(f"- 台積電 (2330) 單日{dir_t} {abs(delta):,.2f} 元（{q2330.change_pct:+.2f}%），對大盤具關鍵指引動能。")
+
+    if draft.rotation and not any(ph in draft.rotation for ph in ("僅列 verified quote", "弱資料模組不硬填")):
+        lines.append(f"- 族群輪動：{draft.rotation}")
+    lines.append("")
+
+    # Section 4: 今日關鍵驅動 (Top Market Drivers) - omit if no drivers
+    if draft.drivers:
+        lines.append(f"## {sec_num}. 今日關鍵驅動")
+        sec_num += 1
+        for item in draft.drivers:
+            lines.append(f"- {item}")
+        lines.append("")
+
+    # Section 5: 相較昨日 (What Changed Since Yesterday) - omit if no changes
+    if draft.material_changes:
+        lines.append(f"## {sec_num}. 相較昨日")
+        sec_num += 1
+        for item in draft.material_changes:
+            lines.append(f"- {item}")
+        lines.append("")
+
+    # Section 6: 明日觀察 (Tomorrow's Watch Signals) - omit if no watch signals
+    clean_watch = [w for w in draft.watch_signals if "等待下一份" not in w]
+    if clean_watch:
+        lines.append(f"## {sec_num}. 明日觀察")
+        sec_num += 1
+        for item in clean_watch:
+            lines.append(f"- {item}")
+        lines.append("")
+
+    # Section 7: 資料說明 (Data Notes)
+    if context.degraded_mode:
+        lines.append(f"## {sec_num}. 資料說明")
         sec_num += 1
         lines.append("- 部分外部即時新聞檢索受限，本報告行情數據均以交易所已驗證收盤價為準。")
         lines.append("")

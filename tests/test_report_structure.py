@@ -254,7 +254,7 @@ class ReportStructuralValidationTest(unittest.TestCase):
 
     def test_end_to_end_golden_pipeline_tw_close(self):
         """Run the COMPLETE production pipeline on a deterministic TW_CLOSE fixture with known values."""
-        from models import QuoteObservation, Snapshot, NamedQuote
+        from models import QuoteObservation, Snapshot, NamedQuote, TaiexMarketSummary, InstitutionalFlows
         from market_context import build_market_context
         from structured_reports import build_public_draft, render_public_report
         from validate_report import validate_rendered_report_structure, validate_numeric_provenance
@@ -267,6 +267,9 @@ class ReportStructuralValidationTest(unittest.TestCase):
             "2330": (2425.0, 2380.0, 1.89, "台積電"),
             "2317": (250.5, 248.0, 1.01, "鴻海"),
             "2454": (4500.0, 4530.0, -0.66, "聯發科"),
+            "2308": (980.0, 970.0, 1.03, "台達電"),
+            "2303": (52.5, 52.0, 0.96, "聯電"),
+            "USDTWD": (32.05, 32.10, -0.16, "美元兌台幣"),
         }
 
         # 1. Fixture/provider layer
@@ -289,11 +292,37 @@ class ReportStructuralValidationTest(unittest.TestCase):
                 data_date="2026-09-17",
             )
 
+        taiex_summary = TaiexMarketSummary(
+            open=46100.0,
+            high=46874.0,
+            low=46050.0,
+            close=46288.0,
+            point_change=439.0,
+            change_pct=0.96,
+            turnover_ntd_billions=8194.05,
+            advancing=612,
+            declining=305,
+            unchanged=83,
+        )
+
+        institutional_flows = InstitutionalFlows(
+            foreign_buy_sell_ntd_billions=121.85,
+            investment_trust_buy_sell_ntd_billions=35.60,
+            dealer_buy_sell_ntd_billions=-18.20,
+            total_buy_sell_ntd_billions=139.25,
+            foreign_futures_net_oi=-78674,
+            foreign_futures_oi_change=-2150,
+            foreign_buy_sell_prev_ntd_billions=-45.20,
+            turnover_prev_ntd_billions=6944.05,
+        )
+
         # 2. Snapshot
         snap = Snapshot(
             generated_at=retrieved, report_type="tw_close",
             fetch_coverage=1.0, market_context_coverage=1.0,
             tw_stocks=tw_stocks, quote_observations=observations,
+            taiex_summary=taiex_summary,
+            institutional_flows=institutional_flows,
         )
 
         # 3. MarketContext
@@ -331,6 +360,13 @@ class ReportStructuralValidationTest(unittest.TestCase):
         self.assertIn("+1.01%", telegram_output)
         self.assertIn("-0.66%", telegram_output)
 
+        # Institutional flows numbers
+        self.assertIn("121.85", telegram_output)
+        self.assertIn("35.60", telegram_output)
+        self.assertIn("18.20", telegram_output)
+        self.assertIn("139.25", telegram_output)
+        self.assertIn("78,674", telegram_output)
+
         # B. Corrupted 1485 NEVER appears
         self.assertNotIn("1485", telegram_output)
         self.assertNotIn("1,485", telegram_output)
@@ -354,7 +390,20 @@ class ReportStructuralValidationTest(unittest.TestCase):
         for ph in ("等待下一份", "僅列 verified quote", "弱資料模組不硬填"):
             self.assertNotIn(ph, telegram_output)
 
-        # H. Zero content loss across chunks
+        # H. Verify all 6 core sections exist
+        self.assertIn("1. 今日市場", telegram_output)
+        self.assertIn("2. 法人與資金", telegram_output)
+        self.assertIn("3. 權值與族群", telegram_output)
+        self.assertIn("4. 今日關鍵驅動", telegram_output)
+        self.assertIn("5. 相較昨日", telegram_output)
+        self.assertIn("6. 明日觀察", telegram_output)
+
+        # I. Character length is within expected institutional brief length (~700 - 1300 chars)
+        char_count = len(rendered)
+        self.assertGreaterEqual(char_count, 650, f"Report too short ({char_count} chars)")
+        self.assertLessEqual(char_count, 1400, f"Report too long ({char_count} chars)")
+
+        # J. Zero content loss across chunks
         recombined = " ".join(chunks)
         self.assertEqual(" ".join(telegram_output.split()), " ".join(recombined.split()))
 

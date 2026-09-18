@@ -102,6 +102,32 @@ class QuoteObservation(BaseModel):
         return v
 
 
+class TaiexMarketSummary(BaseModel):
+    open: float | None = None
+    high: float | None = None
+    low: float | None = None
+    close: float
+    point_change: float
+    change_pct: float
+    turnover_ntd_billions: float | None = None
+    advancing: int | None = None
+    declining: int | None = None
+    unchanged: int | None = None
+
+
+class InstitutionalFlows(BaseModel):
+    foreign_buy_sell_ntd_billions: float | None = None
+    investment_trust_buy_sell_ntd_billions: float | None = None
+    dealer_buy_sell_ntd_billions: float | None = None
+    total_buy_sell_ntd_billions: float | None = None
+    foreign_futures_net_oi: int | None = None
+    foreign_futures_oi_change: int | None = None
+    foreign_buy_sell_prev_ntd_billions: float | None = None
+    total_buy_sell_prev_ntd_billions: float | None = None
+    turnover_prev_ntd_billions: float | None = None
+    twd_direction: str | None = None
+
+
 class Snapshot(BaseModel):
     generated_at: datetime
     report_type: ReportType
@@ -115,6 +141,8 @@ class Snapshot(BaseModel):
     quote_observations: dict[str, QuoteObservation] = Field(default_factory=dict)
     missing_required_items: list[str] = Field(default_factory=list)
     data_quality: dict[str, str] = Field(default_factory=dict)
+    taiex_summary: TaiexMarketSummary | None = None
+    institutional_flows: InstitutionalFlows | None = None
 
     def ground_truth(self) -> dict[str, float]:
         gt: dict[str, float] = {}
@@ -151,6 +179,8 @@ class MarketContext(BaseModel):
     material_changes: list[str] = Field(default_factory=list)
     missing_required_items: list[str] = Field(default_factory=list)
     degraded_mode: bool = False
+    taiex_summary: TaiexMarketSummary | None = None
+    institutional_flows: InstitutionalFlows | None = None
 
 
 class OptionalModule(BaseModel):
@@ -173,6 +203,10 @@ class MarketReportDraft(BaseModel):
     data_quality: list[str] = Field(default_factory=list)
     price_references: list[PriceReference] = Field(default_factory=list)
     rendered_markdown: str = ""
+    taiex_summary: TaiexMarketSummary | None = None
+    institutional_flows: InstitutionalFlows | None = None
+    why_drivers: list[str] = Field(default_factory=list)
+
 
 
 class Position(BaseModel):

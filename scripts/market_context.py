@@ -6,7 +6,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from market_session import classify_tw_session, classify_us_session, report_market_date
-from models import MarketContext, ProviderHealth, Snapshot
+from models import MarketContext, ProviderHealth, Snapshot, TaiexMarketSummary
 
 
 def build_market_context(snapshot: Snapshot, report_type: str,
@@ -33,6 +33,16 @@ def build_market_context(snapshot: Snapshot, report_type: str,
             health.succeeded += 1
         else:
             health.failed += 1
+
+    taiex_sum = snapshot.taiex_summary
+    if taiex_sum is None and "TAIEX" in quotes and quotes["TAIEX"].quality_status == "VALID":
+        q = quotes["TAIEX"]
+        taiex_sum = TaiexMarketSummary(
+            close=q.price,
+            point_change=round(q.price - q.previous_regular_close, 2),
+            change_pct=q.change_pct,
+        )
+
     return MarketContext(
         run_id=run_id or f"{report_type}:{report_market_date(report_type, now)}",
         report_type=report_type,
@@ -48,4 +58,7 @@ def build_market_context(snapshot: Snapshot, report_type: str,
         material_changes=[],
         missing_required_items=snapshot.missing_required_items,
         degraded_mode=degraded_mode,
+        taiex_summary=taiex_sum,
+        institutional_flows=snapshot.institutional_flows,
     )
+

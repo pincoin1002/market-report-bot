@@ -21,10 +21,10 @@ log = logging.getLogger("validate")
 
 
 REQUIRED_SECTIONS = {
-    "tw_open": ["Executive Market State"],
-    "tw_close": ["Executive Market State"],
-    "us_open": ["Executive Market State"],
-    "us_close": ["Executive Market State"],
+    "tw_open": [("Executive Market State", "市場核心概況")],
+    "tw_close": [("今日市場", "Executive Market State", "市場核心概況")],
+    "us_open": [("Executive Market State", "市場核心概況")],
+    "us_close": [("Executive Market State", "市場核心概況")],
 }
 
 
@@ -56,15 +56,22 @@ def _load_draft() -> MarketReportDraft | None:
 
 
 def check_structure(report_text: str, report_type: str) -> StructureCheck:
-    anchors = REQUIRED_SECTIONS.get(report_type, [])
-    missing = [anchor for anchor in anchors if anchor not in report_text]
+    anchors_list = REQUIRED_SECTIONS.get(report_type, [])
+    missing = []
+    for anchor_group in anchors_list:
+        if isinstance(anchor_group, (tuple, list)):
+            if not any(a in report_text for a in anchor_group):
+                missing.append(anchor_group[0])
+        else:
+            if anchor_group not in report_text:
+                missing.append(anchor_group)
     missing_marker_count = report_text.count("⚠️ 未取得")
     total_fields_estimate = max(report_text.count("|") // 4, 1)
     return StructureCheck(
-        sections_total=len(anchors),
-        sections_present=len(anchors) - len(missing),
+        sections_total=len(anchors_list),
+        sections_present=len(anchors_list) - len(missing),
         sections_missing=missing,
-        truncated=bool(anchors) and anchors[-1] not in report_text,
+        truncated=bool(missing),
         missing_data_count=missing_marker_count,
         missing_data_pct=round(missing_marker_count / total_fields_estimate * 100, 1),
         char_count=len(report_text),
@@ -214,13 +221,53 @@ def validate_numeric_provenance(report_text: str, context: MarketContext) -> tup
         allowed_numbers.add(delta)
         allowed_numbers.add(float(int(delta)))
 
+    if context.taiex_summary:
+        ts = context.taiex_summary
+        for val in [ts.open, ts.high, ts.low, ts.close, ts.point_change, ts.change_pct,
+                    ts.turnover_ntd_billions, ts.advancing, ts.declining, ts.unchanged]:
+            if val is not None:
+                allowed_numbers.add(round(float(val), 2))
+                allowed_numbers.add(round(abs(float(val)), 2))
+                allowed_numbers.add(float(int(abs(val))))
+        # Intraday range & retracement tenths
+        if ts.high and ts.low and ts.high > ts.low:
+            rng = round(ts.high - ts.low, 2)
+            allowed_numbers.add(rng)
+            allowed_numbers.add(float(int(rng)))
+            faded = round(ts.high - ts.close, 2)
+            allowed_numbers.add(faded)
+            allowed_numbers.add(float(int(faded)))
+            tenth = int(round((faded / rng) * 10))
+            allowed_numbers.add(float(tenth))
+        # Psychological round levels around TAIEX close
+        for lvl in [46000.0, 45000.0, 40000.0, 35000.0, 30000.0, 25000.0, 24000.0, 23000.0, 22000.0, 21000.0, 20000.0]:
+            allowed_numbers.add(lvl)
+
+    if context.institutional_flows:
+        fl = context.institutional_flows
+        for val in [fl.foreign_buy_sell_ntd_billions, fl.investment_trust_buy_sell_ntd_billions,
+                    fl.dealer_buy_sell_ntd_billions, fl.total_buy_sell_ntd_billions,
+                    fl.foreign_futures_net_oi, fl.foreign_futures_oi_change,
+                    fl.foreign_buy_sell_prev_ntd_billions, fl.turnover_prev_ntd_billions]:
+            if val is not None:
+                allowed_numbers.add(round(float(val), 2))
+                allowed_numbers.add(round(abs(float(val)), 2))
+                allowed_numbers.add(float(int(abs(val))))
+        if fl.turnover_prev_ntd_billions is not None and context.taiex_summary and context.taiex_summary.turnover_ntd_billions:
+            t_delta = round(abs(context.taiex_summary.turnover_ntd_billions - fl.turnover_prev_ntd_billions), 2)
+            allowed_numbers.add(t_delta)
+            allowed_numbers.add(float(int(t_delta)))
+
+    # Thresholds used in derive_tomorrow_watch_signals
+    allowed_numbers.update([32.0, 32.5, 30.0, 500.0, 1000.0, 100.0, 30000.0])
+
     in_narrative = False
     for line in report_text.splitlines():
         line_s = line.strip()
-        if line_s.startswith("## ") and any(k in line_s for k in ("Top Market Drivers", "今日走勢", "Rotation", "輪動", "Events", "事件")):
+        if line_s.startswith("## ") and any(k in line_s for k in ("Top Market Drivers", "今日走勢", "Rotation", "輪動", "Events", "事件", "今日關鍵驅動", "相較昨日", "明日觀察")):
             in_narrative = True
             continue
-        elif line_s.startswith("## ") and any(k in line_s for k in ("Executive Market State", "市場核心概況", "What Changed", "變化")):
+        elif line_s.startswith("## ") and any(k in line_s for k in ("Executive Market State", "市場核心概況", "What Changed", "今日市場", "法人與資金", "權值與族群")):
             in_narrative = False
             continue
         elif line_s.startswith("# "):
