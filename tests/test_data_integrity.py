@@ -465,13 +465,15 @@ class SafetyAndWorkflowTest(unittest.TestCase):
             Quote(price=2425, prev_close=2400, change_pct=1.04, data_date="2026-09-17"),
             "twse_openapi", "REGULAR", retrieved, expected_date="2026-09-17",
         )
-        self.assertEqual(obs.provider_timestamp.hour, 13)
-        self.assertEqual(obs.provider_timestamp.minute, 30)
-        self.assertEqual(obs.provider_timestamp.utcoffset(), timedelta(hours=8))
+        self.assertIsNone(obs.provider_timestamp)
+        self.assertEqual(obs.retrieved_at, retrieved)
+        self.assertEqual(obs.market_date, "2026-09-17")
         context = build_market_context(_snapshot({"2330": obs}), "tw_close", run_id="test")
         rendered = build_public_draft(context).rendered_markdown
-        self.assertIn("2026-09-17 13:30 UTC+08:00", rendered)
+        self.assertNotIn("13:30", rendered)
         self.assertNotIn("19:58", rendered)
+        self.assertIn("正式收盤", rendered)
+
 
     def test_nested_llm_report_is_reduced_to_one_grounded_driver(self):
         context = build_market_context(_snapshot({"2330": _obs("2330")}), "tw_close", run_id="test")

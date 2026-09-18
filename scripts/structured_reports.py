@@ -120,7 +120,7 @@ def build_public_draft(context: MarketContext, narrative: str | None = None) -> 
         headline=f"{title} {context.market_date}｜{session_label}",
         market_state=[f"{r.canonical_symbol}: {r.value:g} ({r.session})" for r in refs[:8]],
         material_changes=material,
-        drivers=_extract_grounded_drivers(narrative),
+        drivers=_extract_grounded_drivers(narrative, context),
         rotation="",
         event_calendar=[],
         optional_modules=optional,
@@ -132,13 +132,13 @@ def build_public_draft(context: MarketContext, narrative: str | None = None) -> 
     return draft
 
 
-def _extract_grounded_drivers(narrative: str | None) -> list[str]:
+def _extract_grounded_drivers(narrative: str | None, context: MarketContext | None = None) -> list[str]:
     """Reduce model prose to bounded content, never a nested report.
 
     Gemini is asked for a report by the legacy prompts. Until those prompts
     are fully retired, only the first substantive prose after 今日一句話 is
-    accepted into the structured draft. Headings, tables and diagnostics are
-    deliberately rejected.
+    accepted into the structured draft. Headings, tables, diagnostics, and
+    ungrounded numeric claims are strictly rejected.
     """
     if not narrative or "新聞搜尋目前不可用" in narrative:
         return []
@@ -146,7 +146,29 @@ def _extract_grounded_drivers(narrative: str | None) -> list[str]:
         "DATA_BLOCKED", "DATE_MISMATCH", "數據阻斷", "資料阻斷",
         "Smart Money", "強烈預期", "利空出盡", "資金回流",
         "Fed 升息 1 碼", "升息 1 碼", "升息1碼",
+        "波段新高", "歷史新高", "創下新高",
+        "三大法人合計買超", "三大法人", "資金佔大盤成交比重",
     )
+    allowed_numbers: set[float] = set()
+    if context:
+        for p in context.market_date.split("-"):
+            if p.isdigit():
+                allowed_numbers.add(float(p))
+        for n in range(1, 10):
+            allowed_numbers.add(float(n))
+        for symbol, obs in context.quotes.items():
+            if symbol.isdigit():
+                allowed_numbers.add(float(symbol))
+            allowed_numbers.add(round(float(obs.price), 2))
+            allowed_numbers.add(float(int(obs.price)))
+            allowed_numbers.add(round(float(obs.previous_regular_close), 2))
+            allowed_numbers.add(float(int(obs.previous_regular_close)))
+            allowed_numbers.add(round(float(obs.change_pct), 2))
+            allowed_numbers.add(round(abs(float(obs.change_pct)), 2))
+            delta = round(abs(obs.price - obs.previous_regular_close), 2)
+            allowed_numbers.add(delta)
+            allowed_numbers.add(float(int(delta)))
+
     lines = [line.strip() for line in narrative.splitlines()]
     start = 0
     for idx, line in enumerate(lines):
@@ -169,8 +191,23 @@ def _extract_grounded_drivers(narrative: str | None) -> list[str]:
             continue
         if any(phrase.lower() in plain.lower() for phrase in rejected_phrases):
             continue
+
+        # Grounding check: numbers must exist in context
+        if allowed_numbers:
+            check_plain = re.sub(r"\([0-9A-Za-z.]+\)", "", plain)
+            found_nums = re.findall(r"(?<![A-Za-z0-9_])(\d+(?:,\d+)*(?:\.\d+)?)(?![A-Za-z0-9_])", check_plain)
+            ungrounded = False
+            for raw_num in found_nums:
+                clean_num = float(raw_num.replace(",", ""))
+                if clean_num not in allowed_numbers:
+                    ungrounded = True
+                    break
+            if ungrounded:
+                continue
+
         drivers.append(plain[:600])
         break
+
     return drivers
 
 
@@ -185,8 +222,19 @@ def render_public_report(draft: MarketReportDraft, context: MarketContext,
     # Section 1: Executive Market State
     lines.append(f"## {sec_num}. 市場核心概況 (Executive Market State)")
     sec_num += 1
-    lines.append("| 標的 | 最新報價 | 漲跌幅 | 行情時間 | 狀態 |")
-    lines.append("|---|---:|---:|---|---|")
+
+    has_meaningful_ts = any(
+        (context.quotes.get(ref.canonical_symbol) and context.quotes[ref.canonical_symbol].provider_timestamp is not None)
+        for ref in draft.price_references
+    )
+
+    if has_meaningful_ts:
+        lines.append("| 標的 | 最新報價 | 漲跌幅 | 行情時間 | 狀態 |")
+        lines.append("|---|---:|---:|---|---|")
+    else:
+        lines.append("| 標的 | 最新報價 | 漲跌幅 | 狀態 |")
+        lines.append("|---|---:|---:|---|")
+
     for ref in draft.price_references:
         obs = context.quotes.get(ref.canonical_symbol)
         if not obs:
@@ -200,10 +248,16 @@ def render_public_report(draft: MarketReportDraft, context: MarketContext,
         else:
             price_str = f"{ref.value:g}"
         session_label = human_session_label(context.report_type, obs.session)
-        as_of_dt = ref.as_of or obs.provider_timestamp or obs.observed_at or obs.retrieved_at
-        as_of_str = as_of_dt.strftime("%Y-%m-%d %H:%M %Z")
-        lines.append(f"| {display} | {price_str} | {obs.change_pct:+.2f}% | {as_of_str} | {session_label} |")
+        if has_meaningful_ts:
+            if obs.provider_timestamp:
+                as_of_str = obs.provider_timestamp.strftime("%Y-%m-%d %H:%M %Z")
+            else:
+                as_of_str = "—"
+            lines.append(f"| {display} | {price_str} | {obs.change_pct:+.2f}% | {as_of_str} | {session_label} |")
+        else:
+            lines.append(f"| {display} | {price_str} | {obs.change_pct:+.2f}% | {session_label} |")
     lines.append("")
+
 
     # Section 2: What Changed Since Last Report
     if draft.material_changes:

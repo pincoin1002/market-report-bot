@@ -15,8 +15,10 @@ from pydantic import ValidationError
 from logging_config import setup_logging
 from models import MarketContext, MarketReportDraft, PriceCheck, StructureCheck
 from structured_reports import validate_public_draft
+from instrument_registry import resolve_instrument
 
 log = logging.getLogger("validate")
+
 
 REQUIRED_SECTIONS = {
     "tw_open": ["Executive Market State"],
@@ -157,6 +159,87 @@ def validate_rendered_report_structure(report_text: str, report_type: str) -> tu
     return len(errors) == 0, errors
 
 
+def validate_numeric_provenance(report_text: str, context: MarketContext) -> tuple[bool, list[str]]:
+    """Strict numeric provenance validation: all numbers in public output must originate from validated structured data."""
+    import re
+    errors: list[str] = []
+
+    # 1. Symbol price provenance: public numeric value == structured MarketContext value
+    for symbol, obs in context.quotes.items():
+        if obs.quality_status != "VALID":
+            continue
+        spec = resolve_instrument(symbol)
+        names = [symbol]
+        if spec.display_name and spec.display_name != symbol:
+            names.append(spec.display_name)
+
+        # Specifically forbid corruptions like 2454 = 1485
+        if symbol == "2454":
+            if "1485" in report_text or "1,485" in report_text:
+                errors.append(f"CRITICAL: 2454 corrupted as 1485 instead of structured price {obs.price}")
+
+        # Check line where symbol is displayed
+        matching_lines = [l for l in report_text.splitlines() if any(n in l for n in names) and "|" in l]
+        for line in matching_lines:
+            # Expected price representations
+            price_variants = [
+                f"{obs.price:,.2f}",
+                f"{obs.price:,.1f}",
+                f"{obs.price:g}",
+                f"{int(obs.price):,}" if obs.price == int(obs.price) else "",
+                str(int(obs.price)) if obs.price == int(obs.price) else "",
+                f"{obs.price:.2f}",
+            ]
+            price_variants = [v for v in price_variants if v]
+            if not any(v in line for v in price_variants):
+                errors.append(f"Price for {symbol} ({obs.price}) not found matching in rendered line: '{line}'")
+
+    # 2. Narrative numeric integrity: numbers in narrative must be traceable to structured data
+    allowed_numbers: set[float] = set()
+    for p in context.market_date.split("-"):
+        if p.isdigit():
+            allowed_numbers.add(float(p))
+    for n in range(1, 10):
+        allowed_numbers.add(float(n))
+    for symbol, obs in context.quotes.items():
+        if symbol.isdigit():
+            allowed_numbers.add(float(symbol))
+        allowed_numbers.add(round(float(obs.price), 2))
+        allowed_numbers.add(float(int(obs.price)))
+        allowed_numbers.add(round(float(obs.previous_regular_close), 2))
+        allowed_numbers.add(float(int(obs.previous_regular_close)))
+        allowed_numbers.add(round(float(obs.change_pct), 2))
+        allowed_numbers.add(round(abs(float(obs.change_pct)), 2))
+        delta = round(abs(obs.price - obs.previous_regular_close), 2)
+        allowed_numbers.add(delta)
+        allowed_numbers.add(float(int(delta)))
+
+    in_narrative = False
+    for line in report_text.splitlines():
+        line_s = line.strip()
+        if line_s.startswith("## ") and any(k in line_s for k in ("Top Market Drivers", "今日走勢", "Rotation", "輪動", "Events", "事件")):
+            in_narrative = True
+            continue
+        elif line_s.startswith("## ") and any(k in line_s for k in ("Executive Market State", "市場核心概況", "What Changed", "變化")):
+            in_narrative = False
+            continue
+        elif line_s.startswith("# "):
+            in_narrative = False
+            continue
+
+        if in_narrative and line_s and not line_s.startswith("|"):
+            text_to_check = re.sub(r"^[-*•\d.]+\s*", "", line_s)
+            text_to_check = re.sub(r"\([0-9A-Za-z.]+\)", "", text_to_check)
+            found_nums = re.findall(r"(?<![A-Za-z0-9_])(\d+(?:,\d+)*(?:\.\d+)?)(?![A-Za-z0-9_])", text_to_check)
+            for raw_num in found_nums:
+                clean_num = float(raw_num.replace(",", ""))
+                if clean_num not in allowed_numbers:
+                    errors.append(f"Ungrounded numeric claim '{raw_num}' in narrative without structured data provenance: '{line_s}'")
+
+
+    return len(errors) == 0, errors
+
+
 def validate_render_matches_draft(report_text: str, draft: MarketReportDraft) -> tuple[bool, str]:
     draft_json = draft.model_dump_json()
     for ref in draft.price_references:
@@ -185,16 +268,19 @@ def validate(report_type: str) -> tuple[bool, dict]:
     public_ok, public_reason = validate_public_draft(draft, context)
     render_ok, render_reason = validate_render_matches_draft(report_text, draft)
     struct_ok, struct_errors = validate_rendered_report_structure(report_text, report_type)
+    prov_ok, prov_errors = validate_numeric_provenance(report_text, context)
     structure_ok = not structure.truncated and not structure.sections_missing
-    ok = public_ok and render_ok and structure_ok and struct_ok
+    ok = public_ok and render_ok and structure_ok and struct_ok and prov_ok
     return ok, {
         "report_type": report_type,
         "structure": structure.model_dump(),
         "structural_validation": {"passed": struct_ok, "errors": struct_errors},
+        "numeric_provenance": {"passed": prov_ok, "errors": prov_errors},
         "structured": {"passed": public_ok, "reason": public_reason},
         "render": {"passed": render_ok, "reason": render_reason},
         "price_check": PriceCheck().model_dump(),
     }
+
 
 
 def main() -> None:

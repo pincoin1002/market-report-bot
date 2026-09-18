@@ -242,13 +242,6 @@ class YahooExtendedHoursProvider:
 def observation_from_daily_quote(spec: InstrumentSpec, q: Quote, provider: str,
                                  session: Session, retrieved_at: datetime,
                                  expected_date: str | None = None) -> QuoteObservation:
-    market_day = datetime.strptime(q.data_date[:10].replace("/", "-"), "%Y-%m-%d").date()
-    if spec.market == "TW":
-        observed_at = datetime.combine(market_day, time(13, 30), tzinfo=TPE)
-    elif spec.market == "US":
-        observed_at = datetime.combine(market_day, time(16, 0), tzinfo=NY)
-    else:
-        observed_at = datetime.combine(market_day, time(0, 0), tzinfo=timezone.utc)
     quote_id = f"{spec.canonical_symbol}:{q.data_date}:{session}:{provider}"
     obs = QuoteObservation(
         quote_id=quote_id,
@@ -258,10 +251,10 @@ def observation_from_daily_quote(spec: InstrumentSpec, q: Quote, provider: str,
         currency=spec.currency,
         session=session,
         market_date=q.data_date,
-        observed_at=observed_at,
-        # Daily providers do not expose the last trade timestamp.  The only
-        # defensible timestamp is the exchange's official regular close.
-        provider_timestamp=observed_at,
+        observed_at=retrieved_at,
+        # Daily providers supply only EOD close + market date without an intraday trade timestamp.
+        # Do NOT manufacture 13:30 or 16:00. provider_timestamp must remain None.
+        provider_timestamp=None,
         retrieved_at=retrieved_at,
         provider=provider,
         quote_type="OFFICIAL_CLOSE" if session in ("REGULAR", "PREVIOUS_CLOSE", "CLOSED_REFERENCE") else "REFERENCE",
@@ -272,6 +265,7 @@ def observation_from_daily_quote(spec: InstrumentSpec, q: Quote, provider: str,
         market=spec.market,
     )
     return validate_observation(obs, spec, expected_session=session, expected_date=expected_date)
+
 
 
 def fetch_with_failover(symbols: list[str]) -> tuple[dict[str, Quote], dict[str, str]]:

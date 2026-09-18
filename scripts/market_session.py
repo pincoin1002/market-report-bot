@@ -122,6 +122,8 @@ def us_open_idempotency_key(now: datetime | None = None) -> str:
 
 
 def human_session_label(report_type: str, session: Session) -> str:
+    if report_type in ("tw_close", "us_close") and session == "REGULAR":
+        return "正式收盤"
     if report_type == "us_open" and session == "REGULAR":
         return "美股開盤後更新"
     labels = {
@@ -132,3 +134,4 @@ def human_session_label(report_type: str, session: Session) -> str:
         "CLOSED_REFERENCE": "休市參考價",
     }
     return labels[session]
+
