@@ -79,6 +79,23 @@ def _macro(symbol: str, name: str, provider: str, currency: str = "",
     )
 
 
+def _crypto(symbol: str, name: str, provider: str | None = None) -> InstrumentSpec:
+    return InstrumentSpec(
+        canonical_symbol=symbol,
+        display_name=name,
+        asset_type="CRYPTO",
+        exchange="CRYPTO",
+        currency="USD",
+        market="GLOBAL",
+        provider_symbols={"yfinance": provider or f"{symbol}-USD", "yahoo_chart": provider or f"{symbol}-USD"},
+        aliases=[],
+        price_precision=8,
+        lot_size=0.00000001,
+        session_support=["REGULAR", "PREVIOUS_CLOSE"],
+        economic_entity=name,
+    )
+
+
 REGISTRY: dict[str, InstrumentSpec] = {
     "GOOG": _us("GOOG", "Alphabet Class C", entity="Alphabet"),
     "GOOGL": _us("GOOGL", "Alphabet Class A", entity="Alphabet"),
@@ -87,6 +104,7 @@ REGISTRY: dict[str, InstrumentSpec] = {
     "VTI": _us("VTI", "Vanguard Total Stock Market ETF", asset_type="ETF"),
     "QQQ": _us("QQQ", "Invesco QQQ Trust", asset_type="ETF"),
     "AMZN": _us("AMZN", "Amazon"),
+    "IBKR": _us("IBKR", "Interactive Brokers"),
     "MU": _us("MU", "Micron"),
     "NVDA": _us("NVDA", "NVIDIA"),
     "TSLA": _us("TSLA", "Tesla"),
@@ -122,6 +140,11 @@ REGISTRY: dict[str, InstrumentSpec] = {
     "SMH": _us("SMH", "VanEck Semiconductor ETF", asset_type="ETF"),
     "XLK": _us("XLK", "Technology Select Sector SPDR Fund", asset_type="ETF"),
     "ARKK": _us("ARKK", "ARK Innovation ETF", asset_type="ETF"),
+    "ETH": _crypto("ETH", "Ethereum"),
+    "USDC": _crypto("USDC", "USD Coin"),
+    "USDT": _crypto("USDT", "Tether"),
+    "BONK": _crypto("BONK", "Bonk"),
+    "SXT": _crypto("SXT", "Space and Time"),
     "0050": _tw("0050", "元大台灣50", asset_type="ETF"),
     "006208": _tw("006208", "富邦台50", asset_type="ETF"),
     "1519": _tw("1519", "華城"),

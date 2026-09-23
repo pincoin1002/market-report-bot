@@ -12,7 +12,7 @@ from typing import Protocol
 
 import portfolio_store
 from instrument_registry import resolve_instrument
-from models import CashContext, PortfolioContext, PositionContext
+from models import CashContext, LiabilityContext, PortfolioContext, PositionContext
 
 log = logging.getLogger("portfolio_context")
 BASE_DIR = Path(__file__).parent.parent
@@ -71,7 +71,7 @@ class EncryptedPortfolioProvider:
         cash = []
         value = raw.get("available_cash")
         if isinstance(value, (int, float)) and value > 0:
-            cash.append(CashContext(currency="TWD", amount=float(value), deployable=True))
+            cash.append(CashContext(currency="TWD", amount=float(value), deployable=None))
         return PortfolioContext(
             snapshot_id="legacy-encrypted-portfolio",
             source="LEGACY_ENCRYPTED_PORTFOLIO",
@@ -93,14 +93,18 @@ class PIOSPortfolioProvider:
         configured = path or os.getenv("PIOS_PORTFOLIO_SNAPSHOT_PATH")
         self.path = Path(configured) if configured else BASE_DIR / "data" / "pios_portfolio_snapshot.json"
         self.explicit_path = bool(configured)
+        self.snapshot_json = os.getenv("PIOS_PORTFOLIO_SNAPSHOT_JSON", "").strip()
 
     def available(self) -> bool:
-        return self.path.exists()
+        return bool(self.snapshot_json) or self.path.exists()
 
     def load(self) -> PortfolioContext:
-        if not self.path.exists():
+        if self.snapshot_json:
+            payload = json.loads(self.snapshot_json)
+        elif not self.path.exists():
             raise FileNotFoundError(f"PIOS PortfolioSnapshot export not found: {self.path}")
-        payload = json.loads(self.path.read_text(encoding="utf-8"))
+        else:
+            payload = json.loads(self.path.read_text(encoding="utf-8"))
         snapshot_id = str(payload.get("snapshot_id") or payload.get("id") or "")
         as_of = payload.get("as_of")
         active = payload.get("active_positions")
@@ -116,13 +120,31 @@ class PIOSPortfolioProvider:
         cash = []
         for item in payload.get("cash", []):
             if isinstance(item, dict) and isinstance(item.get("amount"), (int, float)):
-                cash.append(CashContext(currency=str(item.get("currency") or "TWD"), amount=float(item["amount"]), deployable=bool(item.get("deployable", True))))
+                cash.append(CashContext(
+                    currency=str(item.get("currency") or "TWD"), amount=float(item["amount"]),
+                    deployable=item.get("deployable") if isinstance(item.get("deployable"), bool) else None,
+                ))
+        liabilities = []
+        for item in payload.get("liabilities", []):
+            if not isinstance(item, dict):
+                raise ValueError("PIOS liabilities must contain objects")
+            principal = item.get("outstanding_principal")
+            if not isinstance(principal, (int, float)):
+                raise ValueError("PIOS liability outstanding_principal must be numeric")
+            liabilities.append(LiabilityContext(
+                liability_id=str(item.get("liability_id") or item.get("id") or item.get("name") or "liability"),
+                name=str(item.get("name") or "Liability"),
+                currency=str(item.get("currency") or "TWD"),
+                outstanding_principal=float(principal),
+                monthly_payment=float(item["monthly_payment"]) if isinstance(item.get("monthly_payment"), (int, float)) else None,
+            ))
         return PortfolioContext(
             snapshot_id=snapshot_id,
             as_of=datetime.fromisoformat(str(as_of).replace("Z", "+00:00")),
             source="PIOS_PORTFOLIO_SNAPSHOT",
             positions=positions,
             cash=cash,
+            liabilities=liabilities,
             notes=str(payload.get("notes") or ""),
         )
 

@@ -24,6 +24,8 @@ jobs:
   generate-report:
     name: Generate Taiwan Close Report
     runs-on: ubuntu-latest
+    env:
+      PIOS_PORTFOLIO_SNAPSHOT_JSON: ${{ secrets.PIOS_PORTFOLIO_SNAPSHOT_JSON }}
     timeout-minutes: 30
     permissions:
       contents: write

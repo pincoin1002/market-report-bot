@@ -295,7 +295,15 @@ class Position(BaseModel):
 class CashContext(BaseModel):
     currency: str
     amount: float
-    deployable: bool = True
+    deployable: bool | None = None
+
+
+class LiabilityContext(BaseModel):
+    liability_id: str
+    name: str
+    currency: str
+    outstanding_principal: float = Field(ge=0)
+    monthly_payment: float | None = Field(default=None, ge=0)
 
 
 class PositionContext(BaseModel):
@@ -318,6 +326,7 @@ class PortfolioContext(BaseModel):
     source: str = "UNAVAILABLE"
     positions: list[PositionContext] = Field(default_factory=list)
     cash: list[CashContext] = Field(default_factory=list)
+    liabilities: list[LiabilityContext] = Field(default_factory=list)
     notes: str = ""
 
 
