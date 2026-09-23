@@ -239,9 +239,10 @@ def validate_numeric_provenance(report_text: str, context: MarketContext) -> tup
             allowed_numbers.add(float(int(faded)))
             tenth = int(round((faded / rng) * 10))
             allowed_numbers.add(float(tenth))
-        # Psychological round levels around TAIEX close
-        for lvl in [46000.0, 45000.0, 40000.0, 35000.0, 30000.0, 25000.0, 24000.0, 23000.0, 22000.0, 21000.0, 20000.0]:
-            allowed_numbers.add(lvl)
+        # Only dynamically derived index levels are valid narrative numbers.
+        increment = 1000.0 if ts.close >= 10_000 else 100.0
+        allowed_numbers.add((ts.close // increment) * increment)
+        allowed_numbers.add(round(ts.close / increment) * increment)
 
     if context.institutional_flows:
         fl = context.institutional_flows
@@ -258,8 +259,9 @@ def validate_numeric_provenance(report_text: str, context: MarketContext) -> tup
             allowed_numbers.add(t_delta)
             allowed_numbers.add(float(int(t_delta)))
 
-    # Thresholds used in derive_tomorrow_watch_signals
-    allowed_numbers.update([32.0, 32.5, 30.0, 500.0, 1000.0, 100.0, 30000.0])
+    # Methodology thresholds are not price targets; dynamic report levels must
+    # still originate from the current deterministic context above.
+    allowed_numbers.update([30.0, 500.0, 1000.0, 100.0, 30000.0])
 
     in_narrative = False
     for line in report_text.splitlines():

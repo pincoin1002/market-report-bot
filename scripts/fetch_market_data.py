@@ -24,11 +24,11 @@ from google.genai import types
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from logging_config import setup_logging
-import portfolio_store
 from instrument_registry import build_universe, quote_symbol
 from market_context import build_market_context
 from market_session import classify_tw_session, classify_us_session, get_target_market_date
-from models import NamedQuote, Snapshot
+from models import NamedQuote, PortfolioQuoteCoverage, PortfolioQuoteCoverageItem, Snapshot
+from portfolio_context import load_authoritative_portfolio
 from providers import fetch_session_observations
 
 log = logging.getLogger("fetch")
@@ -39,6 +39,65 @@ NY = ZoneInfo("America/New_York")
 # Refuse to write a snapshot anchoring the LLM to badly incomplete data;
 # Missing/invalid snapshots block delivery; prices are never guessed via search.
 MIN_COVERAGE = 0.70
+
+
+def build_portfolio_quote_coverage(portfolio, observations: dict, universe: dict,
+                                   as_of: datetime, expected_dates: dict[str, str]) -> PortfolioQuoteCoverage:
+    """Resolve every active canonical position exactly once.
+
+    The result is a runtime diagnostic.  It intentionally distinguishes a
+    stale/invalid quote from no quote and never drops a position just because
+    its ticker is absent from a provider response.
+    """
+    items: list[PortfolioQuoteCoverageItem] = []
+    for position in portfolio.positions:
+        symbol = position.ticker
+        spec = universe.get(symbol)
+        if spec is None or not spec.provider_symbols:
+            items.append(PortfolioQuoteCoverageItem(
+                position_id=position.position_id, instrument_id=position.instrument_id,
+                canonical_symbol=symbol, state="UNSUPPORTED",
+                reason="instrument has no configured quote provider",
+            ))
+            continue
+        obs = observations.get(symbol)
+        if obs is None:
+            items.append(PortfolioQuoteCoverageItem(
+                position_id=position.position_id, instrument_id=position.instrument_id,
+                canonical_symbol=symbol, quote_identifier=quote_symbol(spec), state="MISSING",
+                reason="provider returned no quote observation",
+            ))
+            continue
+        expected_date = expected_dates.get(spec.market)
+        date_matches = not expected_date or obs.market_date == expected_date
+        state = "QUOTED" if obs.quality_status == "VALID" and date_matches else (
+            "STALE" if obs.quality_status in {"STALE", "DATE_MISMATCH"} else "MISSING"
+        )
+        if not date_matches:
+            state = "STALE"
+        items.append(PortfolioQuoteCoverageItem(
+            position_id=position.position_id, instrument_id=position.instrument_id,
+            canonical_symbol=symbol, quote_identifier=obs.quote_id,
+            state=state,
+            reason="validated quote" if state == "QUOTED" else (
+                f"market date {obs.market_date} differs from expected {expected_date}" if not date_matches
+                else f"quote quality: {obs.quality_status}"
+            ),
+            provider=obs.provider, quote_timestamp=obs.provider_timestamp or obs.observed_at,
+            market_date=obs.market_date,
+        ))
+    covered = sum(item.state == "QUOTED" for item in items)
+    expected = len(items)
+    ratio = round(covered / expected, 3) if expected else 1.0
+    missing = [item for item in items if item.state == "MISSING"]
+    stale = [item for item in items if item.state == "STALE"]
+    unsupported = [item for item in items if item.state == "UNSUPPORTED"]
+    status = "NOT_APPLICABLE" if not expected else ("FULL" if covered == expected else "DEGRADED")
+    return PortfolioQuoteCoverage(
+        expected_positions=expected, covered_positions=covered, coverage_ratio=ratio,
+        as_of=as_of, status=status, items=items, missing=missing, stale=stale,
+        unsupported=unsupported,
+    )
 
 # ── Holiday / weekend helpers ──────────────────────────────────────────────────
 
@@ -170,8 +229,8 @@ def _should_skip_us_open_duplicate(report_type: str) -> bool:
 # ── Core fetch ─────────────────────────────────────────────────────────────────
 
 def build_snapshot(report_type: str) -> Snapshot:
-    portfolio = portfolio_store.load_portfolio()
-    universe = build_universe(portfolio)
+    portfolio = load_authoritative_portfolio()
+    universe = build_universe(portfolio_context=portfolio)
     expected_session = _expected_session(report_type)
     retrieved_at = datetime.now(tz=TPE)
     
@@ -190,12 +249,14 @@ def build_snapshot(report_type: str) -> Snapshot:
     snapshot = Snapshot(
         generated_at=retrieved_at,
         report_type=report_type,
+        report_market_date=tw_target_date if report_type.startswith("tw_") else us_target_date,
+        portfolio_snapshot_id=portfolio.snapshot_id,
+        portfolio_snapshot_as_of=portfolio.as_of,
+        portfolio_source=portfolio.source,
         fetch_coverage=round(len(observations) / len(universe), 3),
         market_context_coverage=round(valid_hits / len(universe), 3),
         sources=sources,
     )
-    portfolio_symbols = [key for key, spec in universe.items() if spec.is_portfolio_critical]
-    portfolio_hits = 0
     for key, obs in observations.items():
         spec = universe[key]
         if spec.market == "TW":
@@ -204,9 +265,6 @@ def build_snapshot(report_type: str) -> Snapshot:
             bucket = "forex"
         else:
             bucket = "us_markets"
-        if key in portfolio_symbols:
-            portfolio_hits += 1
-        
         # Only populate named quotes in snapshot if observation passed validation!
         # Quotes with DATE_MISMATCH, STALE, or CONFLICTING are excluded from
         # verified headline pricing tables so they cannot mislead the model.
@@ -222,8 +280,9 @@ def build_snapshot(report_type: str) -> Snapshot:
             )
         snapshot.quote_observations[key] = obs
 
-    if portfolio_symbols:
-        snapshot.portfolio_quote_coverage = round(portfolio_hits / len(portfolio_symbols), 3)
+    snapshot.portfolio_quote_coverage = build_portfolio_quote_coverage(
+        portfolio, observations, universe, retrieved_at, expected_dates
+    )
     missing = [key for key in universe if key not in observations or observations[key].quality_status != "VALID"]
     if missing:
         log.warning("symbols missing or invalid after provider tiers",
@@ -286,7 +345,7 @@ def main() -> None:
                   extra={"coverage": snapshot.fetch_coverage, "min": MIN_COVERAGE})
         sys.exit(1)  # workflow fails; report can rerun after providers recover
 
-    universe = build_universe()
+    universe = build_universe(portfolio_context=load_authoritative_portfolio())
     primary_market = "TW" if report_type.startswith("tw_") else "US"
     primary_equities_valid = sum(
         1 for key, obs in snapshot.quote_observations.items()
@@ -301,10 +360,11 @@ def main() -> None:
                          "valid_equities": primary_equities_valid})
         sys.exit(1)
 
-    if snapshot.portfolio_quote_coverage is not None and snapshot.portfolio_quote_coverage < 1.0:
+    if snapshot.portfolio_quote_coverage and not snapshot.portfolio_quote_coverage.is_full:
         log.warning("portfolio quote coverage below 100% — public report may proceed; private advice will block",
-                    extra={"portfolio_quote_coverage": snapshot.portfolio_quote_coverage,
-                           "missing": snapshot.missing_required_items})
+                    extra={"portfolio_quote_coverage": snapshot.portfolio_quote_coverage.coverage_ratio,
+                           "status": snapshot.portfolio_quote_coverage.status,
+                           "missing": [item.canonical_symbol for item in snapshot.portfolio_quote_coverage.missing]})
 
     snapshot_path = data_dir / "market_snapshot.json"
     snapshot_path.write_text(snapshot.model_dump_json(indent=2), encoding="utf-8")
@@ -316,6 +376,8 @@ def main() -> None:
         "tw": len(snapshot.tw_stocks),
         "us": len(snapshot.us_markets),
         "fx": len(snapshot.forex),
+        "pipeline_status": context.final_status,
+        "pipeline_health": context.pipeline_health,
     })
 
 

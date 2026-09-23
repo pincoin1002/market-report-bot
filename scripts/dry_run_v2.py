@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from market_context import build_market_context
-from models import QuoteObservation, Snapshot
+from models import PortfolioQuoteCoverage, QuoteObservation, Snapshot
 from portfolio_context import EncryptedPortfolioProvider
 from structured_reports import (
     build_action_brief, build_public_draft, render_action_brief,
@@ -58,7 +58,10 @@ def _snapshot(report_type: str) -> Snapshot:
         report_type=report_type,
         fetch_coverage=1.0,
         market_context_coverage=1.0,
-        portfolio_quote_coverage=1.0,
+        portfolio_quote_coverage=PortfolioQuoteCoverage(
+            expected_positions=0, covered_positions=0, coverage_ratio=1.0,
+            as_of=datetime.now(tz=timezone.utc), status="NOT_APPLICABLE",
+        ),
         quote_observations=observations,
         us_markets={},
     )

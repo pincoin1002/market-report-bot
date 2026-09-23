@@ -2,6 +2,7 @@ import sys
 import unittest
 import os
 import inspect
+import json
 import subprocess
 import tempfile
 from datetime import datetime, timedelta, timezone
@@ -17,8 +18,10 @@ from generate_report import validate_portfolio_quotes, validate_private_advice_t
 from instrument_registry import build_universe, resolve_instrument
 from market_context import build_market_context
 from market_session import classify_us_session, get_target_market_date, report_market_date, us_open_should_run
-from models import PortfolioActionBrief, PortfolioActionItem, PriceReference, QuoteObservation, Snapshot, Trigger
-from portfolio_context import EncryptedPortfolioProvider, PortfolioContextProvider
+from models import (PortfolioActionBrief, PortfolioActionItem, PortfolioContext,
+                    PortfolioQuoteCoverage, PositionContext, PriceReference,
+                    QuoteObservation, Snapshot, Trigger)
+from portfolio_context import EncryptedPortfolioProvider, PIOSPortfolioProvider, PortfolioContextProvider
 from providers import observation_from_daily_quote
 from quote_quality import validate_observation
 from structured_reports import (
@@ -59,12 +62,18 @@ def _obs(symbol: str, quality: str = "VALID", session: str = "REGULAR",
 
 def _snapshot(observations: dict[str, QuoteObservation],
               coverage: float = 1.0) -> Snapshot:
+    expected = len(observations)
+    covered = round(expected * coverage)
     return Snapshot(
         generated_at=datetime.now(tz=timezone.utc),
         report_type="us_close",
         fetch_coverage=1.0,
         market_context_coverage=1.0,
-        portfolio_quote_coverage=coverage,
+        portfolio_quote_coverage=PortfolioQuoteCoverage(
+            expected_positions=expected, covered_positions=covered,
+            coverage_ratio=coverage, as_of=datetime.now(tz=timezone.utc),
+            status="FULL" if coverage == 1 else "DEGRADED",
+        ),
         quote_observations=observations,
     )
 
@@ -161,11 +170,21 @@ class SnapshotBuildTest(unittest.TestCase):
             requested_symbols.extend(symbols)
             del symbols
 
-        with patch.object(fetch_market_data.portfolio_store, "load_portfolio", return_value=raw):
+        portfolio_context = PortfolioContext(
+            source="TEST", snapshot_id="test", positions=[
+                PositionContext(position_id="tw", instrument_id="006208", ticker="006208", name="富邦台50", quantity=130, cost_basis=116, currency="TWD", asset_type="ETF"),
+                PositionContext(position_id="us", instrument_id="AMZN", ticker="AMZN", name="Amazon", quantity=1, cost_basis=220, currency="USD", asset_type="EQUITY"),
+            ],
+        )
+        with patch.object(fetch_market_data, "load_authoritative_portfolio", return_value=portfolio_context):
             def fake_observations(specs, expected_session, *args, **kwargs):
                 del expected_session
                 requested_symbols.extend([s.provider_symbols["yfinance"] for s in specs])
-                return {s.canonical_symbol: _obs(s.canonical_symbol, currency=s.currency) for s in specs}, {
+                expected_dates = kwargs["expected_dates"]
+                return {s.canonical_symbol: _obs(
+                    s.canonical_symbol, currency=s.currency,
+                    market_date=expected_dates.get(s.market, datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")),
+                ).model_copy(update={"market": s.market}) for s in specs}, {
                     s.provider_symbols["yfinance"]: "test" for s in specs
                 }
             with patch.object(fetch_market_data, "fetch_session_observations", side_effect=fake_observations):
@@ -173,7 +192,8 @@ class SnapshotBuildTest(unittest.TestCase):
 
         self.assertIn("006208.TW", requested_symbols)
         self.assertIn("AMZN", requested_symbols)
-        self.assertEqual(snapshot.portfolio_quote_coverage, 1.0)
+        self.assertEqual(snapshot.portfolio_quote_coverage.coverage_ratio, 1.0)
+        self.assertEqual(snapshot.portfolio_quote_coverage.expected_positions, 2)
         self.assertIn("006208", snapshot.quote_observations)
         self.assertIn("AMZN", snapshot.quote_observations)
 
@@ -181,6 +201,65 @@ class SnapshotBuildTest(unittest.TestCase):
         source = inspect.getsource(fetch_market_data.main)
         self.assertIn("public report may proceed; private advice will block", source)
         self.assertNotIn("portfolio quote coverage below 100% — refusing to write snapshot", source)
+
+
+class PortfolioCoverageRegressionTest(unittest.TestCase):
+    def test_pios_snapshot_is_the_read_only_position_source(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "portfolio_snapshot.json"
+            path.write_text(json.dumps({
+                "snapshot_id": "snapshot-test",
+                "as_of": "2026-09-24T13:30:00+08:00",
+                "active_positions": [{
+                    "position_id": "position-test", "instrument_id": "instrument-uuid",
+                    "ticker": "2330", "name": "台積電", "quantity": 1000,
+                    "currency": "TWD", "asset_type": "EQUITY",
+                }],
+            }), encoding="utf-8")
+            context = PIOSPortfolioProvider(path).load()
+        self.assertEqual(context.source, "PIOS_PORTFOLIO_SNAPSHOT")
+        self.assertEqual(context.snapshot_id, "snapshot-test")
+        self.assertEqual(context.positions[0].position_id, "position-test")
+        self.assertEqual(context.positions[0].ticker, "2330")
+
+    def test_every_active_position_has_one_explicit_resolution(self):
+        portfolio = PortfolioContext(source="PIOS_PORTFOLIO_SNAPSHOT", snapshot_id="pios-test", positions=[
+            PositionContext(position_id="p1", instrument_id="NVDA", ticker="NVDA", name="NVIDIA", quantity=1, currency="USD", asset_type="EQUITY"),
+            PositionContext(position_id="p2", instrument_id="GOOG", ticker="GOOG", name="Alphabet", quantity=1, currency="USD", asset_type="EQUITY"),
+            PositionContext(position_id="p3", instrument_id="VOO", ticker="VOO", name="VOO", quantity=1, currency="USD", asset_type="ETF"),
+            PositionContext(position_id="p4", instrument_id="UNKNOWN", ticker="UNKNOWN", name="Unknown", quantity=1, currency="USD", asset_type="EQUITY"),
+        ])
+        universe = build_universe(portfolio_context=portfolio)
+        del universe["UNKNOWN"]
+        coverage = fetch_market_data.build_portfolio_quote_coverage(
+            portfolio,
+            {"NVDA": _obs("NVDA"), "GOOG": _obs("GOOG", quality="STALE")},
+            universe,
+            datetime.now(tz=timezone.utc),
+            {"US": datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")},
+        )
+        self.assertEqual(coverage.expected_positions, 4)
+        self.assertEqual(coverage.covered_positions, 1)
+        self.assertEqual({item.position_id for item in coverage.items}, {"p1", "p2", "p3", "p4"})
+        self.assertEqual({item.state for item in coverage.items}, {"QUOTED", "STALE", "MISSING", "UNSUPPORTED"})
+        self.assertFalse(coverage.is_full)
+
+    def test_fx_direction_is_not_inverted(self):
+        from structured_reports import usd_twd_direction_label
+        self.assertEqual(usd_twd_direction_label(0.2), "貶值")
+        self.assertEqual(usd_twd_direction_label(-0.2), "升值")
+        self.assertEqual(usd_twd_direction_label(0), "持平")
+
+    def test_watch_levels_are_derived_from_current_index_not_a_template(self):
+        context = build_market_context(Snapshot(
+            generated_at=datetime(2026, 9, 24, tzinfo=timezone.utc),
+            report_type="tw_close", report_market_date="2026-09-24",
+            quote_observations={"TAIEX": _obs("TAIEX", price=48157, prev=48000, currency="TWD", market_date="2026-09-24").model_copy(update={"market": "TW"})},
+        ), "tw_close")
+        from structured_reports import derive_tomorrow_watch_signals
+        rendered = "\n".join(derive_tomorrow_watch_signals(context))
+        self.assertIn("48,000", rendered)
+        self.assertNotIn("46,000", rendered)
 
 
 class SessionEngineTest(unittest.TestCase):
@@ -475,11 +554,11 @@ class SafetyAndWorkflowTest(unittest.TestCase):
         self.assertIn("正式收盤", rendered)
 
 
-    def test_nested_llm_report_is_reduced_to_one_grounded_driver(self):
+    def test_nested_llm_report_cannot_supply_a_market_driver(self):
         context = build_market_context(_snapshot({"2330": _obs("2330")}), "tw_close", run_id="test")
         narrative = """# 台股收盤日報\n\n## 1. 今日一句話\n台積電領軍，指數收高，但成交結構分化。\n\n---\n\n## 2. 指數與市場概況\n| 指標 | 數值 |\n| TAIEX | 99999 |\n\n## 3. 盤中走勢復盤\n不應進入外層報告。"""
         draft = build_public_draft(context, narrative)
-        self.assertEqual(draft.drivers, ["台積電領軍，指數收高，但成交結構分化。"])
+        self.assertEqual(draft.drivers, [])
         self.assertEqual(draft.rendered_markdown.count("台股收盤日報"), 1)
         self.assertNotIn("指數與市場概況", draft.rendered_markdown)
         self.assertNotIn("99999", draft.rendered_markdown)

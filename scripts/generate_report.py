@@ -33,7 +33,7 @@ from market_session import human_session_label, report_market_date, get_target_m
 from adr_engine import calculate_tsm_adr_premium
 from models import MarketContext, Portfolio, Snapshot
 import portfolio_store
-from portfolio_context import EncryptedPortfolioProvider
+from portfolio_context import EncryptedPortfolioProvider, load_authoritative_portfolio
 from structured_reports import (
     build_action_brief, build_public_draft, render_action_brief,
     validate_action_brief, validate_public_draft,
@@ -661,17 +661,27 @@ def _portfolio_tickers(raw: dict | None) -> set[str]:
     return tickers
 
 
-def validate_portfolio_quotes(raw: dict | None, snapshot: "Snapshot | None") -> tuple[bool, str]:
-    if not portfolio_store.has_positions(raw):
+def validate_portfolio_quotes(raw: dict | None, snapshot: "Snapshot | None",
+                              portfolio_context=None) -> tuple[bool, str]:
+    positions = portfolio_context.positions if portfolio_context is not None else []
+    if not positions and not portfolio_store.has_positions(raw):
         return False, "加密持股不存在或沒有持股，略過持股操作建議。"
     if snapshot is None:
         return False, "缺少 market_snapshot.json，無法驗證持股行情。"
-    if snapshot.portfolio_quote_coverage is None:
+    coverage = snapshot.portfolio_quote_coverage
+    if coverage is None:
         return False, "snapshot 未包含 portfolio_quote_coverage，無法確認持股行情覆蓋。"
-    if snapshot.portfolio_quote_coverage < 1.0:
-        return False, f"持股行情覆蓋率 {snapshot.portfolio_quote_coverage:.0%}，低於 100%。"
+    if not coverage.is_full:
+        return False, (
+            f"持股行情覆蓋率 {coverage.coverage_ratio:.0%}（{coverage.covered_positions}/"
+            f"{coverage.expected_positions}；{coverage.status}），低於 100%。"
+        )
+    expected = len(positions) if positions else len(_portfolio_tickers(raw))
+    if coverage.expected_positions != expected:
+        return False, f"持股 quote coverage 預期部位數 {coverage.expected_positions} 與 canonical active positions {expected} 不一致。"
     bad: list[str] = []
-    for ticker in _portfolio_tickers(raw):
+    tickers = [position.ticker for position in positions] if positions else sorted(_portfolio_tickers(raw))
+    for ticker in tickers:
         obs = snapshot.quote_observations.get(ticker)
         if obs is None:
             bad.append(f"{ticker}: missing quote observation")
@@ -732,7 +742,7 @@ def write_advice_audit(report_type: str, status: str, reason: str,
         "status": status,
         "reason": reason,
         "generated_at": datetime.now(tz=TPE).isoformat(),
-        "portfolio_quote_coverage": snapshot.portfolio_quote_coverage if snapshot else None,
+        "portfolio_quote_coverage": snapshot.portfolio_quote_coverage.model_dump(mode="json") if snapshot and snapshot.portfolio_quote_coverage else None,
         "data_quality": snapshot.data_quality if snapshot else {},
     }
     (data_dir / "portfolio_advice_audit.json").write_text(
@@ -746,23 +756,16 @@ def run_portfolio_advice(report: str, report_type: str,
     """Generate position-aware advice and deliver privately. The advice text is
     never written to reports/ nor committed — the repo is public."""
     raw = portfolio_store.load_portfolio()
-    ok, reason = validate_portfolio_quotes(raw, snapshot)
+    portfolio_context = load_authoritative_portfolio()
+    ok, reason = validate_portfolio_quotes(raw, snapshot, portfolio_context)
     if not ok:
         log.warning("portfolio advice blocked", extra={"reason": reason})
         write_advice_audit(report_type, "BLOCKED", reason, snapshot)
         if portfolio_store.ENC_PATH.exists() or portfolio_store.has_positions(raw):
             send_operational_notice(f"{reason}\n\n已停止產生持股建議，避免用錯誤或缺漏價格下判斷。", report_type)
         return
-    try:
-        portfolio = Portfolio.model_validate(raw)
-    except ValidationError:
-        log.error("portfolio data invalid — advice stage skipped", exc_info=True)
-        return
-
-    del portfolio, model
+    del model
     context = load_market_context(report_type, snapshot)
-    provider = EncryptedPortfolioProvider()
-    portfolio_context = provider.load()
     brief = build_action_brief(context, portfolio_context)
     ok, reason = validate_action_brief(brief, context, portfolio_context)
     if not ok:

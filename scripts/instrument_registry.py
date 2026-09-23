@@ -184,9 +184,22 @@ def quote_symbol(spec: InstrumentSpec) -> str:
     return spec.provider_symbols["yfinance"]
 
 
-def build_universe(portfolio: dict | None = None) -> dict[str, InstrumentSpec]:
-    symbols = set(CORE_MARKET_SYMBOLS) | set(portfolio_symbols(portfolio))
+def build_universe(portfolio: dict | None = None, *, portfolio_context=None) -> dict[str, InstrumentSpec]:
+    """Build market universe from one portfolio source, never a report list.
+
+    ``portfolio`` is retained for the Telegram encrypted-store compatibility
+    path.  Production daily reports pass a ``PortfolioContext`` sourced from a
+    PIOS snapshot when configured.
+    """
+    if portfolio_context is not None:
+        position_symbols = {
+            resolve_instrument(position.ticker).canonical_symbol
+            for position in portfolio_context.positions
+        }
+    else:
+        position_symbols = set(portfolio_symbols(portfolio))
+    symbols = set(CORE_MARKET_SYMBOLS) | position_symbols
     universe = {sym: resolve_instrument(sym) for sym in symbols}
-    for sym in portfolio_symbols(portfolio):
+    for sym in position_symbols:
         universe[sym].is_portfolio_critical = True
     return dict(sorted(universe.items()))

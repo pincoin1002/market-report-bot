@@ -13,7 +13,8 @@ automatic trading.
 Final data flow:
 
 ```
-FETCH QUOTES
+READ CANONICAL PIOS PortfolioSnapshot
+→ FETCH QUOTES
 → VALIDATE RAW QUOTES
 → BUILD MarketContext
 → GENERATE MarketReportDraft
@@ -67,7 +68,9 @@ fallback is compatibility only, not authoritative design.
 
 - `run_id`, `report_type`, `market_date`, `generated_at`, `market_session`
 - `quotes`, `macro_observations`
-- `market_quote_coverage`, `portfolio_quote_coverage`
+- `market_quote_coverage`, plus a runtime `portfolio_quote_coverage` diagnostic
+  (`expected_positions`, `covered_positions`, `coverage_ratio`, `as_of`,
+  `status`, and per-position `QUOTED` / `STALE` / `MISSING` / `UNSUPPORTED`)
 - `provider_health`, `data_quality`, `event_facts`
 - `material_changes`, `missing_required_items`, `degraded_mode`
 
@@ -100,10 +103,21 @@ evidence, not trading commands.
 
 ## Portfolio Boundary
 
-`PortfolioContextProvider` defines the future integration boundary.
-`EncryptedPortfolioProvider` preserves compatibility with `portfolio.json.enc`
-and `PORTFOLIO_KEY`. `PIOSPortfolioProvider` is intentionally a stub; PIOS will
-remain the future capital-allocation authority.
+`PIOSPortfolioProvider` is the read-only integration boundary. It consumes a
+versioned JSON export with `snapshot_id`, `as_of`, and `active_positions` from
+`PIOS_PORTFOLIO_SNAPSHOT_PATH` (or the runner-only
+`data/pios_portfolio_snapshot.json`). PIOS owns accepted transactions,
+reconciliation, and accounting; this repo never writes that state.
+
+`EncryptedPortfolioProvider` remains a temporary compatibility reader for the
+existing Telegram transaction store only when no PIOS export is configured. It
+does not create a second report-owned holdings list. A configured but unreadable
+PIOS export makes the portfolio layer unavailable and blocks only the private
+portfolio brief; valid public market sections continue to render.
+
+Each active position is resolved exactly once into `QUOTED`, `STALE`, `MISSING`,
+or `UNSUPPORTED`. Incomplete coverage cannot become a fully valid private
+portfolio conclusion. Coverage is runtime diagnostic data, not canonical state.
 
 Portfolio plaintext remains ignored and must never be committed. Structured
 private artifacts are runner-only / GitHub artifact data and are ignored by Git.

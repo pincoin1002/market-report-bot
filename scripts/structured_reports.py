@@ -164,13 +164,11 @@ def derive_state_changes(context: MarketContext) -> list[str]:
     if taiex:
         close_p = taiex.close
         prev_p = close_p - taiex.point_change
-        for round_level in [46000.0, 45000.0, 40000.0, 35000.0, 30000.0, 25000.0, 24000.0, 23000.0, 22000.0, 21000.0, 20000.0]:
-            if prev_p < round_level <= close_p:
-                changes.append(f"指數收復整數關：收在 {close_p:,.2f} 點，站回 {int(round_level):,} 點。")
-                break
-            elif prev_p >= round_level > close_p:
-                changes.append(f"指數失守整數關：收在 {close_p:,.2f} 點，跌破 {int(round_level):,} 點。")
-                break
+        increment = 1000.0 if close_p >= 10_000 else 100.0
+        round_level = round(close_p / increment) * increment
+        if min(prev_p, close_p) < round_level <= max(prev_p, close_p):
+            verb = "站回" if close_p > prev_p else "跌破"
+            changes.append(f"指數跨越當日鄰近整數關：收在 {close_p:,.2f} 點，{verb} {int(round_level):,} 點。")
 
     if taiex and taiex.advancing is not None and taiex.declining is not None:
         if taiex.advancing > taiex.declining * 1.5:
@@ -181,7 +179,7 @@ def derive_state_changes(context: MarketContext) -> list[str]:
     usd_obs = context.quotes.get("USDTWD") or context.macro_observations.get("USDTWD")
     if usd_obs and usd_obs.quality_status == "VALID":
         if abs(usd_obs.change_pct) >= 0.1:
-            dir_str = "升值" if usd_obs.change_pct < 0 else "貶值"
+            dir_str = usd_twd_direction_label(usd_obs.change_pct)
             changes.append(f"新台幣對美元走勢：終場{dir_str}至 {usd_obs.price:.3f}（變動 {usd_obs.change_pct:+.2f}%）。")
 
     return changes
@@ -193,10 +191,11 @@ def derive_tomorrow_watch_signals(context: MarketContext) -> list[str]:
     inst = context.institutional_flows
 
     if taiex:
-        for round_level in [46000.0, 45000.0, 40000.0, 35000.0, 30000.0, 25000.0, 24000.0, 23000.0, 22000.0, 21000.0, 20000.0]:
-            if taiex.close >= round_level:
-                signals.append(f"加權指數整數支撐：觀察 {int(round_level):,} 點能否守穩；若失守則今日突破延續性降低。")
-                break
+        increment = 1000.0 if taiex.close >= 10_000 else 100.0
+        support = (taiex.close // increment) * increment
+        signals.append(
+            f"加權指數：現值 {taiex.close:,.2f} 點；明日觀察是否守住動態參考 {support:,.0f} 點，失守即代表收盤強度未延續。"
+        )
         if taiex.high and taiex.high > taiex.close + 30:
             signals.append(f"盤中高點反壓：今日高點 {taiex.high:,.2f} 點留有上影線賣壓，明日需量能維持方具消化動能。")
 
@@ -205,8 +204,10 @@ def derive_tomorrow_watch_signals(context: MarketContext) -> list[str]:
 
     usd_obs = context.quotes.get("USDTWD") or context.macro_observations.get("USDTWD")
     if usd_obs and usd_obs.quality_status == "VALID":
-        ref_level = 32.0 if usd_obs.price <= 32.2 else 32.5
-        signals.append(f"匯率關鍵水位：觀察 USD/TWD 是否能穩定在 {ref_level:.2f} 下方，若匯價走升將有助於外資現貨買超延續。")
+        direction = usd_twd_direction_label(usd_obs.change_pct)
+        signals.append(
+            f"USD/TWD：現值 {usd_obs.price:.3f}、單日新台幣{direction}；觀察下一交易日是否延續。"
+        )
 
     for event in context.event_facts:
         summary = event.get("summary") or event.get("event")
@@ -214,6 +215,48 @@ def derive_tomorrow_watch_signals(context: MarketContext) -> list[str]:
             signals.append(f"重要事件：關注「{summary}」之後續市場反應與定價。")
 
     return signals
+
+
+def usd_twd_direction_label(change_pct: float) -> str:
+    """USD/TWD up means TWD depreciates; down means TWD appreciates."""
+    if change_pct > 0:
+        return "貶值"
+    if change_pct < 0:
+        return "升值"
+    return "持平"
+
+
+def derive_evidence_supported_drivers(context: MarketContext) -> list[str]:
+    """Observed facts only; no LLM-owned causal explanation."""
+    if not context.report_type.startswith("tw_"):
+        return []
+    drivers: list[str] = []
+    taiex = context.quotes.get("TAIEX")
+    tsmc = context.quotes.get("2330")
+    if taiex and taiex.quality_status == "VALID":
+        text = f"觀察事實：加權指數 {taiex.change_pct:+.2f}%"
+        if tsmc and tsmc.quality_status == "VALID":
+            text += f"；台積電 (2330) {tsmc.change_pct:+.2f}%"
+        drivers.append(text + "。")
+    return drivers[:1]
+
+
+def portfolio_report_section(context: MarketContext) -> OptionalModule | None:
+    """A privacy-safe portfolio section in the same report render pass."""
+    coverage = context.portfolio_quote_coverage
+    if coverage is None:
+        return None
+    if coverage.status == "FULL":
+        return OptionalModule(
+            name="Portfolio Status", state="AVAILABLE",
+            summary=f"持股行情覆蓋完整（{coverage.covered_positions}/{coverage.expected_positions}）；明細僅送往私人 Action Brief。",
+        )
+    if coverage.status == "NOT_APPLICABLE":
+        return OptionalModule(name="Portfolio Status", state="UNAVAILABLE", summary="未取得可分析的 canonical active positions；未產生持股結論。")
+    return OptionalModule(
+        name="Portfolio Status", state="PARTIAL",
+        summary=f"持股行情覆蓋 {coverage.covered_positions}/{coverage.expected_positions}（{coverage.coverage_ratio:.0%}）；私人持股結論已 fail-closed。",
+    )
 
 
 def build_public_draft(context: MarketContext, narrative: str | None = None) -> MarketReportDraft:
@@ -244,7 +287,7 @@ def build_public_draft(context: MarketContext, narrative: str | None = None) -> 
         headline=f"{title} {context.market_date}｜{session_label}",
         market_state=[f"{r.canonical_symbol}: {r.value:g} ({r.session})" for r in refs[:8]],
         material_changes=material,
-        drivers=_extract_grounded_drivers(narrative, context),
+        drivers=derive_evidence_supported_drivers(context),
         rotation="",
         event_calendar=[],
         optional_modules=optional,
@@ -253,6 +296,7 @@ def build_public_draft(context: MarketContext, narrative: str | None = None) -> 
         price_references=refs,
         taiex_summary=context.taiex_summary,
         institutional_flows=context.institutional_flows,
+        portfolio_section=portfolio_report_section(context),
     )
     draft.rendered_markdown = render_public_report(draft, context, narrative)
     return draft
@@ -454,6 +498,11 @@ def render_public_report(draft: MarketReportDraft, context: MarketContext,
         lines.append("- 部分外部即時新聞檢索受限，本報告行情數據均以交易所已驗證收盤價為準。")
         lines.append("")
 
+    if draft.portfolio_section:
+        lines.append(f"## {sec_num}. 持股資料狀態")
+        lines.append(f"- {draft.portfolio_section.summary}")
+        lines.append("")
+
     return "\n".join(lines).strip()
 
 
@@ -549,7 +598,7 @@ def _render_tw_close_report(draft: MarketReportDraft, context: MarketContext) ->
 
         usd_obs = context.quotes.get("USDTWD") or context.macro_observations.get("USDTWD")
         if usd_obs and usd_obs.quality_status == "VALID":
-            fx_dir = "升值" if usd_obs.change_pct < 0 else "貶值"
+            fx_dir = usd_twd_direction_label(usd_obs.change_pct)
             lines.append(f"- 匯率動態：USD/TWD 收在 {usd_obs.price:.3f}（變動 {usd_obs.change_pct:+.2f}%，新台幣{fx_dir}）。")
         lines.append("")
 
@@ -608,6 +657,11 @@ def _render_tw_close_report(draft: MarketReportDraft, context: MarketContext) ->
         lines.append(f"## {sec_num}. 資料說明")
         sec_num += 1
         lines.append("- 部分外部即時新聞檢索受限，本報告行情數據均以交易所已驗證收盤價為準。")
+        lines.append("")
+
+    if draft.portfolio_section:
+        lines.append(f"## {sec_num}. 持股資料狀態")
+        lines.append(f"- {draft.portfolio_section.summary}")
         lines.append("")
 
     return "\n".join(lines).strip()

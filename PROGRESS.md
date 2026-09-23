@@ -1,5 +1,14 @@
 # PROGRESS
 
+## 2026-09-24
+
+- Replaced the future-only PIOS stub with a read-only, versioned `PortfolioSnapshot` boundary. `PIOS_PORTFOLIO_SNAPSHOT_PATH` accepts a private export containing `snapshot_id`, `as_of`, and `active_positions`; PIOS remains the owner of transactions and reconciliation. No matching PIOS implementation/export exists under the inspected `/Users/chenpinxuan/Projects` or `/Users/chenpinxuan/Desktop` roots, so the existing encrypted Telegram transaction store remains an explicitly labelled compatibility source until an export is supplied.
+- Rebuilt `portfolio_quote_coverage` from a scalar into a runtime diagnostic with expected/covered position counts, ratio, status, timestamps, provider evidence, and exactly one `QUOTED` / `STALE` / `MISSING` / `UNSUPPORTED` resolution per active position. A configured but unreadable PIOS snapshot blocks only the private Action Brief; public market reporting remains available.
+- Added a privacy-safe `Portfolio Status` module to the same structured public report render pass, so the report has one title and an explicit portfolio `AVAILABLE` / `PARTIAL` / `UNAVAILABLE` status without exposing holdings. Detailed positions remain private.
+- Added report-date contracts and primary-market quote date checks so an older snapshot cannot be rendered as today. Removed fixed 46,000 and USD/TWD 32.0/32.5 templates; tomorrow-watch levels are derived from current deterministic values. USD/TWD direction is now explicitly tested (`up = TWD depreciation`, `down = TWD appreciation`) and no longer asserts FX-to-foreign-flow causation.
+- Replaced LLM-supplied causal market drivers with bounded deterministic observed-fact drivers; structured rendering remains one title / one report pass.
+- Verification: `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest discover -s tests -v` PASS (92); `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python scripts/dry_run_v2.py` PASS for all four report types; `python -m py_compile scripts/*.py` PASS; `git diff --check` PASS.
+
 ## 2026-09-18
 
 - Investigated the broken 2026-09-17 Taiwan close Telegram report. GitHub run `35218443315` was a scheduled event created at 11:57 UTC, over five hours after the configured 06:30 UTC cron; the repo's `*/5` Telegram heartbeat was also being throttled into multi-hour intervals.
