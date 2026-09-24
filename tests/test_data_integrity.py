@@ -543,6 +543,19 @@ class StructuredReportTest(unittest.TestCase):
         for ref in draft.price_references:
             self.assertIn(ref.canonical_symbol, draft.rendered_markdown)
 
+    def test_portfolio_coverage_section_is_not_misread_as_market_narrative(self):
+        from validate_report import validate_numeric_provenance
+        snapshot = _snapshot({"2330": _obs("2330", currency="TWD").model_copy(update={"market": "TW"})})
+        snapshot.portfolio_quote_coverage = PortfolioQuoteCoverage(
+            expected_positions=23, covered_positions=23, coverage_ratio=1.0,
+            as_of=datetime.now(tz=timezone.utc), status="FULL",
+        )
+        context = build_market_context(snapshot, "tw_close", run_id="portfolio-coverage")
+        rendered = build_public_draft(context).rendered_markdown
+        self.assertIn("23/23", rendered)
+        ok, errors = validate_numeric_provenance(rendered, context)
+        self.assertTrue(ok, errors)
+
     def test_optional_module_unavailable_is_marked_not_fabricated(self):
         context = self._context()
         draft = build_public_draft(context)

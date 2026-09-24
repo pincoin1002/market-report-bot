@@ -269,7 +269,7 @@ def validate_numeric_provenance(report_text: str, context: MarketContext) -> tup
         if line_s.startswith("## ") and any(k in line_s for k in ("Top Market Drivers", "今日走勢", "Rotation", "輪動", "Events", "事件", "今日關鍵驅動", "相較昨日", "明日觀察")):
             in_narrative = True
             continue
-        elif line_s.startswith("## ") and any(k in line_s for k in ("Executive Market State", "市場核心概況", "What Changed", "今日市場", "法人與資金", "權值與族群")):
+        elif line_s.startswith("## ") and any(k in line_s for k in ("Executive Market State", "市場核心概況", "What Changed", "今日市場", "法人與資金", "權值與族群", "持股資料狀態")):
             in_narrative = False
             continue
         elif line_s.startswith("# "):
