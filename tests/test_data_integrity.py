@@ -425,7 +425,89 @@ class SessionEngineTest(unittest.TestCase):
         self.assertEqual(get_target_market_date("us_close", "US", now=early_us), "2026-09-16")
 
 
+    def test_tw_close_before_us_open_uses_previous_completed_us_session(self):
+        dt = datetime(2026, 9, 24, 17, 0, tzinfo=ZoneInfo("Asia/Taipei"))
+        self.assertEqual(get_target_market_date("tw_close", "US", now=dt), "2026-09-23")
+
+    def test_tw_close_during_us_session_keeps_previous_completed_us_session(self):
+        dt = datetime(2026, 9, 24, 11, 0, tzinfo=NY)
+        self.assertEqual(get_target_market_date("tw_close", "US", now=dt), "2026-09-23")
+
+    def test_after_us_close_same_date_becomes_expected(self):
+        dt = datetime(2026, 9, 24, 16, 5, tzinfo=NY)
+        self.assertEqual(get_target_market_date("tw_close", "US", now=dt), "2026-09-24")
+
+    def test_us_weekend_uses_latest_completed_friday(self):
+        dt = datetime(2026, 9, 26, 12, 0, tzinfo=NY)
+        self.assertEqual(get_target_market_date("tw_close", "US", now=dt), "2026-09-25")
+
+    def test_us_holiday_uses_latest_actual_completed_session(self):
+        dt = datetime(2026, 9, 7, 12, 0, tzinfo=NY)
+        self.assertEqual(get_target_market_date("tw_close", "US", now=dt), "2026-09-04")
+
+    def test_tw_close_session_semantics_unchanged(self):
+        dt = datetime(2026, 9, 24, 14, 0, tzinfo=ZoneInfo("Asia/Taipei"))
+        self.assertEqual(get_target_market_date("tw_close", "TW", now=dt), "2026-09-24")
+
+
 class QuoteQualityTest(unittest.TestCase):
+    def test_quote_older_than_latest_completed_session_is_rejected(self):
+        spec = resolve_instrument("NVDA")
+        obs = _obs("NVDA", market_date="2026-09-22").model_copy(update={"market": "US"})
+        checked = validate_observation(obs, spec, expected_date="2026-09-23")
+        self.assertEqual(checked.quality_status, "DATE_MISMATCH")
+
+    def test_future_session_quote_is_rejected(self):
+        spec = resolve_instrument("NVDA")
+        retrieved = datetime(2026, 9, 24, 12, 0, tzinfo=timezone.utc)
+        obs = _obs("NVDA", market_date="2026-09-25").model_copy(
+            update={"market": "US", "retrieved_at": retrieved}
+        )
+        checked = validate_observation(obs, spec)
+        self.assertEqual(checked.quality_status, "DATE_MISMATCH")
+
+    def test_wrong_venue_identity_is_rejected(self):
+        spec = resolve_instrument("NVDA")
+        obs = _obs("NVDA", market_date="2026-09-23").model_copy(update={"market": "TW"})
+        checked = validate_observation(obs, spec, expected_date="2026-09-23")
+        self.assertEqual(checked.quality_status, "CONFLICTING")
+
+    def test_exchange_session_date_is_authoritative_over_wall_clock_age(self):
+        spec = resolve_instrument("NVDA")
+        obs = _obs("NVDA", market_date="2026-09-01").model_copy(
+            update={"market": "US", "retrieved_at": datetime(2026, 9, 8, 12, 0, tzinfo=timezone.utc)}
+        )
+        checked = validate_observation(obs, spec, expected_date="2026-09-01")
+        self.assertEqual(checked.quality_status, "VALID")
+
+    def test_completed_close_contract_restores_all_eleven_us_positions(self):
+        symbols = ["AMZN", "DRAM", "GOOG", "IBKR", "MU", "NVDA", "QQQ", "TSLA", "VOO", "VST", "VTI"]
+        specs = [resolve_instrument(symbol) for symbol in symbols]
+        daily = {
+            spec.provider_symbols["yfinance"]: Quote(
+                price=100.0 + index,
+                prev_close=99.0 + index,
+                change_pct=1.0,
+                data_date="2026-09-23",
+            )
+            for index, spec in enumerate(specs)
+        }
+        sources = {provider_symbol: "test_daily" for provider_symbol in daily}
+        with patch.object(providers.YahooExtendedHoursProvider, "fetch_many") as extended, \
+             patch.object(providers, "fetch_with_failover", return_value=(daily, sources)):
+            observations, _ = providers.fetch_session_observations(
+                specs,
+                "REGULAR",
+                expected_dates={"US": "2026-09-23"},
+                completed_close_markets={"US"},
+            )
+        extended.assert_not_called()
+        self.assertEqual(set(observations), set(symbols))
+        for symbol in symbols:
+            self.assertEqual(observations[symbol].market_date, "2026-09-23")
+            self.assertEqual(observations[symbol].quality_status, "VALID")
+            self.assertEqual(observations[symbol].session, "PREVIOUS_CLOSE")
+
     def test_coingecko_crypto_fallback_preserves_quote_provenance(self):
         now = datetime.now(tz=timezone.utc)
         response = Mock()
@@ -560,6 +642,61 @@ class StructuredReportTest(unittest.TestCase):
         context = self._context()
         draft = build_public_draft(context)
         self.assertTrue(any(m.state in ("PARTIAL", "UNAVAILABLE") for m in draft.optional_modules))
+
+    def test_tw_driver_and_delta_engines_are_evidence_backed(self):
+        from models import InstitutionalFlows, TaiexMarketSummary
+        from structured_reports import derive_evidence_supported_drivers, derive_session_deltas
+
+        observations = {
+            "TAIEX": _obs("TAIEX", price=48024.6, prev=48157.29, currency="TWD", market_date="2026-09-24").model_copy(update={"market": "TW"}),
+            "2330": _obs("2330", price=2475, prev=2500, currency="TWD", market_date="2026-09-24").model_copy(update={"market": "TW"}),
+            "2317": _obs("2317", price=250.5, prev=256, currency="TWD", market_date="2026-09-24").model_copy(update={"market": "TW"}),
+            "2454": _obs("2454", price=5285, prev=5185, currency="TWD", market_date="2026-09-24").model_copy(update={"market": "TW"}),
+            "2308": _obs("2308", price=1910, prev=1900, currency="TWD", market_date="2026-09-24").model_copy(update={"market": "TW"}),
+            "USDTWD": _obs("USDTWD", price=31.85, prev=31.68, currency="TWD", market_date="2026-09-24").model_copy(update={"market": "TW"}),
+        }
+        snapshot = Snapshot(
+            generated_at=datetime(2026, 9, 24, 9, 30, tzinfo=timezone.utc),
+            report_type="tw_close",
+            report_market_date="2026-09-24",
+            quote_observations=observations,
+            taiex_summary=TaiexMarketSummary(
+                close=48024.6,
+                point_change=-132.69,
+                change_pct=-0.28,
+                turnover_ntd_billions=8100,
+                advancing=420,
+                declining=510,
+                unchanged=70,
+            ),
+            institutional_flows=InstitutionalFlows(
+                foreign_buy_sell_ntd_billions=-80,
+                investment_trust_buy_sell_ntd_billions=10,
+                dealer_buy_sell_ntd_billions=-5,
+                foreign_buy_sell_prev_ntd_billions=25,
+                turnover_prev_ntd_billions=7600,
+            ),
+            portfolio_quote_coverage=PortfolioQuoteCoverage(
+                expected_positions=23,
+                covered_positions=23,
+                coverage_ratio=1.0,
+                as_of=datetime(2026, 9, 24, 9, 30, tzinfo=timezone.utc),
+                status="FULL",
+            ),
+        )
+        context = build_market_context(snapshot, "tw_close")
+        drivers = derive_evidence_supported_drivers(context)
+        deltas = derive_session_deltas(context)
+
+        self.assertTrue(any("OBSERVED — 權值壓力" in line for line in drivers))
+        self.assertTrue(any("OBSERVED — 相對支撐" in line for line in drivers))
+        self.assertTrue(any("SUPPORTED_ASSOCIATION" in line for line in drivers))
+        self.assertTrue(any("OBSERVED — 匯率" in line for line in drivers))
+        self.assertTrue(any("指數：" in line and "上一完成交易日" in line for line in deltas))
+        self.assertTrue(any("量能/廣度：" in line and "7,600" in line for line in deltas))
+        self.assertTrue(any("法人：" in line and "+25.00" in line for line in deltas))
+        self.assertTrue(any("USD/TWD：" in line for line in deltas))
+        self.assertTrue(any("持股相對 TAIEX：UNRESOLVED" in line for line in deltas))
 
     def test_market_context_delta_generation(self):
         context = self._context()

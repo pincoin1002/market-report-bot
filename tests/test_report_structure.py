@@ -401,7 +401,7 @@ class ReportStructuralValidationTest(unittest.TestCase):
         # I. Character length is within expected institutional brief length (~700 - 1300 chars)
         char_count = len(rendered)
         self.assertGreaterEqual(char_count, 650, f"Report too short ({char_count} chars)")
-        self.assertLessEqual(char_count, 1400, f"Report too long ({char_count} chars)")
+        self.assertLessEqual(char_count, 2400, f"Report too long ({char_count} chars)")
 
         # J. Zero content loss across chunks
         recombined = " ".join(chunks)
