@@ -258,6 +258,13 @@ def validate_numeric_provenance(report_text: str, context: MarketContext) -> tup
             t_delta = round(abs(context.taiex_summary.turnover_ntd_billions - fl.turnover_prev_ntd_billions), 2)
             allowed_numbers.add(t_delta)
             allowed_numbers.add(float(int(t_delta)))
+        if (fl.foreign_buy_sell_ntd_billions is not None
+                and fl.foreign_buy_sell_prev_ntd_billions is not None):
+            foreign_delta = round(
+                abs(fl.foreign_buy_sell_ntd_billions - fl.foreign_buy_sell_prev_ntd_billions), 2
+            )
+            allowed_numbers.add(foreign_delta)
+            allowed_numbers.add(float(int(foreign_delta)))
 
     # Methodology thresholds are not price targets; dynamic report levels must
     # still originate from the current deterministic context above.

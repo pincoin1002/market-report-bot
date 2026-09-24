@@ -269,8 +269,12 @@ def build_snapshot(report_type: str) -> Snapshot:
         "TW": tw_target_date,
     }
     
+    completed_close_markets = {"US", "TW"} if report_type in ("tw_close", "us_close") else set()
     observations, sources = fetch_session_observations(
-        list(universe.values()), expected_session, expected_dates=expected_dates
+        list(universe.values()),
+        expected_session,
+        expected_dates=expected_dates,
+        completed_close_markets=completed_close_markets,
     )
 
     valid_hits = sum(1 for o in observations.values() if o.quality_status == "VALID")

@@ -227,19 +227,169 @@ def usd_twd_direction_label(change_pct: float) -> str:
 
 
 def derive_evidence_supported_drivers(context: MarketContext) -> list[str]:
-    """Observed facts only; no LLM-owned causal explanation."""
+    """Deterministic evidence-ranked Taiwan driver candidates."""
     if not context.report_type.startswith("tw_"):
         return []
+
     drivers: list[str] = []
     taiex = context.quotes.get("TAIEX")
-    tsmc = context.quotes.get("2330")
-    if taiex and taiex.quality_status == "VALID":
-        text = f"觀察事實：加權指數 {taiex.change_pct:+.2f}%"
-        if tsmc and tsmc.quality_status == "VALID":
-            text += f"；台積電 (2330) {tsmc.change_pct:+.2f}%"
-        drivers.append(text + "。")
-    return drivers[:1]
+    major_symbols = ["2330", "2317", "2454", "2308", "2303", "2382", "3711"]
+    components = [
+        (symbol, context.quotes[symbol])
+        for symbol in major_symbols
+        if symbol in context.quotes and context.quotes[symbol].quality_status == "VALID"
+    ]
+    losers = sorted(
+        [(symbol, obs) for symbol, obs in components if obs.change_pct < -0.3],
+        key=lambda item: item[1].change_pct,
+    )
+    winners = sorted(
+        [(symbol, obs) for symbol, obs in components if obs.change_pct > 0.3],
+        key=lambda item: item[1].change_pct,
+        reverse=True,
+    )
 
+    if losers:
+        detail = "、".join(
+            f"{resolve_instrument(symbol).display_name} ({symbol}) {obs.change_pct:+.2f}%"
+            for symbol, obs in losers[:3]
+        )
+        drivers.append(f"OBSERVED — 權值壓力：{detail}。")
+    if winners:
+        detail = "、".join(
+            f"{resolve_instrument(symbol).display_name} ({symbol}) {obs.change_pct:+.2f}%"
+            for symbol, obs in winners[:3]
+        )
+        drivers.append(f"OBSERVED — 相對支撐：{detail}。")
+
+    if taiex and taiex.quality_status == "VALID" and components:
+        same_direction = [
+            obs for _, obs in components
+            if (taiex.change_pct < 0 and obs.change_pct < 0)
+            or (taiex.change_pct > 0 and obs.change_pct > 0)
+        ]
+        if len(same_direction) >= max(2, len(components) // 2):
+            direction = "走弱" if taiex.change_pct < 0 else "走強"
+            drivers.append(
+                f"SUPPORTED_ASSOCIATION — 多數已驗證大型權值與加權指數 "
+                f"{taiex.change_pct:+.2f}% 同向{direction}；這是共振證據，不宣稱單一因果。"
+            )
+
+    usd_obs = context.quotes.get("USDTWD") or context.macro_observations.get("USDTWD")
+    if usd_obs and usd_obs.quality_status == "VALID":
+        drivers.append(
+            f"OBSERVED — 匯率：USD/TWD {usd_obs.price:.3f}（{usd_obs.change_pct:+.2f}%；"
+            f"新台幣{usd_twd_direction_label(usd_obs.change_pct)}）。"
+        )
+
+    summary = context.taiex_summary
+    if summary and summary.advancing is not None and summary.declining is not None:
+        drivers.append(
+            f"OBSERVED — 市場廣度：上漲 {summary.advancing} 家、"
+            f"下跌 {summary.declining} 家。"
+        )
+    else:
+        drivers.append("UNRESOLVED — 市場廣度：缺少可驗證的漲跌家數證據。")
+
+    flows = context.institutional_flows
+    if flows and flows.foreign_buy_sell_ntd_billions is not None:
+        action = "買超" if flows.foreign_buy_sell_ntd_billions >= 0 else "賣超"
+        drivers.append(
+            f"OBSERVED — 外資現貨：{action} {abs(flows.foreign_buy_sell_ntd_billions):.2f} 億台幣。"
+        )
+    else:
+        drivers.append("UNRESOLVED — 法人流向：缺少可驗證的當日外資現貨資料。")
+
+    return drivers[:6]
+
+
+def derive_session_deltas(context: MarketContext) -> list[str]:
+    """Session-over-session Taiwan deltas with explicit unresolved evidence."""
+    if context.report_type != "tw_close":
+        return derive_state_changes(context)
+
+    changes: list[str] = []
+    taiex_obs = context.quotes.get("TAIEX")
+    movers: list[tuple[float, str, float]] = []
+    for symbol in ("2330", "2317", "2454", "2308", "2303", "2382", "3711"):
+        obs = context.quotes.get(symbol)
+        if obs and obs.quality_status == "VALID":
+            movers.append((abs(obs.change_pct), symbol, obs.change_pct))
+    movers.sort(reverse=True)
+
+    if taiex_obs and taiex_obs.quality_status == "VALID":
+        point_delta = taiex_obs.price - taiex_obs.previous_regular_close
+        line = (
+            f"指數：上一完成交易日 {taiex_obs.previous_regular_close:,.2f} → "
+            f"{taiex_obs.price:,.2f} 點（{point_delta:+,.2f}；{taiex_obs.change_pct:+.2f}%）"
+        )
+        if movers:
+            detail = "、".join(
+                f"{resolve_instrument(symbol).display_name} {change:+.2f}%"
+                for _, symbol, change in movers[:3]
+            )
+            line += f"；權值變化最大：{detail}"
+        changes.append(line + "。")
+    else:
+        changes.append("指數：UNRESOLVED（缺少兩個相鄰完成交易日的有效 TAIEX 收盤）。")
+
+    summary = context.taiex_summary
+    flows = context.institutional_flows
+    if summary and summary.turnover_ntd_billions is not None and flows and flows.turnover_prev_ntd_billions is not None:
+        delta = summary.turnover_ntd_billions - flows.turnover_prev_ntd_billions
+        breadth_text = (
+            f"；今日上漲 {summary.advancing} 家、下跌 {summary.declining} 家，"
+            "前一交易日 breadth 未入 canonical snapshot"
+            if summary.advancing is not None and summary.declining is not None
+            else "；breadth UNRESOLVED"
+        )
+        changes.append(
+            f"量能/廣度：成交值 {flows.turnover_prev_ntd_billions:,.2f} → "
+            f"{summary.turnover_ntd_billions:,.2f} 億台幣（{delta:+,.2f} 億）"
+            f"{breadth_text}。"
+        )
+    else:
+        changes.append("量能/廣度：UNRESOLVED（缺少前一完成交易日成交值或 breadth 證據）。")
+
+    if flows and flows.foreign_buy_sell_ntd_billions is not None:
+        current = flows.foreign_buy_sell_ntd_billions
+        if flows.foreign_buy_sell_prev_ntd_billions is not None:
+            prev = flows.foreign_buy_sell_prev_ntd_billions
+            text = (
+                f"法人：外資現貨 {prev:+.2f} → {current:+.2f} 億台幣"
+                f"（變化 {current - prev:+.2f} 億）"
+            )
+        else:
+            text = f"法人：外資今日 {current:+.2f} 億台幣；前一交易日外資流量 UNRESOLVED"
+        if flows.investment_trust_buy_sell_ntd_billions is not None or flows.dealer_buy_sell_ntd_billions is not None:
+            text += "；投信/自營商缺少前一交易日基準，delta UNRESOLVED"
+        changes.append(text + "。")
+    else:
+        changes.append("法人：UNRESOLVED（缺少可驗證的 session-over-session 法人資料）。")
+
+    usd_obs = context.quotes.get("USDTWD") or context.macro_observations.get("USDTWD")
+    if usd_obs and usd_obs.quality_status == "VALID":
+        changes.append(
+            f"USD/TWD：{usd_obs.previous_regular_close:.3f} → {usd_obs.price:.3f}"
+            f"（{usd_obs.change_pct:+.2f}%；新台幣{usd_twd_direction_label(usd_obs.change_pct)}）。"
+        )
+    else:
+        changes.append("USD/TWD：UNRESOLVED（缺少相鄰完成交易日的有效匯率觀察）。")
+
+    coverage = context.portfolio_quote_coverage
+    if coverage and coverage.is_full:
+        changes.append(
+            "持股相對 TAIEX：UNRESOLVED（report context 尚無跨幣別 canonical valuation return series；"
+            "不以未換匯或部分持股估算）。"
+        )
+    elif coverage is not None:
+        changes.append(
+            "持股相對 TAIEX：UNRESOLVED（持股行情覆蓋未達完整，依 fail-closed 不計算）。"
+        )
+    else:
+        changes.append("持股相對 TAIEX：UNRESOLVED（缺少 canonical portfolio coverage）。")
+
+    return changes
 
 def portfolio_report_section(context: MarketContext) -> OptionalModule | None:
     """A privacy-safe portfolio section in the same report render pass."""
@@ -270,7 +420,7 @@ def build_public_draft(context: MarketContext, narrative: str | None = None) -> 
     }[context.report_type]
     session_label = human_session_label(context.report_type, context.market_session)
     if context.report_type == "tw_close":
-        material = context.material_changes or derive_state_changes(context)
+        material = context.material_changes or derive_session_deltas(context)
         watch = derive_tomorrow_watch_signals(context)
     else:
         material = context.material_changes or build_material_changes(context)

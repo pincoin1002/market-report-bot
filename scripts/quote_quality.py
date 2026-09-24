@@ -68,19 +68,32 @@ def validate_observation(obs: QuoteObservation, spec: InstrumentSpec,
             quality = _worse_quality(quality, "SUSPECT")
             notes.append("possible 10x/100x scale error or unconfirmed extreme move")
 
-    # Deterministic date/session alignment verification
-    if expected_date is not None:
-        if obs.market_date != expected_date:
-            quality = _worse_quality(quality, "DATE_MISMATCH")
-            notes.append(f"quote trading date {obs.market_date} does not match expected session date {expected_date}")
+    # Venue identity and deterministic completed-session alignment.
+    # For exchange-traded instruments, expected_date is calculated from the
+    # venue calendar and is authoritative for freshness.
+    if obs.market and spec.market and obs.market != spec.market:
+        quality = _worse_quality(quality, "CONFLICTING")
+        notes.append(f"quote market {obs.market} does not match registry market {spec.market}")
+
+    if expected_date is not None and obs.market_date != expected_date:
+        quality = _worse_quality(quality, "DATE_MISMATCH")
+        notes.append(f"quote trading date {obs.market_date} does not match expected session date {expected_date}")
 
     try:
         observed_date = datetime.strptime(obs.market_date[:10].replace("/", "-"), "%Y-%m-%d").date()
-        age_days = (obs.retrieved_at.date() - observed_date).days
-        max_age = 4 if spec.market == "US" else 3
-        if age_days > max_age:
-            quality = _worse_quality(quality, "STALE")
-            notes.append(f"quote date older than {max_age} calendar days")
+        retrieved_date = obs.retrieved_at.date()
+        if observed_date > retrieved_date:
+            quality = _worse_quality(quality, "DATE_MISMATCH")
+            notes.append("quote trading date is in the future relative to retrieval")
+        elif expected_date is None:
+            # Only non-session-governed data use a generic calendar-age guard.
+            # A valid Friday/holiday-adjacent official close must not be rejected
+            # solely because several wall-clock days have elapsed.
+            age_days = (retrieved_date - observed_date).days
+            max_age = 4 if spec.market == "US" else 3
+            if age_days > max_age:
+                quality = _worse_quality(quality, "STALE")
+                notes.append(f"quote date older than {max_age} calendar days")
     except ValueError:
         quality = _worse_quality(quality, "SUSPECT")
         notes.append("invalid market_date")

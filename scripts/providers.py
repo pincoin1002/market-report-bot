@@ -373,30 +373,70 @@ def fetch_with_failover(symbols: list[str]) -> tuple[dict[str, Quote], dict[str,
 
 
 def fetch_session_observations(specs: list[InstrumentSpec], expected_session: Session,
-                               expected_dates: dict[str, str] | None = None
+                               expected_dates: dict[str, str] | None = None,
+                               completed_close_markets: set[str] | None = None,
                                ) -> tuple[dict[str, QuoteObservation], dict[str, str]]:
+    """Fetch observations under an explicit completed-session contract.
+
+    Markets listed in completed_close_markets use their most recent completed
+    official daily close from expected_dates. Extended-hours trades must not
+    pre-empt that close. Continuous crypto fallback behavior is unchanged.
+    """
     observations: dict[str, QuoteObservation] = {}
     sources: dict[str, str] = {}
-    if expected_session in ("PREMARKET", "REGULAR", "AFTER_HOURS"):
-        extended = YahooExtendedHoursProvider().fetch_many(specs, expected_session, expected_dates=expected_dates)
+    completed = {market.upper() for market in (completed_close_markets or set())}
+
+    extended_specs = [
+        spec for spec in specs
+        if spec.market.upper() not in completed
+    ]
+    if expected_session in ("PREMARKET", "REGULAR", "AFTER_HOURS") and extended_specs:
+        extended = YahooExtendedHoursProvider().fetch_many(
+            extended_specs, expected_session, expected_dates=expected_dates
+        )
+        by_symbol = specs_by_symbol(specs)
         for symbol, obs in extended.items():
             observations[symbol] = obs
-            sources[specs_by_symbol(specs)[symbol].provider_symbols["yfinance"]] = obs.provider
+            sources[by_symbol[symbol].provider_symbols["yfinance"]] = obs.provider
 
-    remaining_specs = [s for s in specs if s.canonical_symbol not in observations]
-    provider_symbols = [s.provider_symbols["yfinance"] for s in remaining_specs]
+    remaining_specs = [spec for spec in specs if spec.canonical_symbol not in observations]
+    provider_symbols = [spec.provider_symbols["yfinance"] for spec in remaining_specs]
     daily_quotes, daily_sources = fetch_with_failover(provider_symbols)
-    provider_to_spec = {s.provider_symbols["yfinance"]: s for s in remaining_specs}
-    fallback_session: Session = "PREVIOUS_CLOSE" if expected_session in ("PREMARKET", "CLOSED_REFERENCE") else expected_session
+    provider_to_spec = {spec.provider_symbols["yfinance"]: spec for spec in remaining_specs}
+    fallback_session: Session = (
+        "PREVIOUS_CLOSE"
+        if expected_session in ("PREMARKET", "CLOSED_REFERENCE")
+        else expected_session
+    )
     if expected_session == "AFTER_HOURS":
         fallback_session = "PREVIOUS_CLOSE"
     retrieved_at = datetime.now(tz=timezone.utc)
-    for provider_symbol, q in daily_quotes.items():
+
+    for provider_symbol, quote in daily_quotes.items():
         spec = provider_to_spec[provider_symbol]
         provider = daily_sources.get(provider_symbol, "unknown")
-        exp_date = (expected_dates or {}).get(spec.canonical_symbol) or (expected_dates or {}).get(spec.market)
+        expected_date = (
+            (expected_dates or {}).get(spec.canonical_symbol)
+            or (expected_dates or {}).get(spec.market)
+        )
+        quote_session = fallback_session
+        if spec.market.upper() in completed and expected_date:
+            if spec.market.upper() == "US":
+                local_date = retrieved_at.astimezone(NY).strftime("%Y-%m-%d")
+            elif spec.market.upper() == "TW":
+                local_date = retrieved_at.astimezone(TPE).strftime("%Y-%m-%d")
+            else:
+                local_date = retrieved_at.strftime("%Y-%m-%d")
+            quote_session = "REGULAR" if expected_date == local_date else "PREVIOUS_CLOSE"
+
         observations[spec.canonical_symbol] = observation_from_daily_quote(
-            spec, q, provider, fallback_session, retrieved_at, expected_date=exp_date)
+            spec,
+            quote,
+            provider,
+            quote_session,
+            retrieved_at,
+            expected_date=expected_date,
+        )
         sources[provider_symbol] = provider
 
     remaining_crypto_specs = [
@@ -415,7 +455,6 @@ def fetch_session_observations(specs: list[InstrumentSpec], expected_session: Se
             "miss": len(remaining_crypto_specs) - len(crypto_observations),
         })
     return observations, sources
-
 
 def specs_by_symbol(specs: list[InstrumentSpec]) -> dict[str, InstrumentSpec]:
     return {spec.canonical_symbol: spec for spec in specs}
