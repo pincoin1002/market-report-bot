@@ -197,6 +197,9 @@ class Snapshot(BaseModel):
     forex: dict[str, NamedQuote] = Field(default_factory=dict)
     quote_observations: dict[str, QuoteObservation] = Field(default_factory=dict)
     missing_required_items: list[str] = Field(default_factory=list)
+    missing_portfolio_items: list[str] = Field(default_factory=list)
+    missing_core_market_items: list[str] = Field(default_factory=list)
+    missing_optional_context_items: list[str] = Field(default_factory=list)
     data_quality: dict[str, str] = Field(default_factory=dict)
     taiex_summary: TaiexMarketSummary | None = None
     institutional_flows: InstitutionalFlows | None = None
@@ -245,6 +248,9 @@ class MarketContext(BaseModel):
     event_facts: list[dict] = Field(default_factory=list)
     material_changes: list[str] = Field(default_factory=list)
     missing_required_items: list[str] = Field(default_factory=list)
+    missing_portfolio_items: list[str] = Field(default_factory=list)
+    missing_core_market_items: list[str] = Field(default_factory=list)
+    missing_optional_context_items: list[str] = Field(default_factory=list)
     degraded_mode: bool = False
     pipeline_health: dict[str, str] = Field(default_factory=dict)
     final_status: PipelineStatus = "FULL"

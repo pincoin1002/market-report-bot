@@ -161,6 +161,87 @@ class YahooChartProvider:
         return out
 
 
+class CoinGeckoCryptoProvider:
+    """Read-only fallback for registered crypto assets after Yahoo tiers fail.
+
+    CoinGecko's simple-price payload supplies a USD price, 24-hour change and
+    its own update timestamp.  A response without that timestamp/change, or
+    one older than the bounded freshness window, is deliberately ignored so a
+    stale value cannot be relabelled as a current portfolio quote.
+    """
+    name = "coingecko_simple_price"
+    URL = "https://api.coingecko.com/api/v3/simple/price"
+    MAX_AGE_SECONDS = 15 * 60
+
+    def fetch_many(self, specs: list[InstrumentSpec]) -> dict[str, QuoteObservation]:
+        crypto_specs = [
+            spec for spec in specs
+            if spec.asset_type == "CRYPTO" and spec.provider_symbols.get("coingecko")
+        ]
+        if not crypto_specs:
+            return {}
+        now = datetime.now(tz=timezone.utc)
+        by_id = {spec.provider_symbols["coingecko"]: spec for spec in crypto_specs}
+        try:
+            response = requests.get(
+                self.URL,
+                params={
+                    "ids": ",".join(sorted(by_id)),
+                    "vs_currencies": "usd",
+                    "include_24hr_change": "true",
+                    "include_last_updated_at": "true",
+                },
+                headers={"User-Agent": "market-report-bot/1.0"},
+                timeout=15,
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except Exception:
+            log.warning("CoinGecko crypto fallback failed", exc_info=True)
+            return {}
+
+        observations: dict[str, QuoteObservation] = {}
+        for coin_id, spec in by_id.items():
+            row = payload.get(coin_id)
+            if not isinstance(row, dict):
+                continue
+            try:
+                price = float(row["usd"])
+                change_pct = float(row["usd_24h_change"])
+                updated_at = datetime.fromtimestamp(float(row["last_updated_at"]), tz=timezone.utc)
+                previous = price / (1 + change_pct / 100)
+            except (KeyError, TypeError, ValueError, OSError, OverflowError, ZeroDivisionError):
+                continue
+            if (not math.isfinite(price) or price <= 0 or not math.isfinite(change_pct)
+                    or not math.isfinite(previous) or previous <= 0
+                    or updated_at > now or (now - updated_at).total_seconds() > self.MAX_AGE_SECONDS):
+                log.warning("CoinGecko crypto quote rejected for freshness/validity",
+                            extra={"symbol": spec.canonical_symbol})
+                continue
+            observation = QuoteObservation(
+                quote_id=f"{spec.canonical_symbol}:{updated_at.strftime('%Y-%m-%dT%H:%M:%SZ')}:REGULAR:{self.name}",
+                instrument_id=spec.canonical_symbol,
+                canonical_symbol=spec.canonical_symbol,
+                price=round(price, spec.price_precision),
+                currency="USD",
+                session="REGULAR",
+                market_date=updated_at.strftime("%Y-%m-%d"),
+                observed_at=updated_at,
+                provider_timestamp=updated_at,
+                retrieved_at=now,
+                provider=self.name,
+                quote_type="TRADE",
+                is_delayed=True,
+                quality_status="VALID",
+                previous_regular_close=round(previous, spec.price_precision),
+                change_pct=round(change_pct, 2),
+                quality_notes=["24-hour change supplied by CoinGecko"],
+                market=spec.market,
+            )
+            observations[spec.canonical_symbol] = validate_observation(observation, spec)
+        return observations
+
+
 class YahooExtendedHoursProvider:
     """Timestamped Yahoo chart path for US equities/ETFs.
 
@@ -317,6 +398,22 @@ def fetch_session_observations(specs: list[InstrumentSpec], expected_session: Se
         observations[spec.canonical_symbol] = observation_from_daily_quote(
             spec, q, provider, fallback_session, retrieved_at, expected_date=exp_date)
         sources[provider_symbol] = provider
+
+    remaining_crypto_specs = [
+        spec for spec in specs
+        if spec.asset_type == "CRYPTO" and spec.canonical_symbol not in observations
+    ]
+    crypto_observations = CoinGeckoCryptoProvider().fetch_many(remaining_crypto_specs)
+    for symbol, observation in crypto_observations.items():
+        observations[symbol] = observation
+        spec = specs_by_symbol(specs)[symbol]
+        sources[spec.provider_symbols["coingecko"]] = observation.provider
+    if remaining_crypto_specs:
+        log.info("crypto fallback tier done", extra={
+            "provider": CoinGeckoCryptoProvider.name,
+            "hit": len(crypto_observations),
+            "miss": len(remaining_crypto_specs) - len(crypto_observations),
+        })
     return observations, sources
 
 

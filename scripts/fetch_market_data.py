@@ -40,6 +40,15 @@ NY = ZoneInfo("America/New_York")
 # Missing/invalid snapshots block delivery; prices are never guessed via search.
 MIN_COVERAGE = 0.70
 
+# These labels are observability-only.  The existing primary-market validation
+# below remains the authority that decides whether a public report can render.
+PUBLIC_CORE_SYMBOLS = {
+    "tw_open": {"TAIEX", "2330", "2317", "2454"},
+    "tw_close": {"TAIEX", "2330", "2317", "2454"},
+    "us_open": {"SPX", "NDX", "DJI", "SOX", "VIX"},
+    "us_close": {"SPX", "NDX", "DJI", "SOX", "VIX"},
+}
+
 
 def build_portfolio_quote_coverage(portfolio, observations: dict, universe: dict,
                                    as_of: datetime, expected_dates: dict[str, str]) -> PortfolioQuoteCoverage:
@@ -98,6 +107,25 @@ def build_portfolio_quote_coverage(portfolio, observations: dict, universe: dict
         as_of=as_of, status=status, items=items, missing=missing, stale=stale,
         unsupported=unsupported,
     )
+
+
+def classify_missing_quote_roles(report_type: str, portfolio, universe: dict,
+                                 observations: dict) -> dict[str, list[str]]:
+    """Classify missing/invalid quotes without altering failure semantics."""
+    missing = {
+        symbol for symbol in universe
+        if symbol not in observations or observations[symbol].quality_status != "VALID"
+    }
+    portfolio_symbols = {position.ticker for position in portfolio.positions}
+    public_core = PUBLIC_CORE_SYMBOLS[report_type]
+    portfolio_missing = missing & portfolio_symbols
+    core_missing = missing & public_core
+    optional_missing = missing - portfolio_missing - core_missing
+    return {
+        "portfolio_required": sorted(portfolio_missing),
+        "public_market_core": sorted(core_missing),
+        "optional_context": sorted(optional_missing),
+    }
 
 # ── Holiday / weekend helpers ──────────────────────────────────────────────────
 
@@ -287,11 +315,16 @@ def build_snapshot(report_type: str) -> Snapshot:
     snapshot.portfolio_quote_coverage = build_portfolio_quote_coverage(
         portfolio, observations, universe, retrieved_at, expected_dates
     )
-    missing = [key for key in universe if key not in observations or observations[key].quality_status != "VALID"]
-    if missing:
-        log.warning("symbols missing or invalid after provider tiers",
-                    extra={"missing": missing})
-        snapshot.missing_required_items.extend(sorted(missing))
+    missing_by_role = classify_missing_quote_roles(report_type, portfolio, universe, observations)
+    if any(missing_by_role.values()):
+        log.warning("quote observations missing or invalid by role", extra=missing_by_role)
+        # Retain the legacy aggregate for existing consumers, while persisting
+        # role-aware categories so a contextual DXY gap is never read as a
+        # portfolio or public-core failure.
+        snapshot.missing_required_items.extend(sorted(set().union(*map(set, missing_by_role.values()))))
+        snapshot.missing_portfolio_items.extend(missing_by_role["portfolio_required"])
+        snapshot.missing_core_market_items.extend(missing_by_role["public_market_core"])
+        snapshot.missing_optional_context_items.extend(missing_by_role["optional_context"])
     for key, obs in snapshot.quote_observations.items():
         if obs.quality_status != "VALID":
             snapshot.data_quality[key] = obs.quality_status
@@ -379,8 +412,11 @@ def main() -> None:
         "requested_universe_coverage": snapshot.requested_universe_coverage,
         "validated_universe_coverage": snapshot.validated_universe_coverage,
         "requested_quote_count": len(universe),
-        "observed_quote_count": len(observations),
-        "valid_quote_count": valid_hits,
+        "observed_quote_count": len(snapshot.quote_observations),
+        "valid_quote_count": sum(
+            observation.quality_status == "VALID"
+            for observation in snapshot.quote_observations.values()
+        ),
         "tw": len(snapshot.tw_stocks),
         "us": len(snapshot.us_markets),
         "fx": len(snapshot.forex),

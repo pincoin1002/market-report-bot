@@ -8,12 +8,13 @@ import tempfile
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import fetch_market_data
+import providers
 from generate_report import validate_portfolio_quotes, validate_private_advice_text
 from instrument_registry import build_universe, resolve_instrument
 from market_context import build_market_context
@@ -23,7 +24,7 @@ from models import (PortfolioActionBrief, PortfolioActionItem, PortfolioContext,
                     QuoteObservation, Snapshot, Trigger)
 from portfolio_context import (EncryptedPortfolioProvider, PIOSPortfolioProvider,
                                PortfolioContextProvider, load_authoritative_portfolio)
-from providers import observation_from_daily_quote
+from providers import CoinGeckoCryptoProvider, observation_from_daily_quote
 from quote_quality import validate_observation
 from structured_reports import (
     build_action_brief, build_public_draft, render_action_brief,
@@ -104,6 +105,11 @@ class InstrumentRegistryTest(unittest.TestCase):
         self.assertEqual(universe["006208"].provider_symbols["yfinance"], "006208.TW")
         self.assertTrue(universe["006208"].is_portfolio_critical)
         self.assertTrue(universe["VOO"].is_portfolio_critical)
+
+    def test_crypto_registry_has_deterministic_coingecko_identity(self):
+        bonk = resolve_instrument("BONK")
+        self.assertEqual(bonk.asset_type, "CRYPTO")
+        self.assertEqual(bonk.provider_symbols["coingecko"], "bonk")
 
 
 class PortfolioAdviceValidationTest(unittest.TestCase):
@@ -203,6 +209,46 @@ class SnapshotBuildTest(unittest.TestCase):
         self.assertIn("public report may proceed; private advice will block", source)
         self.assertNotIn("portfolio quote coverage below 100% — refusing to write snapshot", source)
 
+    def test_missing_quote_roles_keep_portfolio_core_and_optional_separate(self):
+        portfolio = PortfolioContext(source="PIOS_PORTFOLIO_SNAPSHOT", positions=[
+            PositionContext(position_id="bonk", instrument_id="BONK", ticker="BONK", name="Bonk", quantity=1, currency="USD", asset_type="CRYPTO"),
+        ])
+        universe = {symbol: resolve_instrument(symbol) for symbol in ("BONK", "TAIEX", "DXY")}
+        roles = fetch_market_data.classify_missing_quote_roles("tw_close", portfolio, universe, {})
+        self.assertEqual(roles["portfolio_required"], ["BONK"])
+        self.assertEqual(roles["public_market_core"], ["TAIEX"])
+        self.assertEqual(roles["optional_context"], ["DXY"])
+
+    def test_fetch_main_logs_snapshot_observation_collection_without_scope_error(self):
+        now = datetime.now(tz=timezone.utc)
+        snapshot = Snapshot(
+            generated_at=now, report_type="tw_close", report_market_date=now.strftime("%Y-%m-%d"),
+            fetch_coverage=1.0, market_context_coverage=1.0,
+            quote_observations={
+                symbol: _obs(symbol, currency="TWD", market_date=now.strftime("%Y-%m-%d")).model_copy(update={"market": "TW"})
+                for symbol in ("2330", "2317", "2454")
+            },
+            portfolio_quote_coverage=PortfolioQuoteCoverage(
+                expected_positions=1, covered_positions=1, coverage_ratio=1.0,
+                as_of=now, status="FULL",
+            ),
+        )
+        portfolio = PortfolioContext(source="TEST")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            script_file = Path(temp_dir) / "scripts" / "fetch_market_data.py"
+            script_file.parent.mkdir()
+            script_file.touch()
+            with patch.object(fetch_market_data, "Path", side_effect=lambda *_: script_file), \
+                 patch.object(fetch_market_data, "setup_logging"), \
+                 patch.object(fetch_market_data, "is_tw_market_closed", return_value=False), \
+                 patch.object(fetch_market_data, "is_us_market_closed", return_value=False), \
+                 patch.object(fetch_market_data, "build_snapshot", return_value=snapshot), \
+                 patch.object(fetch_market_data, "load_authoritative_portfolio", return_value=portfolio), \
+                 patch.object(sys, "argv", ["fetch_market_data.py", "tw_close"]):
+                fetch_market_data.main()
+            self.assertTrue((Path(temp_dir) / "data" / "market_snapshot.json").exists())
+            self.assertTrue((Path(temp_dir) / "data" / "market_context.json").exists())
+
 
 class PortfolioCoverageRegressionTest(unittest.TestCase):
     def test_json_secret_pios_source_beats_legacy_fallback(self):
@@ -290,6 +336,10 @@ class PortfolioCoverageRegressionTest(unittest.TestCase):
         self.assertEqual(coverage.covered_positions, 1)
         self.assertEqual({item.position_id for item in coverage.items}, {"p1", "p2", "p3", "p4"})
         self.assertEqual({item.state for item in coverage.items}, {"QUOTED", "STALE", "MISSING", "UNSUPPORTED"})
+        self.assertEqual(
+            sum(len(group) for group in (coverage.missing, coverage.stale, coverage.unsupported)) + coverage.covered_positions,
+            coverage.expected_positions,
+        )
         self.assertFalse(coverage.is_full)
 
     def test_fx_direction_is_not_inverted(self):
@@ -376,6 +426,43 @@ class SessionEngineTest(unittest.TestCase):
 
 
 class QuoteQualityTest(unittest.TestCase):
+    def test_coingecko_crypto_fallback_preserves_quote_provenance(self):
+        now = datetime.now(tz=timezone.utc)
+        response = Mock()
+        response.json.return_value = {
+            "bonk": {"usd": 0.00001, "usd_24h_change": 2.5, "last_updated_at": int(now.timestamp())},
+        }
+        with patch("providers.requests.get", return_value=response):
+            observations = CoinGeckoCryptoProvider().fetch_many([resolve_instrument("BONK")])
+        bonk = observations["BONK"]
+        self.assertEqual(bonk.provider, "coingecko_simple_price")
+        self.assertEqual(bonk.canonical_symbol, "BONK")
+        self.assertEqual(bonk.quality_status, "VALID")
+        self.assertIsNotNone(bonk.provider_timestamp)
+        self.assertIsNotNone(bonk.retrieved_at)
+
+    def test_coingecko_crypto_fallback_rejects_stale_quote(self):
+        response = Mock()
+        response.json.return_value = {
+            "bonk": {"usd": 0.00001, "usd_24h_change": 2.5, "last_updated_at": 1},
+        }
+        with patch("providers.requests.get", return_value=response):
+            observations = CoinGeckoCryptoProvider().fetch_many([resolve_instrument("BONK")])
+        self.assertNotIn("BONK", observations)
+
+    def test_crypto_fallback_enters_canonical_observation_collection(self):
+        bonk = _obs("BONK", price=0.00001, prev=0.000009, currency="USD").model_copy(update={
+            "market": "GLOBAL", "provider": "coingecko_simple_price",
+            "quote_type": "TRADE", "provider_timestamp": datetime.now(tz=timezone.utc),
+        })
+        with patch.object(providers, "fetch_with_failover", return_value=({}, {})), \
+             patch.object(CoinGeckoCryptoProvider, "fetch_many", return_value={"BONK": bonk}):
+            observations, sources = providers.fetch_session_observations(
+                [resolve_instrument("BONK")], "REGULAR"
+            )
+        self.assertIs(observations["BONK"], bonk)
+        self.assertEqual(sources["bonk"], "coingecko_simple_price")
+
     def test_suspicious_10x_quote(self):
         spec = resolve_instrument("NVDA")
         obs = _obs("NVDA", price=1000, prev=100)

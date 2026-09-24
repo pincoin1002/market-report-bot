@@ -79,7 +79,8 @@ def _macro(symbol: str, name: str, provider: str, currency: str = "",
     )
 
 
-def _crypto(symbol: str, name: str, provider: str | None = None) -> InstrumentSpec:
+def _crypto(symbol: str, name: str, coingecko_id: str,
+            provider: str | None = None) -> InstrumentSpec:
     return InstrumentSpec(
         canonical_symbol=symbol,
         display_name=name,
@@ -87,7 +88,11 @@ def _crypto(symbol: str, name: str, provider: str | None = None) -> InstrumentSp
         exchange="CRYPTO",
         currency="USD",
         market="GLOBAL",
-        provider_symbols={"yfinance": provider or f"{symbol}-USD", "yahoo_chart": provider or f"{symbol}-USD"},
+        provider_symbols={
+            "yfinance": provider or f"{symbol}-USD",
+            "yahoo_chart": provider or f"{symbol}-USD",
+            "coingecko": coingecko_id,
+        },
         aliases=[],
         price_precision=8,
         lot_size=0.00000001,
@@ -140,11 +145,11 @@ REGISTRY: dict[str, InstrumentSpec] = {
     "SMH": _us("SMH", "VanEck Semiconductor ETF", asset_type="ETF"),
     "XLK": _us("XLK", "Technology Select Sector SPDR Fund", asset_type="ETF"),
     "ARKK": _us("ARKK", "ARK Innovation ETF", asset_type="ETF"),
-    "ETH": _crypto("ETH", "Ethereum"),
-    "USDC": _crypto("USDC", "USD Coin"),
-    "USDT": _crypto("USDT", "Tether"),
-    "BONK": _crypto("BONK", "Bonk"),
-    "SXT": _crypto("SXT", "Space and Time"),
+    "ETH": _crypto("ETH", "Ethereum", "ethereum"),
+    "USDC": _crypto("USDC", "USD Coin", "usd-coin"),
+    "USDT": _crypto("USDT", "Tether", "tether"),
+    "BONK": _crypto("BONK", "Bonk", "bonk"),
+    "SXT": _crypto("SXT", "Space and Time", "space-and-time"),
     "0050": _tw("0050", "元大台灣50", asset_type="ETF"),
     "006208": _tw("006208", "富邦台50", asset_type="ETF"),
     "1519": _tw("1519", "華城"),
