@@ -186,6 +186,10 @@ class Snapshot(BaseModel):
     portfolio_source: str = "UNAVAILABLE"
     fetch_coverage: float = Field(ge=0, le=1, default=1.0)
     market_context_coverage: float = Field(ge=0, le=1, default=1.0)
+    # Explicit names for operators.  Legacy aliases above are preserved for
+    # stored artifacts and callers that predate the coverage split.
+    requested_universe_coverage: float = Field(ge=0, le=1, default=1.0)
+    validated_universe_coverage: float = Field(ge=0, le=1, default=1.0)
     portfolio_quote_coverage: PortfolioQuoteCoverage | None = None
     sources: dict[str, str] = Field(default_factory=dict)          # symbol → provider name
     tw_stocks: dict[str, NamedQuote] = Field(default_factory=dict)
@@ -230,6 +234,8 @@ class MarketContext(BaseModel):
     quotes: dict[str, QuoteObservation] = Field(default_factory=dict)
     macro_observations: dict[str, QuoteObservation] = Field(default_factory=dict)
     market_quote_coverage: float = Field(ge=0, le=1, default=1.0)
+    requested_universe_coverage: float = Field(ge=0, le=1, default=1.0)
+    validated_universe_coverage: float = Field(ge=0, le=1, default=1.0)
     portfolio_quote_coverage: PortfolioQuoteCoverage | None = None
     portfolio_snapshot_id: str | None = None
     portfolio_snapshot_as_of: datetime | None = None

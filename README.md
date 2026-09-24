@@ -173,7 +173,7 @@ git push -u origin main
 - 公開報告會先產生 structured draft，通過 validation 後才送 Telegram / Email。
 - 私人持股輸出是 `PortfolioActionBrief`，狀態只有 `NO_MATERIAL_CHANGE` / `WATCH` / `ACTION_REVIEW` / `DATA_BLOCKED`。
 - daily bot 不會自動產生 BUY / SELL / ADD / TRIM 股數；預設 `SIZE_NOT_COMPUTED`。
-- 若持股報價 coverage 不到 100%，或 quote 是 stale / suspect / conflicting，私人 Action Brief 會 fail closed，不送錯誤建議。
+- 若持股報價 coverage 不到 100%，或 quote 是 stale / suspect / conflicting，私人 Action Brief 會 fail closed，不送錯誤建議。`--generate-only` 同樣會產生非公開的 audit；coverage 完整且驗證通過時也會產生 Action Brief artifact，但不會傳送通知。
 - `portfolio_quote_coverage` 是 runtime diagnostic：每一筆 active position 都會顯式標為 `QUOTED`、`STALE`、`MISSING` 或 `UNSUPPORTED`，含 provider、quote timestamp 與原因；它不是 portfolio accounting state。
 - 正式 portfolio authority 是 PIOS 的唯讀 `PortfolioSnapshot` export。local runner 使用 `data/pios_portfolio_snapshot.json`（gitignored）；GitHub Actions 使用 `PIOS_PORTFOLIO_SNAPSHOT_JSON` Secret。兩者皆需含 `snapshot_id`、`as_of`、`active_positions`；設定後讀取失敗只會 block 私人持股 brief，公開市場報告仍照常送出。
 - 尚未提供 PIOS export 時，現有 Telegram transaction store 的 `portfolio.json.enc` / `PORTFOLIO_KEY` 僅作相容來源，不會另建手動持股清單。`portfolio.json` plaintext、`data/*.json` runtime artifacts 仍不進 Git。

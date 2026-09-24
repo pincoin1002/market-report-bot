@@ -246,6 +246,8 @@ def build_snapshot(report_type: str) -> Snapshot:
     )
 
     valid_hits = sum(1 for o in observations.values() if o.quality_status == "VALID")
+    requested_coverage = round(len(observations) / len(universe), 3)
+    validated_coverage = round(valid_hits / len(universe), 3)
     snapshot = Snapshot(
         generated_at=retrieved_at,
         report_type=report_type,
@@ -253,8 +255,10 @@ def build_snapshot(report_type: str) -> Snapshot:
         portfolio_snapshot_id=portfolio.snapshot_id,
         portfolio_snapshot_as_of=portfolio.as_of,
         portfolio_source=portfolio.source,
-        fetch_coverage=round(len(observations) / len(universe), 3),
-        market_context_coverage=round(valid_hits / len(universe), 3),
+        fetch_coverage=requested_coverage,
+        market_context_coverage=validated_coverage,
+        requested_universe_coverage=requested_coverage,
+        validated_universe_coverage=validated_coverage,
         sources=sources,
     )
     for key, obs in observations.items():
@@ -372,7 +376,11 @@ def main() -> None:
     (data_dir / "market_context.json").write_text(context.model_dump_json(indent=2), encoding="utf-8")
     log.info("snapshot saved", extra={
         "path": str(snapshot_path),
-        "coverage": snapshot.fetch_coverage,
+        "requested_universe_coverage": snapshot.requested_universe_coverage,
+        "validated_universe_coverage": snapshot.validated_universe_coverage,
+        "requested_quote_count": len(universe),
+        "observed_quote_count": len(observations),
+        "valid_quote_count": valid_hits,
         "tw": len(snapshot.tw_stocks),
         "us": len(snapshot.us_markets),
         "fx": len(snapshot.forex),

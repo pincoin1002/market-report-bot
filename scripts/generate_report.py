@@ -752,16 +752,20 @@ def write_advice_audit(report_type: str, status: str, reason: str,
 
 
 def run_portfolio_advice(report: str, report_type: str,
-                         snapshot: "Snapshot | None", model: str) -> None:
-    """Generate position-aware advice and deliver privately. The advice text is
-    never written to reports/ nor committed — the repo is public."""
+                         snapshot: "Snapshot | None", model: str,
+                         *, deliver: bool = True) -> None:
+    """Generate private portfolio artifacts; only send when ``deliver`` is true.
+
+    Generate-only workflows must still leave an audit trail in the protected
+    Actions artifact.  Holdings never enter the committed public report.
+    """
     raw = portfolio_store.load_portfolio()
     portfolio_context = load_authoritative_portfolio()
     ok, reason = validate_portfolio_quotes(raw, snapshot, portfolio_context)
     if not ok:
         log.warning("portfolio advice blocked", extra={"reason": reason})
         write_advice_audit(report_type, "BLOCKED", reason, snapshot)
-        if portfolio_store.ENC_PATH.exists() or portfolio_store.has_positions(raw):
+        if deliver and (portfolio_context.positions or portfolio_store.ENC_PATH.exists() or portfolio_store.has_positions(raw)):
             send_operational_notice(f"{reason}\n\n已停止產生持股建議，避免用錯誤或缺漏價格下判斷。", report_type)
         return
     del model
@@ -771,7 +775,8 @@ def run_portfolio_advice(report: str, report_type: str,
     if not ok:
         log.warning("private advice validation failed", extra={"reason": reason})
         write_advice_audit(report_type, "BLOCKED", reason, snapshot)
-        send_operational_notice(f"{reason}\n\n已停止傳送持股建議。", report_type)
+        if deliver:
+            send_operational_notice(f"{reason}\n\n已停止傳送持股建議。", report_type)
         return
     write_advice_audit(report_type, "VALIDATED", reason, snapshot)
     data_dir = Path(__file__).parent.parent / "data"
@@ -781,10 +786,12 @@ def run_portfolio_advice(report: str, report_type: str,
     if not ok:
         log.warning("rendered private advice validation failed", extra={"reason": reason})
         write_advice_audit(report_type, "BLOCKED", reason, snapshot)
-        send_operational_notice(f"{reason}\n\n已停止傳送持股建議。", report_type)
+        if deliver:
+            send_operational_notice(f"{reason}\n\n已停止傳送持股建議。", report_type)
         return
-    send_advice_telegram(advice, report_type)
-    send_advice_email(advice, report_type)
+    if deliver:
+        send_advice_telegram(advice, report_type)
+        send_advice_email(advice, report_type)
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────
@@ -880,7 +887,8 @@ def main() -> None:
         prompt = _build_snapshot_block(snapshot) + prompt
         log.info("snapshot injected", extra={
             "report_type": report_type,
-            "coverage": snapshot.fetch_coverage,
+            "requested_universe_coverage": snapshot.requested_universe_coverage,
+            "validated_universe_coverage": snapshot.validated_universe_coverage,
             "tw": len(snapshot.tw_stocks),
             "us": len(snapshot.us_markets),
             "fx": len(snapshot.forex)})
@@ -915,19 +923,21 @@ def main() -> None:
     filepath = save_report(report, report_type)
     log.info("report saved", extra={"path": str(filepath)})
 
+    # Produce audit/brief artifacts during generation as well as delivery.
+    # This makes a manually dispatched dry run observable without sending a
+    # portfolio message or placing private holdings in the public report.
+    try:
+        run_portfolio_advice(report, report_type, snapshot, model,
+                             deliver=not args.generate_only)
+    except Exception:
+        log.error("portfolio artifact stage failed", exc_info=True)
+
     if args.generate_only:
         log.info("generate-only mode: delivery deferred until validation passes")
         return
 
     send_telegram(report, report_type)
     send_email(report, report_type)
-
-    # ── Private portfolio advice — Telegram/Email only, never committed ──────
-    try:
-        run_portfolio_advice(report, report_type, snapshot, model)
-    except Exception:
-        log.error("portfolio advice stage failed (report already delivered)",
-                  exc_info=True)
 
     log.info("done", extra={"report_type": report_type})
 

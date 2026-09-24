@@ -21,7 +21,8 @@ from market_session import classify_us_session, get_target_market_date, report_m
 from models import (PortfolioActionBrief, PortfolioActionItem, PortfolioContext,
                     PortfolioQuoteCoverage, PositionContext, PriceReference,
                     QuoteObservation, Snapshot, Trigger)
-from portfolio_context import EncryptedPortfolioProvider, PIOSPortfolioProvider, PortfolioContextProvider
+from portfolio_context import (EncryptedPortfolioProvider, PIOSPortfolioProvider,
+                               PortfolioContextProvider, load_authoritative_portfolio)
 from providers import observation_from_daily_quote
 from quote_quality import validate_observation
 from structured_reports import (
@@ -204,6 +205,53 @@ class SnapshotBuildTest(unittest.TestCase):
 
 
 class PortfolioCoverageRegressionTest(unittest.TestCase):
+    def test_json_secret_pios_source_beats_legacy_fallback(self):
+        payload = json.dumps({
+            "snapshot_id": "secret-snapshot", "as_of": "2026-09-24T13:30:00+08:00",
+            "active_positions": [{"position_id": "pios-1", "ticker": "NVDA", "quantity": 1}],
+        })
+        with patch.dict(os.environ, {"PIOS_PORTFOLIO_SNAPSHOT_JSON": payload}, clear=False), \
+             patch("portfolio_store.load_portfolio", return_value={
+                 "us_positions": [{"ticker": "AMZN", "shares": 99, "cost_basis": 1}],
+             }):
+            context = load_authoritative_portfolio()
+        self.assertEqual(context.source, "PIOS_PORTFOLIO_SNAPSHOT")
+        self.assertEqual(context.snapshot_id, "secret-snapshot")
+        self.assertEqual([position.ticker for position in context.positions], ["NVDA"])
+
+    def test_twenty_three_pios_positions_survive_into_quote_universe(self):
+        payload = {
+            "snapshot_id": "23-positions", "as_of": "2026-09-24T13:30:00+08:00",
+            "active_positions": [
+                {"position_id": f"position-{i}", "ticker": f"TEST{i}", "quantity": 1}
+                for i in range(23)
+            ],
+        }
+        with patch.dict(os.environ, {"PIOS_PORTFOLIO_SNAPSHOT_JSON": json.dumps(payload)}, clear=False):
+            context = PIOSPortfolioProvider().load()
+        universe = build_universe(portfolio_context=context)
+        self.assertEqual(len(context.positions), 23)
+        self.assertTrue(all(position.ticker in universe and universe[position.ticker].is_portfolio_critical
+                            for position in context.positions))
+
+    def test_coverage_survives_snapshot_and_context_serialization(self):
+        portfolio = PortfolioContext(source="PIOS_PORTFOLIO_SNAPSHOT", snapshot_id="pios-test", positions=[
+            PositionContext(position_id="p1", instrument_id="NVDA", ticker="NVDA", name="NVIDIA", quantity=1, currency="USD", asset_type="EQUITY"),
+        ])
+        universe = build_universe(portfolio_context=portfolio)
+        coverage = fetch_market_data.build_portfolio_quote_coverage(
+            portfolio, {"NVDA": _obs("NVDA")}, universe, datetime.now(tz=timezone.utc),
+            {"US": datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")},
+        )
+        snapshot = Snapshot.model_validate_json(Snapshot(
+            generated_at=datetime.now(tz=timezone.utc), report_type="us_close",
+            portfolio_quote_coverage=coverage, quote_observations={"NVDA": _obs("NVDA")},
+        ).model_dump_json())
+        context = build_market_context(snapshot, "us_close")
+        self.assertIsNotNone(snapshot.portfolio_quote_coverage)
+        self.assertEqual(context.portfolio_quote_coverage.expected_positions, 1)
+        self.assertEqual(context.portfolio_quote_coverage.items[0].state, "QUOTED")
+
     def test_pios_snapshot_is_the_read_only_position_source(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "portfolio_snapshot.json"
@@ -249,6 +297,24 @@ class PortfolioCoverageRegressionTest(unittest.TestCase):
         self.assertEqual(usd_twd_direction_label(0.2), "貶值")
         self.assertEqual(usd_twd_direction_label(-0.2), "升值")
         self.assertEqual(usd_twd_direction_label(0), "持平")
+
+    def test_fx_provenance_and_no_fx_flow_causal_template(self):
+        now = datetime.now(tz=timezone.utc)
+        fx = _obs("USDTWD", currency="TWD", price=31.78, prev=31.74).model_copy(update={
+            "market": "TW", "provider": "fixture-fx", "provider_timestamp": now,
+            "retrieved_at": now,
+        })
+        context = build_market_context(Snapshot(
+            generated_at=now, report_type="tw_close", report_market_date=fx.market_date,
+            quote_observations={"USDTWD": fx},
+        ), "tw_close")
+        from structured_reports import derive_tomorrow_watch_signals
+        rendered = "\n".join(derive_tomorrow_watch_signals(context))
+        observation = context.macro_observations["USDTWD"]
+        self.assertEqual(observation.provider, "fixture-fx")
+        self.assertEqual(observation.provider_timestamp, now)
+        self.assertEqual(observation.retrieved_at, now)
+        self.assertNotIn("若匯價走升將有助於外資現貨買超延續", rendered)
 
     def test_watch_levels_are_derived_from_current_index_not_a_template(self):
         context = build_market_context(Snapshot(
@@ -601,6 +667,14 @@ class SafetyAndWorkflowTest(unittest.TestCase):
     def test_generate_only_does_not_use_duplicate_report_skip(self):
         text = (ROOT / "scripts/generate_report.py").read_text(encoding="utf-8")
         self.assertIn("if not args.generate_only and check_report_already_generated(report_type):", text)
+
+    def test_generate_only_still_generates_private_audit_artifacts(self):
+        source = inspect.getsource(__import__("generate_report").main)
+        self.assertIn("deliver=not args.generate_only", source)
+        self.assertLess(
+            source.index("run_portfolio_advice(report, report_type, snapshot, model"),
+            source.index("if args.generate_only:"),
+        )
 
     def test_delivery_skips_same_day_duplicate_before_send(self):
         import generate_report
