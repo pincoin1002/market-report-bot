@@ -12,6 +12,8 @@ from models import Session
 
 TPE = timezone(timedelta(hours=8))
 NY = ZoneInfo("America/New_York")
+US_OPEN_INTENDED_TIME = time(9, 5)
+US_OPEN_PREMARKET_CUTOFF = time(9, 30)
 
 
 def is_nyse_trading_day(dt: datetime) -> bool:
@@ -134,9 +136,29 @@ def report_market_date(report_type: str, now: datetime | None = None) -> str:
     return local.strftime("%Y-%m-%d")
 
 
-def us_open_should_run(now: datetime | None = None) -> bool:
+def us_open_scheduled_intent_is_eligible(now: datetime | None = None) -> bool:
+    """Whether a scheduled US-open identity belongs to an NYSE trading date.
+
+    This deliberately ignores the runner's actual start time: a scheduled
+    GitHub Actions event may queue well after its intended New York time.
+    """
     local = (now or datetime.now(tz=NY)).astimezone(NY)
-    return is_nyse_trading_day(local) and local.hour == 9
+    return is_nyse_trading_day(local)
+
+
+def us_open_snapshot_contract_status(now: datetime | None = None) -> str:
+    """Return READY, MARKET_CLOSED, or INTENT_EXPIRED for a US-open snapshot."""
+    local = (now or datetime.now(tz=NY)).astimezone(NY)
+    if not is_nyse_trading_day(local):
+        return "MARKET_CLOSED"
+    if time(4, 0) <= local.time() < US_OPEN_PREMARKET_CUTOFF:
+        return "READY"
+    return "INTENT_EXPIRED"
+
+
+def us_open_should_run(now: datetime | None = None) -> bool:
+    """Backward-compatible scheduled identity check; independent of queue delay."""
+    return us_open_scheduled_intent_is_eligible(now)
 
 
 def us_open_idempotency_key(now: datetime | None = None) -> str:

@@ -5,7 +5,7 @@ import inspect
 import json
 import subprocess
 import tempfile
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -18,7 +18,11 @@ import providers
 from generate_report import validate_portfolio_quotes, validate_private_advice_text
 from instrument_registry import build_universe, resolve_instrument
 from market_context import build_market_context
-from market_session import classify_us_session, get_target_market_date, report_market_date, us_open_should_run
+from market_session import (
+    US_OPEN_INTENDED_TIME, classify_us_session, get_target_market_date,
+    report_market_date, us_open_idempotency_key, us_open_should_run,
+    us_open_scheduled_intent_is_eligible, us_open_snapshot_contract_status,
+)
 from models import (PortfolioActionBrief, PortfolioActionItem, PortfolioContext,
                     PortfolioQuoteCoverage, PositionContext, PriceReference,
                     QuoteObservation, Snapshot, Trigger)
@@ -249,6 +253,27 @@ class SnapshotBuildTest(unittest.TestCase):
             self.assertTrue((Path(temp_dir) / "data" / "market_snapshot.json").exists())
             self.assertTrue((Path(temp_dir) / "data" / "market_context.json").exists())
 
+    def test_us_open_late_runner_fails_closed_instead_of_relabeling_regular_or_after_hours_data(self):
+        late_start = datetime(2026, 9, 24, 14, 22, tzinfo=NY)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            script_file = Path(temp_dir) / "scripts" / "fetch_market_data.py"
+            script_file.parent.mkdir()
+            script_file.touch()
+            with patch.object(fetch_market_data, "Path", side_effect=lambda *_: script_file), \
+                 patch.object(fetch_market_data, "setup_logging"), \
+                 patch.object(fetch_market_data, "is_tw_market_closed", return_value=False), \
+                 patch.object(fetch_market_data, "is_us_market_closed", return_value=False), \
+                 patch.object(fetch_market_data, "build_snapshot") as build_snapshot, \
+                 patch.object(fetch_market_data, "datetime") as clock, \
+                 patch("market_session.datetime") as session_clock, \
+                 patch.object(sys, "argv", ["fetch_market_data.py", "us_open"]):
+                clock.now.return_value = late_start
+                session_clock.now.return_value = late_start
+                with self.assertRaises(SystemExit) as exited:
+                    fetch_market_data.main()
+            self.assertEqual(exited.exception.code, 5)
+            build_snapshot.assert_not_called()
+
 
 class PortfolioCoverageRegressionTest(unittest.TestCase):
     def test_json_secret_pios_source_beats_legacy_fallback(self):
@@ -391,11 +416,11 @@ class SessionEngineTest(unittest.TestCase):
         dt = datetime(2026, 8, 28, 9, 59, tzinfo=NY)
         self.assertEqual(classify_us_session(dt, extended_quote_available=True), "REGULAR")
 
-    def test_dst_summer_1300_utc_guard(self):
+    def test_dst_summer_scheduled_identity_is_not_runner_hour_bound(self):
         dt = datetime(2026, 8, 28, 13, 0, tzinfo=timezone.utc)
         self.assertTrue(us_open_should_run(dt))
 
-    def test_winter_1400_utc_guard(self):
+    def test_winter_scheduled_identity_is_not_runner_hour_bound(self):
         dt = datetime(2026, 12, 28, 14, 0, tzinfo=timezone.utc)
         self.assertTrue(us_open_should_run(dt))
 
@@ -423,6 +448,57 @@ class SessionEngineTest(unittest.TestCase):
         early_us = datetime(2026, 9, 17, 10, 0, tzinfo=NY)
         self.assertEqual(get_target_market_date("tw_close", "TW", now=early_tw), "2026-09-17")
         self.assertEqual(get_target_market_date("us_close", "US", now=early_us), "2026-09-16")
+
+
+class USOpenSchedulerContractTest(unittest.TestCase):
+    def test_scheduled_time_is_eligible_and_premarket_contract_is_ready(self):
+        intended = datetime(2026, 9, 24, 9, 5, tzinfo=NY)
+        self.assertEqual(intended.time(), US_OPEN_INTENDED_TIME)
+        self.assertTrue(us_open_scheduled_intent_is_eligible(intended))
+        self.assertEqual(us_open_snapshot_contract_status(intended), "READY")
+
+    def test_thirty_minute_queue_delay_keeps_identity_but_expires_snapshot_contract(self):
+        delayed = datetime(2026, 9, 24, 9, 35, tzinfo=NY)
+        self.assertTrue(us_open_scheduled_intent_is_eligible(delayed))
+        self.assertEqual(us_open_snapshot_contract_status(delayed), "INTENT_EXPIRED")
+
+    def test_multi_hour_queue_delay_is_not_a_duplicate(self):
+        delayed = datetime(2026, 9, 24, 14, 22, 39, tzinfo=NY)
+        self.assertTrue(us_open_scheduled_intent_is_eligible(delayed))
+        self.assertEqual(us_open_snapshot_contract_status(delayed), "INTENT_EXPIRED")
+
+    def test_edt_and_est_keep_the_same_new_york_intended_time(self):
+        edt = datetime(2026, 9, 24, 9, 5, tzinfo=NY)
+        est = datetime(2026, 12, 28, 9, 5, tzinfo=NY)
+        self.assertEqual(edt.time(), US_OPEN_INTENDED_TIME)
+        self.assertEqual(est.time(), US_OPEN_INTENDED_TIME)
+        self.assertEqual(edt.utcoffset().total_seconds(), -4 * 3600)
+        self.assertEqual(est.utcoffset().total_seconds(), -5 * 3600)
+        self.assertEqual(us_open_snapshot_contract_status(edt), "READY")
+        self.assertEqual(us_open_snapshot_contract_status(est), "READY")
+
+    def test_first_trading_day_after_dst_transition_has_one_ready_contract(self):
+        after_spring_forward = datetime(2026, 3, 9, 9, 5, tzinfo=NY)
+        self.assertEqual(after_spring_forward.utcoffset().total_seconds(), -4 * 3600)
+        self.assertTrue(us_open_scheduled_intent_is_eligible(after_spring_forward))
+        self.assertEqual(us_open_snapshot_contract_status(after_spring_forward), "READY")
+
+    def test_weekend_and_nyse_holiday_do_not_create_normal_us_open_report(self):
+        weekend = datetime(2026, 9, 26, 9, 5, tzinfo=NY)
+        holiday = datetime(2026, 12, 25, 9, 5, tzinfo=NY)
+        self.assertFalse(us_open_scheduled_intent_is_eligible(weekend))
+        self.assertFalse(us_open_scheduled_intent_is_eligible(holiday))
+        self.assertEqual(us_open_snapshot_contract_status(weekend), "MARKET_CLOSED")
+        self.assertEqual(us_open_snapshot_contract_status(holiday), "MARKET_CLOSED")
+
+    def test_idempotency_key_is_report_type_plus_intended_nyse_date(self):
+        start = datetime(2026, 9, 24, 9, 5, tzinfo=NY)
+        delayed = datetime(2026, 9, 24, 14, 22, tzinfo=NY)
+        self.assertEqual(us_open_idempotency_key(start), us_open_idempotency_key(delayed))
+        self.assertEqual(us_open_idempotency_key(start), "us_open:2026-09-24")
+
+    def test_manual_or_dispatch_uses_the_same_premarket_quote_contract(self):
+        self.assertEqual(fetch_market_data._expected_session("us_open"), "PREMARKET")
 
 
 class QuoteQualityTest(unittest.TestCase):
@@ -597,6 +673,8 @@ class StructuredReportTest(unittest.TestCase):
         self.assertTrue(any(line.startswith("[SUPPORTED_ASSOCIATION]") for line in draft.drivers))
         self.assertTrue(any("UNRESOLVED" in line for line in draft.drivers))
         self.assertTrue(any("未推定單一因果" in line for line in draft.drivers))
+        self.assertTrue(any("逆勢上漲，部分抵銷權值跌勢" in line for line in draft.drivers))
+        self.assertFalse(any("同步上漲，與加權指數表現一致" in line for line in draft.drivers))
         self.assertTrue(any("TAIEX session-over-session" in line for line in draft.material_changes))
         self.assertTrue(any("成交金額：UNRESOLVED" in line for line in draft.material_changes))
         self.assertTrue(any("市場廣度：UNRESOLVED" in line for line in draft.material_changes))
@@ -606,6 +684,25 @@ class StructuredReportTest(unittest.TestCase):
         self.assertNotIn("因為", draft.rendered_markdown)
         ok, reason = validate_public_draft(draft, context)
         self.assertTrue(ok, reason)
+
+    def test_tw_close_positive_constituents_match_a_rising_taiex(self):
+        as_of = datetime(2026, 9, 24, 13, 0, tzinfo=timezone.utc)
+        def tw_quote(symbol, price, prev):
+            return _obs(symbol, price=price, prev=prev, currency="TWD", market_date="2026-09-24").model_copy(
+                update={"market": "TW"}
+            )
+        snapshot = Snapshot(
+            generated_at=as_of, report_type="tw_close", report_market_date="2026-09-24",
+            quote_observations={
+                "TAIEX": tw_quote("TAIEX", 25200, 25100),
+                "2330": tw_quote("2330", 1220, 1200),
+                "2317": tw_quote("2317", 195, 190),
+                "2454": tw_quote("2454", 1515, 1500),
+            },
+        )
+        draft = build_public_draft(build_market_context(snapshot, "tw_close", run_id="tw-driver-positive"))
+        self.assertTrue(any("同步上漲，與加權指數表現一致" in line for line in draft.drivers))
+        self.assertFalse(any("逆勢上漲" in line for line in draft.drivers))
 
     def test_tw_close_public_report_remains_valid_when_portfolio_coverage_is_degraded(self):
         as_of = datetime(2026, 9, 24, 13, 0, tzinfo=timezone.utc)
@@ -847,11 +944,27 @@ class SafetyAndWorkflowTest(unittest.TestCase):
             block = text[text.index("Validate report prices"):text.index("Deliver validated")]
             self.assertNotIn("continue-on-error: true", block)
 
-    def test_dual_cron_only_correct_utc_window_runs(self):
-        summer_wrong = datetime(2026, 8, 28, 14, 0, tzinfo=timezone.utc)
-        winter_wrong = datetime(2026, 12, 28, 13, 0, tzinfo=timezone.utc)
-        self.assertFalse(us_open_should_run(summer_wrong))
-        self.assertFalse(us_open_should_run(winter_wrong))
+    def test_us_open_uses_one_timezone_aware_schedule_without_runtime_duplicate_guard(self):
+        text = (ROOT / ".github/workflows/us-open.yml").read_text(encoding="utf-8")
+        self.assertIn('cron: "5 9 * * 1-5"', text)
+        self.assertIn('timezone: "America/New_York"', text)
+        self.assertNotIn('cron: "0 13 * * 1-5"', text)
+        self.assertNotIn('cron: "0 14 * * 1-5"', text)
+        self.assertNotIn("duplicate_skipped", text)
+        self.assertNotIn("_should_skip_us_open_duplicate", inspect.getsource(fetch_market_data))
+
+    def test_us_open_scheduled_delivery_is_gated_by_validation_not_runner_clock(self):
+        text = (ROOT / ".github/workflows/us-open.yml").read_text(encoding="utf-8")
+        delivery = text[text.index("name: Deliver validated US Open Report"):text.index("name: Prepare review package")]
+        self.assertIn("github.event_name == 'schedule'", delivery)
+        self.assertIn("intent_unavailable != 'true'", delivery)
+        self.assertNotIn("duplicate_skipped", delivery)
+
+    def test_safe_dispatch_verifies_telegram_without_sending_a_message(self):
+        text = (ROOT / ".github/workflows/us-open.yml").read_text(encoding="utf-8")
+        self.assertIn("safe_verify", text)
+        self.assertIn("/getMe", text)
+        self.assertIn("no message sent", text)
 
     def test_action_trigger_is_not_quote_compared(self):
         context = build_market_context(_snapshot({"NVDA": _obs("NVDA")}), "us_close", run_id="test")
@@ -903,10 +1016,11 @@ class SafetyAndWorkflowTest(unittest.TestCase):
             self.assertNotIn("secrets.EMAIL_SMTP_SERVER", text, f"{name} should not reference EMAIL_SMTP_SERVER secret")
             self.assertNotIn("smtplib", text, f"{name} should not contain smtplib code")
 
-    def test_us_open_generate_step_guards_against_duplicate_skipped(self):
+    def test_us_open_generate_step_blocks_unavailable_intended_snapshot(self):
         text = (ROOT / ".github/workflows/us-open.yml").read_text(encoding="utf-8")
         gen_block = text[text.index("name: Generate US Open Report"):text.index("name: Send non-trading day notice")]
-        self.assertIn("steps.fetch.outputs.duplicate_skipped != 'true'", gen_block)
+        self.assertIn("steps.fetch.outputs.intent_unavailable != 'true'", gen_block)
+        self.assertNotIn("duplicate_skipped", gen_block)
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ Exit codes:
   1 = unexpected error
   2 = TW market closed today (holiday / weekend) → skip TW report
   3 = US market closed today (holiday / weekend) → send notice instead
+  5 = US-open intended premarket snapshot no longer observable → fail closed
 """
 
 import logging
@@ -26,7 +27,10 @@ from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponen
 from logging_config import setup_logging
 from instrument_registry import build_universe, quote_symbol
 from market_context import build_market_context
-from market_session import classify_tw_session, classify_us_session, get_target_market_date
+from market_session import (
+    classify_tw_session, classify_us_session, get_target_market_date,
+    us_open_snapshot_contract_status,
+)
 from models import NamedQuote, PortfolioQuoteCoverage, PortfolioQuoteCoverageItem, Snapshot
 from portfolio_context import load_authoritative_portfolio
 from providers import fetch_session_observations
@@ -238,22 +242,6 @@ def _set_github_output(key: str, value: str) -> None:
             f.write(f"{key}={value}\n")
 
 
-def _should_skip_us_open_duplicate(report_type: str) -> bool:
-    """When us_open is scheduled at both 13:00 and 14:00 UTC, only the run that
-    lands in the 09:00 New York hour should continue. Manual/dispatch runs are
-    always allowed."""
-    if report_type != "us_open" or os.getenv("GITHUB_EVENT_NAME") != "schedule":
-        return False
-    now_ny = datetime.now(tz=NY)
-    if now_ny.hour == 9:
-        return False
-    log.info("US open schedule guard skipped duplicate/non-target run",
-             extra={"ny_time": now_ny.strftime("%Y-%m-%d %H:%M:%S %Z")})
-    _set_github_output("market_closed", "false")
-    _set_github_output("duplicate_skipped", "true")
-    return True
-
-
 # ── Core fetch ─────────────────────────────────────────────────────────────────
 
 def build_snapshot(report_type: str) -> Snapshot:
@@ -341,7 +329,9 @@ def _expected_session(report_type: str) -> str:
         target = get_target_market_date(report_type, "US", now=now)
         return "REGULAR" if target == now.strftime("%Y-%m-%d") else "PREVIOUS_CLOSE"
     if report_type.startswith("us_"):
-        return classify_us_session(extended_quote_available=True)
+        # us_open is a premarket snapshot contract, not a label for whichever
+        # US session happens to be live when a delayed runner starts.
+        return "PREMARKET" if report_type == "us_open" else classify_us_session(extended_quote_available=True)
     return classify_tw_session(report_type=report_type)
 
 
@@ -357,10 +347,6 @@ def main() -> None:
     data_dir = Path(__file__).parent.parent / "data"
     data_dir.mkdir(exist_ok=True)
 
-    if _should_skip_us_open_duplicate(report_type):
-        log.info("EXIT 4 — US open duplicate schedule skipped")
-        sys.exit(4)
-
     if is_tw_market_closed(report_type):
         _set_github_output("market_closed", "true")
         log.info("EXIT 2 — TW market closed, report skipped")
@@ -371,8 +357,19 @@ def main() -> None:
         log.info("EXIT 3 — US market closed, sending notice")
         sys.exit(3)
 
+    if report_type == "us_open":
+        contract_status = us_open_snapshot_contract_status()
+        if contract_status != "READY":
+            log.error("US open snapshot contract unavailable — refusing to relabel later session data", extra={
+                "status": contract_status,
+                "ny_time": datetime.now(tz=NY).strftime("%Y-%m-%d %H:%M:%S %Z"),
+            })
+            _set_github_output("market_closed", "false")
+            _set_github_output("intent_unavailable", "true")
+            sys.exit(5)
+
     _set_github_output("market_closed", "false")
-    _set_github_output("duplicate_skipped", "false")
+    _set_github_output("intent_unavailable", "false")
 
     log.info("building snapshot", extra={"report_type": report_type})
     snapshot = build_snapshot(report_type)

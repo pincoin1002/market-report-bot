@@ -291,12 +291,18 @@ def derive_evidence_supported_drivers(context: MarketContext) -> list[str]:
             + "；多個大型權值同步走弱，與加權指數表現一致；此為關聯性觀察，未推定單一因果。",
         ))
     if len(leaders) >= 2:
+        if taiex and taiex.change_pct < 0:
+            association = "；大型權值逆勢上漲，部分抵銷權值跌勢；此為關聯性觀察，未推定單一因果。"
+        elif taiex and taiex.change_pct > 0:
+            association = "；多個大型權值同步上漲，與加權指數表現一致；此為關聯性觀察，未推定單一因果。"
+        else:
+            association = "；多個大型權值同步上漲；此為關聯性觀察，未推定單一因果。"
         candidates.append(EvidenceCandidate(
             "SUPPORTED_ASSOCIATION",
             sum(abs(observation.change_pct) for _, observation in leaders[:3]),
             tuple(observation.quote_id for _, observation in leaders[:3]),
             "相對支撐：" + "、".join(_weight_return_text(symbol, observation) for symbol, observation in leaders[:3])
-            + "；多個大型權值同步上漲，與加權指數表現一致；此為關聯性觀察，未推定單一因果。",
+            + association,
         ))
 
     if usd_twd := _valid_quote(context, "USDTWD"):
