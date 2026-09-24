@@ -41,6 +41,9 @@ def validate_observation(obs: QuoteObservation, spec: InstrumentSpec,
     if obs.canonical_symbol != spec.canonical_symbol or obs.instrument_id != spec.canonical_symbol:
         quality = _worse_quality(quality, "CONFLICTING")
         notes.append("instrument identity does not match registry")
+    if obs.market and obs.market != spec.market:
+        quality = _worse_quality(quality, "CONFLICTING")
+        notes.append(f"quote market {obs.market} does not match registry {spec.market}")
     if obs.currency != spec.currency:
         quality = _worse_quality(quality, "CONFLICTING")
         notes.append(f"currency {obs.currency} does not match registry {spec.currency}")

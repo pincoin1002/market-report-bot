@@ -380,8 +380,28 @@ def fetch_session_observations(specs: list[InstrumentSpec], expected_session: Se
     if expected_session in ("PREMARKET", "REGULAR", "AFTER_HOURS"):
         extended = YahooExtendedHoursProvider().fetch_many(specs, expected_session, expected_dates=expected_dates)
         for symbol, obs in extended.items():
+            spec = specs_by_symbol(specs)[symbol]
+            expected_date = (expected_dates or {}).get(spec.canonical_symbol) or (expected_dates or {}).get(spec.market)
+            # A cross-market close report can run while the other venue is in
+            # premarket.  That live quote must not replace the last completed
+            # official session required by the date contract; leave the symbol
+            # for the daily-close tiers instead.
+            if expected_date and obs.market_date != expected_date:
+                log.info("extended quote deferred to official-close fallback", extra={
+                    "symbol": symbol,
+                    "observed_date": obs.market_date,
+                    "expected_date": expected_date,
+                    "observed_session": obs.session,
+                })
+                continue
+            if expected_session == "REGULAR" and obs.session != "REGULAR":
+                log.info("non-regular extended quote deferred to official-close fallback", extra={
+                    "symbol": symbol,
+                    "observed_session": obs.session,
+                })
+                continue
             observations[symbol] = obs
-            sources[specs_by_symbol(specs)[symbol].provider_symbols["yfinance"]] = obs.provider
+            sources[spec.provider_symbols["yfinance"]] = obs.provider
 
     remaining_specs = [s for s in specs if s.canonical_symbol not in observations]
     provider_symbols = [s.provider_symbols["yfinance"] for s in remaining_specs]

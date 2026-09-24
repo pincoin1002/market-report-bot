@@ -4,9 +4,10 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from datetime import datetime
 
-from market_session import human_session_label
+from market_session import get_previous_completed_session_date, human_session_label
 from models import (
     MarketContext, MarketReportDraft, OptionalModule, PortfolioActionBrief,
     PortfolioActionItem, PortfolioContext, PriceReference, Trigger,
@@ -41,6 +42,30 @@ def quote_price_reference(symbol: str, context: MarketContext) -> PriceReference
 
 
 from instrument_registry import resolve_instrument
+
+
+@dataclass(frozen=True)
+class EvidenceCandidate:
+    """Deterministic report claim with its evidence class and materiality."""
+    classification: str
+    materiality: float
+    evidence: tuple[str, ...]
+    text: str
+
+    @property
+    def rendered(self) -> str:
+        return f"[{self.classification}] {self.text}"
+
+
+def _valid_quote(context: MarketContext, symbol: str):
+    observation = context.quotes.get(symbol) or context.macro_observations.get(symbol)
+    return observation if observation and observation.quality_status == "VALID" else None
+
+
+def _weight_return_text(symbol: str, observation) -> str:
+    spec = resolve_instrument(symbol)
+    name = f"{spec.display_name} ({symbol})" if spec.display_name != symbol else symbol
+    return f"{name} {observation.change_pct:+.2f}%"
 
 
 def select_report_symbols(context: MarketContext) -> list[str]:
@@ -227,18 +252,154 @@ def usd_twd_direction_label(change_pct: float) -> str:
 
 
 def derive_evidence_supported_drivers(context: MarketContext) -> list[str]:
-    """Observed facts only; no LLM-owned causal explanation."""
-    if not context.report_type.startswith("tw_"):
+    """Build ranked Taiwan-close driver claims from validated observations.
+
+    A driver is never a model-inferred cause: every line is classified and
+    carries an internal list of quote/statistic IDs.  The renderer receives
+    only the deterministic, reader-facing text.
+    """
+    if context.report_type != "tw_close":
         return []
-    drivers: list[str] = []
-    taiex = context.quotes.get("TAIEX")
-    tsmc = context.quotes.get("2330")
-    if taiex and taiex.quality_status == "VALID":
-        text = f"觀察事實：加權指數 {taiex.change_pct:+.2f}%"
-        if tsmc and tsmc.quality_status == "VALID":
-            text += f"；台積電 (2330) {tsmc.change_pct:+.2f}%"
-        drivers.append(text + "。")
-    return drivers[:1]
+
+    candidates: list[EvidenceCandidate] = []
+    taiex = _valid_quote(context, "TAIEX")
+    if taiex:
+        candidates.append(EvidenceCandidate(
+            "OBSERVED", abs(taiex.change_pct), (taiex.quote_id,),
+            f"市場結果：加權指數收在 {taiex.price:,.2f} 點（{taiex.change_pct:+.2f}%）。",
+        ))
+
+    weighted = []
+    for symbol in ("2330", "2317", "2454", "2308", "2382", "2303", "3711"):
+        if observation := _valid_quote(context, symbol):
+            weighted.append((symbol, observation))
+    laggards = sorted(
+        [(symbol, observation) for symbol, observation in weighted if observation.change_pct <= -0.5],
+        key=lambda item: item[1].change_pct,
+    )
+    leaders = sorted(
+        [(symbol, observation) for symbol, observation in weighted if observation.change_pct >= 0.5],
+        key=lambda item: item[1].change_pct,
+        reverse=True,
+    )
+    if len(laggards) >= 2:
+        candidates.append(EvidenceCandidate(
+            "SUPPORTED_ASSOCIATION",
+            sum(abs(observation.change_pct) for _, observation in laggards[:3]),
+            tuple(observation.quote_id for _, observation in laggards[:3]),
+            "權值壓力：" + "、".join(_weight_return_text(symbol, observation) for symbol, observation in laggards[:3])
+            + "；多個大型權值同步走弱，與加權指數表現一致；此為關聯性觀察，未推定單一因果。",
+        ))
+    if len(leaders) >= 2:
+        candidates.append(EvidenceCandidate(
+            "SUPPORTED_ASSOCIATION",
+            sum(abs(observation.change_pct) for _, observation in leaders[:3]),
+            tuple(observation.quote_id for _, observation in leaders[:3]),
+            "相對支撐：" + "、".join(_weight_return_text(symbol, observation) for symbol, observation in leaders[:3])
+            + "；多個大型權值同步上漲，與加權指數表現一致；此為關聯性觀察，未推定單一因果。",
+        ))
+
+    if usd_twd := _valid_quote(context, "USDTWD"):
+        candidates.append(EvidenceCandidate(
+            "OBSERVED", abs(usd_twd.change_pct), (usd_twd.quote_id,),
+            f"匯率：USD/TWD 收在 {usd_twd.price:.3f}（{usd_twd.change_pct:+.2f}%），新台幣{usd_twd_direction_label(usd_twd.change_pct)}。",
+        ))
+
+    taiex = context.taiex_summary
+    inst = context.institutional_flows
+    missing_stats = []
+    if not inst or inst.foreign_buy_sell_ntd_billions is None:
+        missing_stats.append("法人買賣超")
+    if not taiex or taiex.turnover_ntd_billions is None:
+        missing_stats.append("成交金額")
+    if not taiex or taiex.advancing is None or taiex.declining is None:
+        missing_stats.append("市場廣度")
+    if missing_stats:
+        candidates.append(EvidenceCandidate(
+            "UNRESOLVED", 0.0, (),
+            f"{'、'.join(missing_stats)}：UNRESOLVED（本次快照未提供已驗證交易所統計）。",
+        ))
+
+    rank = {"SUPPORTED_ASSOCIATION": 2, "OBSERVED": 1, "UNRESOLVED": 0}
+    candidates.sort(key=lambda item: (-rank[item.classification], -item.materiality, item.text))
+    return [candidate.rendered for candidate in candidates[:6]]
+
+
+def derive_tw_session_deltas(context: MarketContext) -> list[str]:
+    """Compare only the current and previous completed TWSE sessions.
+
+    The quote contract provides price and ``previous_regular_close``.  Fields
+    without a verified previous-session statistic are kept explicit rather
+    than silently becoming prose or an invented delta.
+    """
+    if context.report_type != "tw_close":
+        return []
+    deltas: list[str] = []
+    taiex = _valid_quote(context, "TAIEX")
+    if taiex:
+        # Calendar resolution is deliberately performed even though the public
+        # line names the prior completed session rather than printing a date.
+        # This prevents a weekend/holiday from being treated as a session.
+        get_previous_completed_session_date("TW", taiex.market_date)
+        point_delta = taiex.price - taiex.previous_regular_close
+        deltas.append(
+            f"[OBSERVED] TAIEX session-over-session：收在 {taiex.price:,.2f} 點，較前一已完成 TWSE session "
+            f"{point_delta:+,.2f} 點（{taiex.change_pct:+.2f}%）；比較基準為前一正式收盤。"
+        )
+    else:
+        deltas.append("[UNRESOLVED] TAIEX session-over-session：UNRESOLVED（缺少已驗證 current TWSE close）。")
+
+    weighted = []
+    for symbol in ("2330", "2317", "2454", "2308", "2382", "2303", "3711"):
+        if observation := _valid_quote(context, symbol):
+            weighted.append((symbol, observation))
+    if weighted:
+        weighted.sort(key=lambda item: abs(item[1].change_pct), reverse=True)
+        deltas.append(
+            "[OBSERVED] 權值單日變化："
+            + "、".join(_weight_return_text(symbol, observation) for symbol, observation in weighted[:3])
+            + "；皆以各自前一正式收盤為基準。"
+        )
+    else:
+        deltas.append("[UNRESOLVED] 權值單日變化：UNRESOLVED（缺少已驗證權值正式收盤）。")
+
+    if usd_twd := _valid_quote(context, "USDTWD"):
+        deltas.append(
+            f"[OBSERVED] USD/TWD session-over-session：收在 {usd_twd.price:.3f}，變動 {usd_twd.change_pct:+.2f}%；"
+            f"新台幣{usd_twd_direction_label(usd_twd.change_pct)}。"
+        )
+    else:
+        deltas.append("[UNRESOLVED] USD/TWD session-over-session：UNRESOLVED（缺少已驗證匯率收盤）。")
+
+    taiex_summary = context.taiex_summary
+    inst = context.institutional_flows
+    if taiex_summary and taiex_summary.turnover_ntd_billions is not None and inst and inst.turnover_prev_ntd_billions is not None:
+        turnover_delta = taiex_summary.turnover_ntd_billions - inst.turnover_prev_ntd_billions
+        deltas.append(
+            f"[OBSERVED] 成交金額：{taiex_summary.turnover_ntd_billions:,.2f} 億台幣，較前一 session {turnover_delta:+,.2f} 億。"
+        )
+    else:
+        deltas.append("[UNRESOLVED] 成交金額：UNRESOLVED（缺少 current 與前一已完成 TWSE session 的已驗證統計）。")
+
+    if taiex_summary and taiex_summary.advancing is not None and taiex_summary.declining is not None:
+        deltas.append(
+            f"[OBSERVED] 市場廣度：上漲 {taiex_summary.advancing} 家、下跌 {taiex_summary.declining} 家；"
+            "前一 session 廣度未提供，無法計算廣度 delta。"
+        )
+    else:
+        deltas.append("[UNRESOLVED] 市場廣度：UNRESOLVED（缺少 current 與前一已完成 TWSE session 的已驗證統計）。")
+
+    if inst and inst.foreign_buy_sell_ntd_billions is not None and inst.foreign_buy_sell_prev_ntd_billions is not None:
+        foreign_delta = inst.foreign_buy_sell_ntd_billions - inst.foreign_buy_sell_prev_ntd_billions
+        deltas.append(
+            f"[OBSERVED] 外資現貨：{inst.foreign_buy_sell_ntd_billions:+.2f} 億台幣，較前一 session {foreign_delta:+.2f} 億。"
+        )
+    else:
+        deltas.append("[UNRESOLVED] 三大法人：UNRESOLVED（缺少外資、投信、自營商 current 與前一 session 的完整已驗證統計）。")
+
+    deltas.append("[UNRESOLVED] Portfolio coverage change：UNRESOLVED（沒有前一已完成 TWSE session 的 portfolio coverage artifact）。")
+    deltas.append("[UNRESOLVED] Portfolio relative performance：UNRESOLVED（尚無滿足既有信心合約的跨幣別 canonical portfolio valuation evidence）。")
+    return deltas
 
 
 def portfolio_report_section(context: MarketContext) -> OptionalModule | None:
@@ -270,7 +431,7 @@ def build_public_draft(context: MarketContext, narrative: str | None = None) -> 
     }[context.report_type]
     session_label = human_session_label(context.report_type, context.market_session)
     if context.report_type == "tw_close":
-        material = context.material_changes or derive_state_changes(context)
+        material = context.material_changes or derive_tw_session_deltas(context)
         watch = derive_tomorrow_watch_signals(context)
     else:
         material = context.material_changes or build_material_changes(context)

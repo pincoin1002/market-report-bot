@@ -50,6 +50,28 @@ def get_most_recent_completed_session(market: str, as_of: datetime | None = None
     return cur.strftime("%Y-%m-%d"), "REGULAR"
 
 
+def get_previous_completed_session_date(market: str, session_date: str) -> str:
+    """Return the exchange-calendar session immediately before ``session_date``.
+
+    This is used only after a quote has already been validated against the
+    current completed session.  It never substitutes a calendar day for a
+    closed exchange day.
+    """
+    try:
+        date_value = datetime.fromisoformat(session_date).date()
+    except ValueError as exc:
+        raise ValueError(f"invalid session date: {session_date}") from exc
+    if market.upper() in ("US", "NYSE", "NASDAQ"):
+        current = datetime.combine(date_value, time(16), tzinfo=NY) - timedelta(days=1)
+        while not is_nyse_trading_day(current):
+            current -= timedelta(days=1)
+        return current.strftime("%Y-%m-%d")
+    current = datetime.combine(date_value, time(13, 30), tzinfo=TPE) - timedelta(days=1)
+    while not is_tw_trading_day(current):
+        current -= timedelta(days=1)
+    return current.strftime("%Y-%m-%d")
+
+
 def get_target_market_date(report_type: str, market: str, now: datetime | None = None) -> str:
     """Deterministic expected market trading date for a given report type and market."""
     if report_type == "tw_open":
@@ -134,4 +156,3 @@ def human_session_label(report_type: str, session: Session) -> str:
         "CLOSED_REFERENCE": "休市參考價",
     }
     return labels[session]
-

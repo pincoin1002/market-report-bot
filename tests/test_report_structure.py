@@ -241,7 +241,7 @@ class ReportStructuralValidationTest(unittest.TestCase):
             "三大法人合計買超逾 300 億台幣，資金佔大盤成交比重逾六成，台積電創下波段新高。"
         )
         draft = build_public_draft(context, hallucinated_narrative)
-        self.assertEqual(draft.drivers, [])
+        self.assertTrue(all("三大法人合計" not in line for line in draft.drivers))
         self.assertNotIn("300", draft.rendered_markdown)
         self.assertNotIn("六成", draft.rendered_markdown)
         self.assertNotIn("波段新高", draft.rendered_markdown)
@@ -401,7 +401,9 @@ class ReportStructuralValidationTest(unittest.TestCase):
         # I. Character length is within expected institutional brief length (~700 - 1300 chars)
         char_count = len(rendered)
         self.assertGreaterEqual(char_count, 650, f"Report too short ({char_count} chars)")
-        self.assertLessEqual(char_count, 1400, f"Report too long ({char_count} chars)")
+        # Evidence classes and explicit unresolved delta fields are required
+        # reader-facing audit content; retain a compact Telegram-safe cap.
+        self.assertLessEqual(char_count, 2200, f"Report too long ({char_count} chars)")
 
         # J. Zero content loss across chunks
         recombined = " ".join(chunks)
@@ -410,5 +412,3 @@ class ReportStructuralValidationTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-

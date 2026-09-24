@@ -566,6 +566,63 @@ class StructuredReportTest(unittest.TestCase):
         draft = build_public_draft(context)
         self.assertLessEqual(len(draft.material_changes), 5)
 
+    def test_tw_close_driver_and_delta_engine_is_evidence_bound_and_fail_closed(self):
+        as_of = datetime(2026, 9, 24, 13, 0, tzinfo=timezone.utc)
+        def tw_quote(symbol, price, prev):
+            return _obs(symbol, price=price, prev=prev, currency="TWD", market_date="2026-09-24").model_copy(
+                update={"market": "TW"}
+            )
+
+        quotes = {
+            "TAIEX": tw_quote("TAIEX", 25100.0, 25200.0),
+            "2330": tw_quote("2330", 1200.0, 1220.0),
+            "2317": tw_quote("2317", 190.0, 194.0),
+            "2454": tw_quote("2454", 1500.0, 1490.0),
+            "2308": tw_quote("2308", 800.0, 796.0),
+            "USDTWD": tw_quote("USDTWD", 31.85, 31.70),
+        }
+        snapshot = Snapshot(
+            generated_at=as_of, report_type="tw_close", report_market_date="2026-09-24",
+            fetch_coverage=1.0, market_context_coverage=1.0,
+            quote_observations=quotes,
+            portfolio_quote_coverage=PortfolioQuoteCoverage(
+                expected_positions=23, covered_positions=22, coverage_ratio=22 / 23,
+                as_of=as_of, status="DEGRADED",
+            ),
+        )
+        context = build_market_context(snapshot, "tw_close", run_id="tw-driver-delta")
+        draft = build_public_draft(context)
+
+        self.assertTrue(any(line.startswith("[OBSERVED]") for line in draft.drivers))
+        self.assertTrue(any(line.startswith("[SUPPORTED_ASSOCIATION]") for line in draft.drivers))
+        self.assertTrue(any("UNRESOLVED" in line for line in draft.drivers))
+        self.assertTrue(any("未推定單一因果" in line for line in draft.drivers))
+        self.assertTrue(any("TAIEX session-over-session" in line for line in draft.material_changes))
+        self.assertTrue(any("成交金額：UNRESOLVED" in line for line in draft.material_changes))
+        self.assertTrue(any("市場廣度：UNRESOLVED" in line for line in draft.material_changes))
+        self.assertTrue(any("三大法人：UNRESOLVED" in line for line in draft.material_changes))
+        self.assertTrue(any("Portfolio coverage change：UNRESOLVED" in line for line in draft.material_changes))
+        self.assertTrue(any("Portfolio relative performance：UNRESOLVED" in line for line in draft.material_changes))
+        self.assertNotIn("因為", draft.rendered_markdown)
+        ok, reason = validate_public_draft(draft, context)
+        self.assertTrue(ok, reason)
+
+    def test_tw_close_public_report_remains_valid_when_portfolio_coverage_is_degraded(self):
+        as_of = datetime(2026, 9, 24, 13, 0, tzinfo=timezone.utc)
+        taiex = _obs("TAIEX", price=25100, prev=25200, currency="TWD", market_date="2026-09-24").model_copy(update={"market": "TW"})
+        snapshot = Snapshot(
+            generated_at=as_of, report_type="tw_close", report_market_date="2026-09-24",
+            quote_observations={"TAIEX": taiex},
+            portfolio_quote_coverage=PortfolioQuoteCoverage(
+                expected_positions=23, covered_positions=22, coverage_ratio=22 / 23,
+                as_of=as_of, status="DEGRADED",
+            ),
+        )
+        context = build_market_context(snapshot, "tw_close", run_id="tw-degraded-public")
+        draft = build_public_draft(context)
+        self.assertTrue(validate_public_draft(draft, context)[0])
+        self.assertIn("私人持股結論已 fail-closed", draft.rendered_markdown)
+
 
 class StructuredBriefTest(unittest.TestCase):
     def _portfolio(self):
@@ -724,7 +781,8 @@ class SafetyAndWorkflowTest(unittest.TestCase):
         context = build_market_context(_snapshot({"2330": _obs("2330")}), "tw_close", run_id="test")
         narrative = """# 台股收盤日報\n\n## 1. 今日一句話\n台積電領軍，指數收高，但成交結構分化。\n\n---\n\n## 2. 指數與市場概況\n| 指標 | 數值 |\n| TAIEX | 99999 |\n\n## 3. 盤中走勢復盤\n不應進入外層報告。"""
         draft = build_public_draft(context, narrative)
-        self.assertEqual(draft.drivers, [])
+        self.assertTrue(all("台積電領軍" not in item for item in draft.drivers))
+        self.assertTrue(all("99999" not in item for item in draft.drivers))
         self.assertEqual(draft.rendered_markdown.count("台股收盤日報"), 1)
         self.assertNotIn("指數與市場概況", draft.rendered_markdown)
         self.assertNotIn("99999", draft.rendered_markdown)
@@ -733,7 +791,7 @@ class SafetyAndWorkflowTest(unittest.TestCase):
         context = build_market_context(_snapshot({"2330": _obs("2330")}), "tw_close", run_id="test")
         narrative = "## 1. 今日一句話\n因數據阻斷，Smart Money 對後市多頭抱持強烈預期。"
         draft = build_public_draft(context, narrative)
-        self.assertEqual(draft.drivers, [])
+        self.assertTrue(all("Smart Money" not in item for item in draft.drivers))
         self.assertNotIn("Smart Money", draft.rendered_markdown)
 
     def test_empty_optional_sections_are_omitted(self):

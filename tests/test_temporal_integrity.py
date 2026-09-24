@@ -3,6 +3,7 @@
 
 import unittest
 import sys
+from unittest.mock import patch
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -14,13 +15,15 @@ from adr_engine import calculate_tsm_adr_premium
 from instrument_registry import resolve_instrument
 from market_session import (
     get_most_recent_completed_session,
+    get_previous_completed_session_date,
     get_target_market_date,
     is_nyse_trading_day,
     is_tw_trading_day,
     NY,
     TPE,
 )
-from models import InstrumentSpec, NamedQuote, QuoteObservation, Snapshot
+from models import InstrumentSpec, NamedQuote, Quote, QuoteObservation, Snapshot
+from providers import fetch_session_observations
 from quote_quality import validate_observation
 from structured_reports import build_public_draft, validate_public_draft
 from market_context import build_market_context
@@ -264,6 +267,69 @@ class TemporalIntegrityRegressionTest(unittest.TestCase):
         self.assertTrue(fixture_path.exists(), "Synthetic fixture must exist in tests/fixtures/")
         fixture_content = fixture_path.read_text(encoding="utf-8")
         self.assertIn("DATA_BLOCKED — TEMPORAL_MISMATCH", fixture_content)
+
+    # ── Taiwan close must select the latest completed US official close, not premarket
+    def test_tw_close_before_us_open_targets_prior_completed_us_session(self):
+        taiwan_close = datetime(2026, 9, 24, 20, 38, tzinfo=TPE)
+        self.assertEqual(get_target_market_date("tw_close", "US", now=taiwan_close), "2026-09-23")
+
+    def test_tw_close_while_us_regular_session_is_incomplete_targets_prior_close(self):
+        during_us_regular = datetime(2026, 9, 25, 3, 0, tzinfo=TPE)  # 15:00 EDT
+        self.assertEqual(get_target_market_date("tw_close", "US", now=during_us_regular), "2026-09-23")
+
+    def test_tw_close_after_us_close_uses_same_day_completed_session(self):
+        after_us_close = datetime(2026, 9, 25, 5, 0, tzinfo=TPE)  # 17:00 EDT
+        self.assertEqual(get_target_market_date("tw_close", "US", now=after_us_close), "2026-09-24")
+
+    def test_tw_close_weekend_uses_friday_us_session(self):
+        weekend = datetime(2026, 9, 27, 20, 0, tzinfo=TPE)
+        self.assertEqual(get_target_market_date("tw_close", "US", now=weekend), "2026-09-25")
+
+    def test_tw_close_after_us_holiday_uses_prior_completed_us_session(self):
+        # Tuesday morning US time after Labor Day: Monday was closed.
+        after_labor_day = datetime(2026, 9, 8, 20, 0, tzinfo=TPE)
+        self.assertEqual(get_target_market_date("tw_close", "US", now=after_labor_day), "2026-09-04")
+
+    def test_previous_tw_session_uses_exchange_calendar_not_calendar_day(self):
+        self.assertEqual(get_previous_completed_session_date("TW", "2026-07-06"), "2026-07-03")
+
+    def test_wrong_market_venue_is_rejected(self):
+        spec = resolve_instrument("AMZN")
+        wrong_venue = _make_obs("AMZN", "2026-09-23", market="TW", currency="USD")
+        validated = validate_observation(wrong_venue, spec, expected_date="2026-09-23")
+        self.assertEqual(validated.quality_status, "CONFLICTING")
+        self.assertIn("quote market TW does not match registry US", validated.quality_notes)
+
+    def test_crypto_quote_contract_is_unchanged_without_exchange_date(self):
+        spec = resolve_instrument("BONK")
+        crypto = _make_obs("BONK", "2026-09-24", market="GLOBAL", currency="USD", session="REGULAR")
+        validated = validate_observation(crypto, spec)
+        self.assertEqual(validated.quality_status, "VALID")
+
+    def test_tw_current_session_target_and_quote_remain_valid(self):
+        taiwan_close = datetime(2026, 9, 24, 20, 38, tzinfo=TPE)
+        target = get_target_market_date("tw_close", "TW", now=taiwan_close)
+        self.assertEqual(target, "2026-09-24")
+        quote = _make_obs("2330", target, market="TW", currency="TWD", session="REGULAR")
+        self.assertEqual(validate_observation(quote, resolve_instrument("2330"), expected_date=target).quality_status, "VALID")
+
+    def test_cross_market_premarket_defers_to_official_close_fallback(self):
+        spec = resolve_instrument("AMZN")
+        premarket = _make_obs(
+            "AMZN", "2026-09-24", price=225.0, prev_close=220.0,
+            session="PREMARKET", market="US", provider="yahoo_chart_extended",
+        )
+        daily = Quote(price=221.0, prev_close=220.0, change_pct=0.45, data_date="2026-09-23")
+        with patch("providers.YahooExtendedHoursProvider.fetch_many", return_value={"AMZN": premarket}), \
+             patch("providers.fetch_with_failover", return_value=({"AMZN": daily}, {"AMZN": "yahoo_chart"})):
+            observations, sources = fetch_session_observations(
+                [spec], "REGULAR", expected_dates={"US": "2026-09-23", "TW": "2026-09-24"}
+            )
+        self.assertEqual(observations["AMZN"].market_date, "2026-09-23")
+        self.assertEqual(observations["AMZN"].session, "REGULAR")
+        self.assertEqual(observations["AMZN"].provider, "yahoo_chart")
+        self.assertEqual(observations["AMZN"].quality_status, "VALID")
+        self.assertEqual(sources["AMZN"], "yahoo_chart")
 
 
 class ADREngineIdentityAndTemporalHardeningTest(unittest.TestCase):
