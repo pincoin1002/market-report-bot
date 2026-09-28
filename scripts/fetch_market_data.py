@@ -358,11 +358,22 @@ def main() -> None:
         sys.exit(3)
 
     if report_type == "us_open":
-        contract_status = us_open_snapshot_contract_status()
+        intended_market_date = os.getenv("US_OPEN_INTENDED_MARKET_DATE", "").strip() or None
+        intended_market_time = os.getenv("US_OPEN_INTENDED_TIME", "").strip() or None
+        try:
+            contract_status = us_open_snapshot_contract_status(
+                intended_market_date=intended_market_date,
+                intended_market_time=intended_market_time,
+            )
+        except ValueError as exc:
+            log.error("US open intent metadata rejected", extra={"reason": str(exc)})
+            sys.exit(1)
         if contract_status != "READY":
             log.error("US open snapshot contract unavailable — refusing to relabel later session data", extra={
                 "status": contract_status,
                 "ny_time": datetime.now(tz=NY).strftime("%Y-%m-%d %H:%M:%S %Z"),
+                "intended_market_date": intended_market_date,
+                "intended_market_time": intended_market_time or "09:05",
             })
             _set_github_output("market_closed", "false")
             _set_github_output("intent_unavailable", "true")

@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, time, timezone, timedelta
+from datetime import date, datetime, time, timezone, timedelta
 from zoneinfo import ZoneInfo
 
 import holidays
@@ -146,14 +146,79 @@ def us_open_scheduled_intent_is_eligible(now: datetime | None = None) -> bool:
     return is_nyse_trading_day(local)
 
 
-def us_open_snapshot_contract_status(now: datetime | None = None) -> str:
-    """Return READY, MARKET_CLOSED, or INTENT_EXPIRED for a US-open snapshot."""
+def us_open_intended_datetime(
+    now: datetime | None = None,
+    intended_market_date: str | None = None,
+    intended_market_time: str | None = None,
+) -> datetime:
+    """Build the sole valid US-open intent in New York time.
+
+    External schedulers must state which NYSE date they intend to serve.  The
+    report itself is deliberately pinned to 09:05 New York time; accepting an
+    arbitrary time would allow a late trigger to relabel a different session.
+    """
     local = (now or datetime.now(tz=NY)).astimezone(NY)
-    if not is_nyse_trading_day(local):
+    if intended_market_date:
+        try:
+            market_date = date.fromisoformat(intended_market_date)
+        except ValueError as exc:
+            raise ValueError(f"invalid US-open intended market date: {intended_market_date}") from exc
+    else:
+        market_date = local.date()
+    if intended_market_time and intended_market_time != US_OPEN_INTENDED_TIME.strftime("%H:%M"):
+        raise ValueError("US-open intended time must be 09:05 America/New_York")
+    # Use the supplied local clock as the construction anchor. This keeps the
+    # contract testable with a patched clock and retains New York's DST offset.
+    return local.replace(
+        year=market_date.year,
+        month=market_date.month,
+        day=market_date.day,
+        hour=US_OPEN_INTENDED_TIME.hour,
+        minute=US_OPEN_INTENDED_TIME.minute,
+        second=0,
+        microsecond=0,
+    )
+
+
+def us_open_snapshot_contract_status(
+    now: datetime | None = None,
+    intended_market_date: str | None = None,
+    intended_market_time: str | None = None,
+) -> str:
+    """Return the current state of the pinned US-open snapshot contract.
+
+    ``INTENT_PENDING`` is only valid before the explicit 09:05 NY intent and
+    lets an external dispatcher start the GitHub job a few minutes early.  It
+    never permits fetching a pre-09:05 snapshot.
+    """
+    local = (now or datetime.now(tz=NY)).astimezone(NY)
+    intended = us_open_intended_datetime(
+        local, intended_market_date=intended_market_date,
+        intended_market_time=intended_market_time,
+    )
+    if not is_nyse_trading_day(intended):
         return "MARKET_CLOSED"
-    if time(4, 0) <= local.time() < US_OPEN_PREMARKET_CUTOFF:
+    if local.date() != intended.date():
+        return "INTENT_EXPIRED"
+    if local < intended:
+        return "INTENT_PENDING"
+    if local.time() < US_OPEN_PREMARKET_CUTOFF:
         return "READY"
     return "INTENT_EXPIRED"
+
+
+def us_open_wait_seconds(
+    now: datetime | None = None,
+    intended_market_date: str | None = None,
+    intended_market_time: str | None = None,
+) -> int:
+    """Seconds to wait until the pinned 09:05 intent, or zero when not pending."""
+    local = (now or datetime.now(tz=NY)).astimezone(NY)
+    intended = us_open_intended_datetime(
+        local, intended_market_date=intended_market_date,
+        intended_market_time=intended_market_time,
+    )
+    return max(0, int((intended - local).total_seconds()))
 
 
 def us_open_should_run(now: datetime | None = None) -> bool:

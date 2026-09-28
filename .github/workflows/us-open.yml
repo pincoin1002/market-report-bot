@@ -24,14 +24,44 @@ on:
         required: false
         default: false
         type: boolean
+      scheduler_delivery_test:
+        description: "Send exactly one labelled scheduler delivery test, never a market report"
+        required: false
+        default: false
+        type: boolean
+      intended_market_date:
+        description: "Canonical NYSE date for an external scheduler trigger (YYYY-MM-DD)"
+        required: false
+        type: string
+      intended_market_time:
+        description: "Canonical NY time for an external scheduler trigger (must be 09:05)"
+        required: false
+        type: string
+      trigger_source:
+        description: "Operational provenance (for example: vercel_cron)"
+        required: false
+        type: string
+      scheduler_triggered_at:
+        description: "External scheduler UTC timestamp for latency telemetry"
+        required: false
+        type: string
 
 
 jobs:
   generate-report:
     name: Generate US Open Report
     runs-on: ubuntu-latest
+    # One mutable daily report and delivery state means concurrent external,
+    # native-backup, and manual triggers must never run side-by-side.
+    concurrency:
+      group: us-open-canonical-delivery
+      cancel-in-progress: false
     env:
       PIOS_PORTFOLIO_SNAPSHOT_JSON: ${{ secrets.PIOS_PORTFOLIO_SNAPSHOT_JSON }}
+      US_OPEN_INTENDED_MARKET_DATE: ${{ github.event.inputs.intended_market_date || github.event.client_payload.intended_market_date || '' }}
+      US_OPEN_INTENDED_TIME: ${{ github.event.inputs.intended_market_time || github.event.client_payload.intended_market_time || '09:05' }}
+      US_OPEN_TRIGGER_SOURCE: ${{ github.event.inputs.trigger_source || github.event.client_payload.trigger_source || github.event_name }}
+      US_OPEN_SCHEDULER_TRIGGERED_AT: ${{ github.event.inputs.scheduler_triggered_at || github.event.client_payload.scheduler_triggered_at || '' }}
     timeout-minutes: 30
     permissions:
       contents: write
@@ -49,8 +79,13 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Resolve canonical US Open intent and idempotency
+        id: intent
+        if: github.event_name != 'workflow_dispatch' || (github.event.inputs.safe_verify != 'true' && github.event.inputs.scheduler_delivery_test != 'true')
+        run: python scripts/us_open_intent.py
+
       - name: Verify Telegram configuration safely
-        if: github.event_name == 'workflow_dispatch' && github.event.inputs.safe_verify == 'true'
+        if: github.event_name == 'workflow_dispatch' && (github.event.inputs.safe_verify == 'true' || github.event.inputs.scheduler_delivery_test == 'true')
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -74,9 +109,34 @@ jobs:
         if: github.event_name == 'workflow_dispatch' && github.event.inputs.safe_verify == 'true'
         run: python scripts/dry_run_v2.py
 
+      - name: Send controlled scheduler delivery test
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.scheduler_delivery_test == 'true'
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python - <<'PY'
+          import os
+          import requests
+
+          response = requests.post(
+              f"https://api.telegram.org/bot{os.environ['TELEGRAM_BOT_TOKEN']}/sendMessage",
+              json={"chat_id": os.environ["TELEGRAM_CHAT_ID"], "text": "US Open scheduler delivery test"},
+              timeout=30,
+          )
+          response.raise_for_status()
+          if not response.json().get("ok"):
+              raise SystemExit("Telegram scheduler delivery test failed")
+          print("Controlled scheduler delivery test sent")
+          PY
+
+      - name: Wait for canonical US Open snapshot time
+        if: (github.event_name != 'workflow_dispatch' || (github.event.inputs.safe_verify != 'true' && github.event.inputs.scheduler_delivery_test != 'true')) && steps.intent.outputs.already_reported != 'true'
+        run: python scripts/us_open_wait.py
+
       - name: Fetch market snapshot
         id: fetch
-        if: github.event_name != 'workflow_dispatch' || github.event.inputs.safe_verify != 'true'
+        if: (github.event_name != 'workflow_dispatch' || (github.event.inputs.safe_verify != 'true' && github.event.inputs.scheduler_delivery_test != 'true')) && steps.intent.outputs.already_reported != 'true'
         run: |
           mkdir -p data
           # set +e: the runner shell is bash -e, so a non-zero exit would kill
@@ -87,9 +147,11 @@ jobs:
           set -e
           if [ $EXIT_CODE -eq 5 ]; then
             echo "intent_unavailable=true" >> $GITHUB_OUTPUT
+            echo "terminal_state=INTENT_EXPIRED" >> $GITHUB_OUTPUT
             exit 0
           elif [ $EXIT_CODE -eq 3 ]; then
             echo "market_closed=true" >> $GITHUB_OUTPUT
+            echo "terminal_state=MARKET_CLOSED" >> $GITHUB_OUTPUT
             exit 0
           elif [ $EXIT_CODE -eq 0 ]; then
             echo "market_closed=false" >> $GITHUB_OUTPUT
@@ -100,8 +162,36 @@ jobs:
             exit $EXIT_CODE
           fi
 
+      - name: Record US Open unavailable terminal state
+        if: always() && (steps.fetch.outputs.terminal_state == 'INTENT_EXPIRED' || steps.fetch.outputs.terminal_state == 'MARKET_CLOSED')
+        run: python scripts/us_open_run_status.py "${{ steps.fetch.outputs.terminal_state }}"
+
+      - name: Send US Open operational alert
+        if: always() && steps.fetch.outputs.terminal_state == 'INTENT_EXPIRED'
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python - <<'PY'
+          import os
+          import requests
+
+          text = "⚠️ US Open scheduler status: INTENT_EXPIRED. No market report was sent."
+          response = requests.post(
+              f"https://api.telegram.org/bot{os.environ['TELEGRAM_BOT_TOKEN']}/sendMessage",
+              json={"chat_id": os.environ["TELEGRAM_CHAT_ID"], "text": text}, timeout=30,
+          )
+          response.raise_for_status()
+          print("US Open operational alert sent")
+          PY
+
+      - name: Fail unavailable US Open intent
+        if: always() && steps.fetch.outputs.terminal_state == 'INTENT_EXPIRED'
+        run: exit 1
+
       - name: Generate US Open Report
-        if: (github.event_name != 'workflow_dispatch' || github.event.inputs.safe_verify != 'true') && steps.fetch.outputs.market_closed != 'true' && steps.fetch.outputs.intent_unavailable != 'true'
+        id: generate
+        if: (github.event_name != 'workflow_dispatch' || (github.event.inputs.safe_verify != 'true' && github.event.inputs.scheduler_delivery_test != 'true')) && steps.intent.outputs.already_reported != 'true' && steps.fetch.outputs.market_closed != 'true' && steps.fetch.outputs.intent_unavailable != 'true'
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           PORTFOLIO_KEY: ${{ secrets.PORTFOLIO_KEY }}
@@ -110,15 +200,22 @@ jobs:
           REPORT_MODEL: ${{ vars.REPORT_MODEL }}
           DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
         run: |
+          set +e
           if [ "$DRY_RUN" = "true" ]; then
             echo "=== DRY RUN: notifications disabled ==="
             python scripts/generate_report.py us_open --generate-only
           else
             python scripts/generate_report.py us_open --generate-only
           fi
+          EXIT_CODE=$?
+          set -e
+          if [ $EXIT_CODE -ne 0 ]; then
+            echo "terminal_state=VALIDATION_BLOCKED" >> $GITHUB_OUTPUT
+            exit 0
+          fi
 
       - name: Send non-trading day notice
-        if: (github.event_name != 'workflow_dispatch' || github.event.inputs.safe_verify != 'true') && steps.fetch.outputs.market_closed == 'true'
+        if: (github.event_name != 'workflow_dispatch' || (github.event.inputs.safe_verify != 'true' && github.event.inputs.scheduler_delivery_test != 'true')) && steps.fetch.outputs.market_closed == 'true'
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -140,30 +237,59 @@ jobs:
           EOF
 
       - name: Validate report prices
-        if: (github.event_name != 'workflow_dispatch' || github.event.inputs.safe_verify != 'true') && steps.fetch.outputs.market_closed != 'true' && steps.fetch.outputs.intent_unavailable != 'true'
+        id: validate
+        if: (github.event_name != 'workflow_dispatch' || (github.event.inputs.safe_verify != 'true' && github.event.inputs.scheduler_delivery_test != 'true')) && steps.intent.outputs.already_reported != 'true' && steps.fetch.outputs.market_closed != 'true' && steps.fetch.outputs.intent_unavailable != 'true' && steps.generate.outputs.terminal_state != 'VALIDATION_BLOCKED'
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           REPORT_MODEL: ${{ vars.REPORT_MODEL }}
-        run: python scripts/validate_report.py us_open
+        run: |
+          set +e
+          python scripts/validate_report.py us_open
+          EXIT_CODE=$?
+          set -e
+          if [ $EXIT_CODE -ne 0 ]; then
+            echo "terminal_state=VALIDATION_BLOCKED" >> $GITHUB_OUTPUT
+            exit 0
+          fi
 
       - name: Deliver validated US Open Report
-        if: (github.event_name != 'workflow_dispatch' || github.event.inputs.safe_verify != 'true') && steps.fetch.outputs.market_closed != 'true' && steps.fetch.outputs.intent_unavailable != 'true' && (github.event_name == 'schedule' || inputs.send_telegram == true || github.event.inputs.send_telegram == 'true')
+        id: deliver
+        if: (github.event_name != 'workflow_dispatch' || (github.event.inputs.safe_verify != 'true' && github.event.inputs.scheduler_delivery_test != 'true')) && steps.intent.outputs.already_reported != 'true' && steps.fetch.outputs.market_closed != 'true' && steps.fetch.outputs.intent_unavailable != 'true' && steps.generate.outputs.terminal_state != 'VALIDATION_BLOCKED' && steps.validate.outputs.terminal_state != 'VALIDATION_BLOCKED' && (github.event_name == 'schedule' || inputs.send_telegram == true || github.event.inputs.send_telegram == 'true')
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           PORTFOLIO_KEY: ${{ secrets.PORTFOLIO_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           REPORT_MODEL: ${{ vars.REPORT_MODEL }}
-        run: python scripts/generate_report.py us_open --deliver-existing
+        run: |
+          set +e
+          python scripts/generate_report.py us_open --deliver-existing
+          EXIT_CODE=$?
+          set -e
+          if [ $EXIT_CODE -ne 0 ]; then
+            echo "terminal_state=DELIVERY_FAILED" >> $GITHUB_OUTPUT
+          else
+            echo "terminal_state=DELIVERED" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Record validation or delivery terminal state
+        if: always() && (steps.generate.outputs.terminal_state == 'VALIDATION_BLOCKED' || steps.validate.outputs.terminal_state == 'VALIDATION_BLOCKED' || steps.deliver.outputs.terminal_state == 'DELIVERED' || steps.deliver.outputs.terminal_state == 'DELIVERY_FAILED')
+        run: |
+          STATE="${{ steps.generate.outputs.terminal_state || steps.validate.outputs.terminal_state || steps.deliver.outputs.terminal_state }}"
+          python scripts/us_open_run_status.py "$STATE"
+
+      - name: Fail blocked validation or failed delivery
+        if: always() && (steps.generate.outputs.terminal_state == 'VALIDATION_BLOCKED' || steps.validate.outputs.terminal_state == 'VALIDATION_BLOCKED' || steps.deliver.outputs.terminal_state == 'DELIVERY_FAILED')
+        run: exit 1
 
 
       - name: Prepare review package
-        if: (github.event_name != 'workflow_dispatch' || github.event.inputs.safe_verify != 'true') && steps.fetch.outputs.market_closed != 'true' && steps.fetch.outputs.intent_unavailable != 'true'
+        if: (github.event_name != 'workflow_dispatch' || (github.event.inputs.safe_verify != 'true' && github.event.inputs.scheduler_delivery_test != 'true')) && steps.intent.outputs.already_reported != 'true' && steps.fetch.outputs.market_closed != 'true' && steps.fetch.outputs.intent_unavailable != 'true' && steps.generate.outputs.terminal_state != 'VALIDATION_BLOCKED' && steps.validate.outputs.terminal_state != 'VALIDATION_BLOCKED'
         continue-on-error: true
         run: python scripts/prepare_review.py us_open
 
       - name: Commit and push generated report
-        if: (github.event_name != 'workflow_dispatch' || github.event.inputs.safe_verify != 'true') && steps.fetch.outputs.market_closed != 'true' && steps.fetch.outputs.intent_unavailable != 'true'
+        if: (github.event_name != 'workflow_dispatch' || (github.event.inputs.safe_verify != 'true' && github.event.inputs.scheduler_delivery_test != 'true')) && steps.intent.outputs.already_reported != 'true' && steps.fetch.outputs.market_closed != 'true' && steps.fetch.outputs.intent_unavailable != 'true' && steps.generate.outputs.terminal_state != 'VALIDATION_BLOCKED' && steps.validate.outputs.terminal_state != 'VALIDATION_BLOCKED' && steps.deliver.outputs.terminal_state != 'DELIVERY_FAILED'
         continue-on-error: true
         run: |
           git config --global user.name "github-actions[bot]"
@@ -205,5 +331,6 @@ jobs:
             data/portfolio_advice_audit.json
             data/portfolio_action_brief.json
             data/delivery_state.json
+            data/us_open_run_status.json
           retention-days: 30
           if-no-files-found: ignore

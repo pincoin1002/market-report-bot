@@ -1,0 +1,20 @@
+{
+  "functions": {
+    "api/us_open_scheduler_edt.py": {
+      "maxDuration": 10
+    },
+    "api/us_open_scheduler_est.py": {
+      "maxDuration": 10
+    }
+  },
+  "crons": [
+    {
+      "path": "/api/us_open_scheduler_edt",
+      "schedule": "55 12 * * 1-5"
+    },
+    {
+      "path": "/api/us_open_scheduler_est",
+      "schedule": "55 13 * * 1-5"
+    }
+  ]
+}

@@ -302,7 +302,10 @@ class TemporalIntegrityRegressionTest(unittest.TestCase):
 
     def test_crypto_quote_contract_is_unchanged_without_exchange_date(self):
         spec = resolve_instrument("BONK")
-        crypto = _make_obs("BONK", "2026-09-24", market="GLOBAL", currency="USD", session="REGULAR")
+        crypto = _make_obs(
+            "BONK", "2026-09-24", market="GLOBAL", currency="USD", session="REGULAR",
+            retrieved_at=datetime(2026, 9, 24, 12, 0, tzinfo=timezone.utc),
+        )
         validated = validate_observation(crypto, spec)
         self.assertEqual(validated.quality_status, "VALID")
 
@@ -310,7 +313,10 @@ class TemporalIntegrityRegressionTest(unittest.TestCase):
         taiwan_close = datetime(2026, 9, 24, 20, 38, tzinfo=TPE)
         target = get_target_market_date("tw_close", "TW", now=taiwan_close)
         self.assertEqual(target, "2026-09-24")
-        quote = _make_obs("2330", target, market="TW", currency="TWD", session="REGULAR")
+        quote = _make_obs(
+            "2330", target, market="TW", currency="TWD", session="REGULAR",
+            retrieved_at=datetime(2026, 9, 24, 12, 0, tzinfo=timezone.utc),
+        )
         self.assertEqual(validate_observation(quote, resolve_instrument("2330"), expected_date=target).quality_status, "VALID")
 
     def test_cross_market_premarket_defers_to_official_close_fallback(self):
@@ -323,7 +329,8 @@ class TemporalIntegrityRegressionTest(unittest.TestCase):
         with patch("providers.YahooExtendedHoursProvider.fetch_many", return_value={"AMZN": premarket}), \
              patch("providers.fetch_with_failover", return_value=({"AMZN": daily}, {"AMZN": "yahoo_chart"})):
             observations, sources = fetch_session_observations(
-                [spec], "REGULAR", expected_dates={"US": "2026-09-23", "TW": "2026-09-24"}
+                [spec], "REGULAR", expected_dates={"US": "2026-09-23", "TW": "2026-09-24"},
+                retrieved_at=datetime(2026, 9, 24, 12, 0, tzinfo=timezone.utc),
             )
         self.assertEqual(observations["AMZN"].market_date, "2026-09-23")
         self.assertEqual(observations["AMZN"].session, "REGULAR")

@@ -373,7 +373,8 @@ def fetch_with_failover(symbols: list[str]) -> tuple[dict[str, Quote], dict[str,
 
 
 def fetch_session_observations(specs: list[InstrumentSpec], expected_session: Session,
-                               expected_dates: dict[str, str] | None = None
+                               expected_dates: dict[str, str] | None = None,
+                               retrieved_at: datetime | None = None,
                                ) -> tuple[dict[str, QuoteObservation], dict[str, str]]:
     observations: dict[str, QuoteObservation] = {}
     sources: dict[str, str] = {}
@@ -410,13 +411,13 @@ def fetch_session_observations(specs: list[InstrumentSpec], expected_session: Se
     fallback_session: Session = "PREVIOUS_CLOSE" if expected_session in ("PREMARKET", "CLOSED_REFERENCE") else expected_session
     if expected_session == "AFTER_HOURS":
         fallback_session = "PREVIOUS_CLOSE"
-    retrieved_at = datetime.now(tz=timezone.utc)
+    fetch_retrieved_at = retrieved_at or datetime.now(tz=timezone.utc)
     for provider_symbol, q in daily_quotes.items():
         spec = provider_to_spec[provider_symbol]
         provider = daily_sources.get(provider_symbol, "unknown")
         exp_date = (expected_dates or {}).get(spec.canonical_symbol) or (expected_dates or {}).get(spec.market)
         observations[spec.canonical_symbol] = observation_from_daily_quote(
-            spec, q, provider, fallback_session, retrieved_at, expected_date=exp_date)
+            spec, q, provider, fallback_session, fetch_retrieved_at, expected_date=exp_date)
         sources[provider_symbol] = provider
 
     remaining_crypto_specs = [

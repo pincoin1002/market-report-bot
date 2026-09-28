@@ -22,6 +22,7 @@ from market_session import (
     US_OPEN_INTENDED_TIME, classify_us_session, get_target_market_date,
     report_market_date, us_open_idempotency_key, us_open_should_run,
     us_open_scheduled_intent_is_eligible, us_open_snapshot_contract_status,
+    us_open_intended_datetime, us_open_wait_seconds,
 )
 from models import (PortfolioActionBrief, PortfolioActionItem, PortfolioContext,
                     PortfolioQuoteCoverage, PositionContext, PriceReference,
@@ -500,6 +501,126 @@ class USOpenSchedulerContractTest(unittest.TestCase):
     def test_manual_or_dispatch_uses_the_same_premarket_quote_contract(self):
         self.assertEqual(fetch_market_data._expected_session("us_open"), "PREMARKET")
 
+    def test_external_intent_before_0905_is_pending_not_a_snapshot(self):
+        early = datetime(2026, 9, 24, 8, 56, tzinfo=NY)
+        self.assertEqual(
+            us_open_snapshot_contract_status(early, "2026-09-24", "09:05"),
+            "INTENT_PENDING",
+        )
+        self.assertEqual(us_open_wait_seconds(early, "2026-09-24", "09:05"), 9 * 60)
+
+    def test_external_intent_rejects_noncanonical_time(self):
+        with self.assertRaises(ValueError):
+            us_open_intended_datetime(
+                datetime(2026, 9, 24, 8, 55, tzinfo=NY),
+                "2026-09-24", "09:00",
+            )
+
+    def test_external_intent_for_other_nyse_date_expires(self):
+        now = datetime(2026, 9, 25, 9, 5, tzinfo=NY)
+        self.assertEqual(
+            us_open_snapshot_contract_status(now, "2026-09-24", "09:05"),
+            "INTENT_EXPIRED",
+        )
+
+
+class ExternalUSOpenSchedulerTest(unittest.TestCase):
+    def test_edt_slot_dispatches_only_during_edt(self):
+        from scheduler.us_open_dispatch import slot_matches_new_york_offset, should_dispatch
+
+        edt = datetime(2026, 9, 24, 8, 55, tzinfo=NY)
+        self.assertTrue(slot_matches_new_york_offset("edt", edt))
+        self.assertFalse(slot_matches_new_york_offset("est", edt))
+        self.assertTrue(should_dispatch("edt", edt))
+
+    def test_est_slot_dispatches_only_during_est(self):
+        from scheduler.us_open_dispatch import slot_matches_new_york_offset, should_dispatch
+
+        est = datetime(2026, 12, 28, 8, 55, tzinfo=NY)
+        self.assertFalse(slot_matches_new_york_offset("edt", est))
+        self.assertTrue(slot_matches_new_york_offset("est", est))
+        self.assertTrue(should_dispatch("est", est))
+
+    def test_nonmatching_dst_slot_never_dispatches(self):
+        from scheduler.us_open_dispatch import should_dispatch
+
+        self.assertFalse(should_dispatch("est", datetime(2026, 9, 24, 9, 55, tzinfo=NY)))
+
+    def test_delayed_matching_external_slot_still_dispatches_to_surface_expiry(self):
+        from scheduler.us_open_dispatch import should_dispatch
+
+        self.assertTrue(should_dispatch("edt", datetime(2026, 9, 24, 9, 31, tzinfo=NY)))
+
+    def test_dispatch_payload_carries_only_intent_metadata(self):
+        from scheduler.us_open_dispatch import dispatch_payload
+
+        payload = dispatch_payload(datetime(2026, 9, 24, 8, 55, tzinfo=NY))
+        self.assertEqual(payload["ref"], "main")
+        self.assertEqual(payload["inputs"]["trigger_source"], "vercel_cron")
+        self.assertEqual(payload["inputs"]["intended_market_date"], "2026-09-24")
+        self.assertEqual(payload["inputs"]["intended_market_time"], "09:05")
+        self.assertNotIn("token", json.dumps(payload).lower())
+
+    def test_transient_dispatch_has_one_bounded_retry(self):
+        from scheduler.us_open_dispatch import dispatch_workflow
+
+        response = Mock(status=204)
+        response.__enter__ = Mock(return_value=response)
+        response.__exit__ = Mock(return_value=False)
+        with patch("scheduler.us_open_dispatch.urllib.request.urlopen", side_effect=[
+            __import__("urllib").error.URLError("temporary"), response,
+        ]) as opener, patch("scheduler.us_open_dispatch.time.sleep"):
+            self.assertEqual(dispatch_workflow("secret", {"ref": "main"}), 204)
+        self.assertEqual(opener.call_count, 2)
+
+    def test_client_dispatch_failure_does_not_retry(self):
+        from scheduler.us_open_dispatch import dispatch_workflow
+
+        error = __import__("urllib").error.HTTPError("https://example.test", 401, "no", {}, None)
+        with patch("scheduler.us_open_dispatch.urllib.request.urlopen", side_effect=error) as opener:
+            with self.assertRaisesRegex(RuntimeError, "HTTP 401"):
+                dispatch_workflow("secret", {"ref": "main"})
+        self.assertEqual(opener.call_count, 1)
+
+    def test_intent_resolution_detects_existing_same_day_report(self):
+        import us_open_intent
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "reports").mkdir()
+            (root / "reports" / "us_open_20260924_090500.md").write_text("already", encoding="utf-8")
+            old_root = us_open_intent.ROOT
+            us_open_intent.ROOT = root
+            try:
+                with patch.dict(os.environ, {
+                    "US_OPEN_INTENDED_MARKET_DATE": "2026-09-24",
+                    "US_OPEN_INTENDED_TIME": "09:05",
+                }, clear=False):
+                    _, _, already_reported = us_open_intent.resolve_intent(
+                        datetime(2026, 9, 24, 8, 55, tzinfo=NY)
+                    )
+                self.assertTrue(already_reported)
+            finally:
+                us_open_intent.ROOT = old_root
+
+    def test_terminal_status_artifact_is_privacy_safe(self):
+        import us_open_run_status
+        with tempfile.TemporaryDirectory() as td:
+            old_file = us_open_run_status.__file__
+            # Patch the module file anchor so this test cannot touch production data.
+            us_open_run_status.__file__ = str(Path(td) / "scripts" / "us_open_run_status.py")
+            try:
+                with patch.dict(os.environ, {
+                    "US_OPEN_TRIGGER_SOURCE": "vercel_cron",
+                    "US_OPEN_INTENDED_MARKET_DATE": "2026-09-24",
+                }, clear=False):
+                    path = us_open_run_status.write_status("INTENT_EXPIRED", "late trigger")
+                content = path.read_text(encoding="utf-8")
+                self.assertIn("INTENT_EXPIRED", content)
+                self.assertNotIn("PIOS", content)
+                self.assertNotIn("quantity", content.lower())
+            finally:
+                us_open_run_status.__file__ = old_file
+
 
 class QuoteQualityTest(unittest.TestCase):
     def test_coingecko_crypto_fallback_preserves_quote_provenance(self):
@@ -952,6 +1073,62 @@ class SafetyAndWorkflowTest(unittest.TestCase):
         self.assertNotIn('cron: "0 14 * * 1-5"', text)
         self.assertNotIn("duplicate_skipped", text)
         self.assertNotIn("_should_skip_us_open_duplicate", inspect.getsource(fetch_market_data))
+
+    def test_us_open_external_dispatch_inputs_and_serialization_are_present(self):
+        text = (ROOT / ".github/workflows/us-open.yml").read_text(encoding="utf-8")
+        self.assertIn("repository_dispatch:", text)
+        self.assertIn("intended_market_date", text)
+        self.assertIn("intended_market_time", text)
+        self.assertIn("trigger_source", text)
+        self.assertIn("scheduler_triggered_at", text)
+        self.assertIn("group: us-open-canonical-delivery", text)
+        self.assertIn("scripts/us_open_wait.py", text)
+
+    def test_us_open_expired_intent_is_a_workflow_failure_not_a_green_skip(self):
+        text = (ROOT / ".github/workflows/us-open.yml").read_text(encoding="utf-8")
+        start = text.index("name: Fail unavailable US Open intent")
+        failure = text[start:text.index("name: Generate US Open Report", start)]
+        self.assertIn("INTENT_EXPIRED", failure)
+        self.assertIn("exit 1", failure)
+        self.assertIn("scripts/us_open_run_status.py", text)
+
+    def test_us_open_validation_failure_cannot_reach_delivery(self):
+        text = (ROOT / ".github/workflows/us-open.yml").read_text(encoding="utf-8")
+        delivery = text[text.index("name: Deliver validated US Open Report"):text.index("name: Record validation")]
+        self.assertIn("steps.validate.outputs.terminal_state != 'VALIDATION_BLOCKED'", delivery)
+        self.assertIn("steps.generate.outputs.terminal_state != 'VALIDATION_BLOCKED'", delivery)
+
+    def test_us_open_delivery_failure_is_recorded_and_failed(self):
+        text = (ROOT / ".github/workflows/us-open.yml").read_text(encoding="utf-8")
+        self.assertIn("DELIVERY_FAILED", text)
+        self.assertIn("Fail blocked validation or failed delivery", text)
+
+    def test_controlled_scheduler_telegram_test_is_separate_from_daily_delivery(self):
+        text = (ROOT / ".github/workflows/us-open.yml").read_text(encoding="utf-8")
+        self.assertIn("scheduler_delivery_test", text)
+        self.assertIn("US Open scheduler delivery test", text)
+        self.assertIn("never a market report", text)
+
+    def test_vercel_scheduler_is_server_side_and_has_no_embedded_token(self):
+        config = json.loads((ROOT / "vercel.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(config["crons"]), 2)
+        self.assertEqual({item["schedule"] for item in config["crons"]}, {"55 12 * * 1-5", "55 13 * * 1-5"})
+        source = (ROOT / "scheduler" / "us_open_dispatch.py").read_text(encoding="utf-8")
+        self.assertIn('os.getenv("GITHUB_WORKFLOW_DISPATCH_TOKEN"', source)
+        self.assertIn('os.getenv("CRON_SECRET"', source)
+        self.assertNotIn("ghp_", source)
+        self.assertNotIn("github_pat_", source)
+
+    def test_pios_snapshot_is_not_mutated_by_scheduler_files(self):
+        source_files = [
+            ROOT / "scheduler" / "us_open_dispatch.py",
+            ROOT / "scripts" / "us_open_intent.py",
+            ROOT / "scripts" / "us_open_run_status.py",
+        ]
+        for source_file in source_files:
+            text = source_file.read_text(encoding="utf-8")
+            self.assertNotIn("pios_portfolio_snapshot", text.lower())
+            self.assertNotIn("load_authoritative_portfolio", text)
 
     def test_us_open_scheduled_delivery_is_gated_by_validation_not_runner_clock(self):
         text = (ROOT / ".github/workflows/us-open.yml").read_text(encoding="utf-8")
