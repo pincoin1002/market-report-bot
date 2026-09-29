@@ -1,12 +1,19 @@
 {
   "functions": {
-    "api/us_open_scheduler_edt.py": {
-      "maxDuration": 10
-    },
-    "api/us_open_scheduler_est.py": {
+    "api/index.py": {
       "maxDuration": 10
     }
   },
+  "rewrites": [
+    {
+      "source": "/api/us_open_scheduler_edt",
+      "destination": "/api?slot=edt"
+    },
+    {
+      "source": "/api/us_open_scheduler_est",
+      "destination": "/api?slot=est"
+    }
+  ],
   "crons": [
     {
       "path": "/api/us_open_scheduler_edt",

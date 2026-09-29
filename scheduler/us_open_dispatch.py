@@ -87,6 +87,43 @@ def dispatch_workflow(token: str, payload: dict[str, object], attempts: int = 2)
     raise RuntimeError("GitHub workflow dispatch unavailable after bounded retry") from last_error
 
 
+def handle_cron_request(
+    slot: SchedulerSlot,
+    authorization: str,
+    now: datetime | None = None,
+) -> tuple[int, dict[str, object]]:
+    """Return a safe HTTP result for one Vercel Cron candidate request."""
+    configured_secret = os.getenv("CRON_SECRET", "")
+    if not configured_secret or not hmac.compare_digest(
+        authorization, f"Bearer {configured_secret}"
+    ):
+        return 401, {"ok": False, "status": "UNAUTHORIZED"}
+
+    current = (now or datetime.now(tz=NY)).astimezone(NY)
+    if not should_dispatch(slot, current):
+        return 200, {
+            "ok": True,
+            "status": "IGNORED_DST_SLOT",
+            "trigger_source": "vercel_cron",
+        }
+    try:
+        dispatch_workflow(
+            os.getenv("GITHUB_WORKFLOW_DISPATCH_TOKEN", ""), dispatch_payload(current)
+        )
+    except Exception:
+        # Do not echo exception details: provider responses may include
+        # sensitive request metadata. Vercel's status code remains the
+        # operational signal for a failed external dispatch.
+        return 502, {"ok": False, "status": "DISPATCH_FAILED"}
+    return 202, {
+        "ok": True,
+        "status": "DISPATCHED",
+        "trigger_source": "vercel_cron",
+        "intended_market_date": current.strftime("%Y-%m-%d"),
+        "intended_market_time": "09:05",
+    }
+
+
 def make_handler(slot: SchedulerSlot):
     class USOpenSchedulerHandler(BaseHTTPRequestHandler):
         def _respond(self, status: int, payload: dict[str, object]) -> None:
@@ -98,37 +135,8 @@ def make_handler(slot: SchedulerSlot):
             self.wfile.write(body)
 
         def do_GET(self) -> None:  # noqa: N802 - Vercel's Python handler contract
-            configured_secret = os.getenv("CRON_SECRET", "")
-            authorization = self.headers.get("Authorization", "")
-            if not configured_secret or not hmac.compare_digest(
-                authorization, f"Bearer {configured_secret}"
-            ):
-                self._respond(401, {"ok": False, "status": "UNAUTHORIZED"})
-                return
-
-            now = datetime.now(tz=NY)
-            if not should_dispatch(slot, now):
-                self._respond(200, {
-                    "ok": True,
-                    "status": "IGNORED_DST_SLOT",
-                    "trigger_source": "vercel_cron",
-                })
-                return
-            try:
-                dispatch_workflow(os.getenv("GITHUB_WORKFLOW_DISPATCH_TOKEN", ""), dispatch_payload(now))
-            except Exception:
-                # Do not echo exception details: provider responses may include
-                # sensitive request metadata. Vercel's status code remains the
-                # operational signal for a failed external dispatch.
-                self._respond(502, {"ok": False, "status": "DISPATCH_FAILED"})
-                return
-            self._respond(202, {
-                "ok": True,
-                "status": "DISPATCHED",
-                "trigger_source": "vercel_cron",
-                "intended_market_date": now.strftime("%Y-%m-%d"),
-                "intended_market_time": "09:05",
-            })
+            status, payload = handle_cron_request(slot, self.headers.get("Authorization", ""))
+            self._respond(status, payload)
 
         def log_message(self, _format: str, *_args: object) -> None:
             # Vercel already records request status. Never mirror headers.

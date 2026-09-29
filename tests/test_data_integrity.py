@@ -582,6 +582,14 @@ class ExternalUSOpenSchedulerTest(unittest.TestCase):
                 dispatch_workflow("secret", {"ref": "main"})
         self.assertEqual(opener.call_count, 1)
 
+    def test_protected_request_rejects_missing_cron_secret(self):
+        from scheduler.us_open_dispatch import handle_cron_request
+
+        with patch.dict(os.environ, {"CRON_SECRET": "expected"}, clear=False):
+            status, payload = handle_cron_request("edt", "")
+        self.assertEqual(status, 401)
+        self.assertEqual(payload["status"], "UNAUTHORIZED")
+
     def test_intent_resolution_detects_existing_same_day_report(self):
         import us_open_intent
         with tempfile.TemporaryDirectory() as td:
@@ -1118,6 +1126,8 @@ class SafetyAndWorkflowTest(unittest.TestCase):
         self.assertIn('os.getenv("CRON_SECRET"', source)
         self.assertNotIn("ghp_", source)
         self.assertNotIn("github_pat_", source)
+        self.assertEqual(config["functions"]["api/index.py"]["maxDuration"], 10)
+        self.assertEqual(len(config["rewrites"]), 2)
 
     def test_pios_snapshot_is_not_mutated_by_scheduler_files(self):
         source_files = [
