@@ -716,20 +716,31 @@ def render_public_report(draft: MarketReportDraft, context: MarketContext,
 
 
 def _render_tw_close_report(draft: MarketReportDraft, context: MarketContext) -> str:
-    """Render institutional-grade Taiwan market daily close brief (6 sections)."""
+    """Render a compact, reader-facing Taiwan close Telegram brief."""
     lines = [
-        f"# {draft.headline}",
+        f"# 📊 台股收盤｜{context.market_date}",
         "",
     ]
-    sec_num = 1
     taiex = context.taiex_summary
     inst = context.institutional_flows
 
-    # Section 1: 今日市場 (Today's Market)
-    lines.append(f"## {sec_num}. 今日市場")
-    sec_num += 1
+    lines.append("## 【今天一句話】")
+    if taiex:
+        summary = f"加權指數{return_direction(taiex.point_change)} {abs(taiex.point_change):,.2f} 點，收在 {taiex.close:,.2f} 點（{taiex.change_pct:+.2f}%）"
+        if taiex.turnover_ntd_billions is not None:
+            summary += f"；成交金額 {taiex.turnover_ntd_billions:,.2f} 億台幣"
+        if taiex.advancing is not None and taiex.declining is not None:
+            summary += f"，上漲／下跌家數 {taiex.advancing}/{taiex.declining}"
+        lines.append(f"- {summary}。")
+    elif draft.drivers:
+        lines.append(f"- {_reader_evidence_line(draft.drivers[0]) or draft.drivers[0]}")
+    else:
+        lines.append("- 官方收盤行情已完成驗證；未取得足以支持額外市場判讀的資料。")
+    lines.append("")
 
-    # Render all price references in table format to guarantee table formatting and symbol provenance
+    lines.append("## 【市場】")
+
+    # Keep the compact table: every public numeric price remains tied to its quote observation.
     lines.append("| 標的 | 最新報價 | 漲跌幅 | 狀態 |")
     lines.append("|---|---:|---:|---|")
     for ref in draft.price_references:
@@ -748,7 +759,6 @@ def _render_tw_close_report(draft: MarketReportDraft, context: MarketContext) ->
         lines.append(f"| {display} | {price_str} | {obs.change_pct:+.2f}% | {session_label} |")
     lines.append("")
 
-    # Today's market character & stats
     if taiex:
         char_lines = derive_taiex_intraday_character(taiex)
         for cl in char_lines:
@@ -765,9 +775,30 @@ def _render_tw_close_report(draft: MarketReportDraft, context: MarketContext) ->
         if taiex.advancing is not None and taiex.declining is not None:
             unchanged_str = f"、平盤 {taiex.unchanged}" if taiex.unchanged is not None else ""
             lines.append(f"- 大盤廣度：上漲 {taiex.advancing} 家、下跌 {taiex.declining} 家{unchanged_str}。")
-        lines.append("")
+    usd_obs = context.quotes.get("USDTWD") or context.macro_observations.get("USDTWD")
+    if usd_obs and usd_obs.quality_status == "VALID":
+        fx_dir = usd_twd_direction_label(usd_obs.change_pct)
+        lines.append(f"- USD/TWD：{usd_obs.price:.3f}（{usd_obs.change_pct:+.2f}%），新台幣{fx_dir}。")
+    lines.append("")
 
-    # Section 2: 法人與資金 (Institutional & Liquidity) - omit if no data
+    lines.append("## 【今天盤面重點】")
+    component_summaries = []
+    weight_symbols = ["2330", "2317", "2454", "2308", "2303", "2382", "3711"]
+    for sym in weight_symbols:
+        obs = context.quotes.get(sym)
+        if obs and obs.quality_status == "VALID":
+            spec = resolve_instrument(sym)
+            component_summaries.append(f"{spec.display_name} ({sym}) {obs.change_pct:+.2f}%")
+    if component_summaries:
+        lines.append(f"- 權值股：{'、'.join(component_summaries[:5])}。")
+    if "2330" in context.quotes and context.quotes["2330"].quality_status == "VALID":
+        q2330 = context.quotes["2330"]
+        delta = round(q2330.price - q2330.previous_regular_close, 2)
+        lines.append(f"- 台積電 (2330) 單日{return_direction(delta)} {abs(delta):,.2f} 元（{q2330.change_pct:+.2f}%）。")
+    for item in draft.drivers:
+        if rendered := _reader_evidence_line(item):
+            lines.append(f"- {rendered}")
+
     if inst and any(v is not None for v in (
         inst.foreign_buy_sell_ntd_billions,
         inst.investment_trust_buy_sell_ntd_billions,
@@ -775,9 +806,6 @@ def _render_tw_close_report(draft: MarketReportDraft, context: MarketContext) ->
         inst.total_buy_sell_ntd_billions,
         inst.foreign_futures_net_oi,
     )):
-        lines.append(f"## {sec_num}. 法人與資金")
-        sec_num += 1
-
         flows_parts = []
         if inst.foreign_buy_sell_ntd_billions is not None:
             act = "買超" if inst.foreign_buy_sell_ntd_billions >= 0 else "賣超"
@@ -805,78 +833,37 @@ def _render_tw_close_report(draft: MarketReportDraft, context: MarketContext) ->
             else:
                 lines.append(f"- 台指期部位：外資留倉為{pos_str}。")
 
-        usd_obs = context.quotes.get("USDTWD") or context.macro_observations.get("USDTWD")
-        if usd_obs and usd_obs.quality_status == "VALID":
-            fx_dir = usd_twd_direction_label(usd_obs.change_pct)
-            lines.append(f"- 匯率動態：USD/TWD 收在 {usd_obs.price:.3f}（變動 {usd_obs.change_pct:+.2f}%，新台幣{fx_dir}）。")
-        lines.append("")
-
-    # Section 3: 權值與族群 (Key Components & Sectors)
-    lines.append(f"## {sec_num}. 權值與族群")
-    sec_num += 1
-
-    component_summaries = []
-    weight_symbols = ["2330", "2317", "2454", "2308", "2303", "2382", "3711"]
-    for sym in weight_symbols:
-        obs = context.quotes.get(sym)
-        if obs and obs.quality_status == "VALID":
-            spec = resolve_instrument(sym)
-            component_summaries.append(f"{spec.display_name} ({sym}) {obs.price:,.2f} ({obs.change_pct:+.2f}%)")
-
-    if component_summaries:
-        lines.append(f"- 權值表現：{'、'.join(component_summaries[:5])}。")
-
-    if "2330" in context.quotes and context.quotes["2330"].quality_status == "VALID":
-        q2330 = context.quotes["2330"]
-        delta = round(q2330.price - q2330.previous_regular_close, 2)
-        dir_t = return_direction(delta)
-        lines.append(f"- 台積電 (2330) 單日{dir_t} {abs(delta):,.2f} 元（{q2330.change_pct:+.2f}%）。")
-
     if draft.rotation and not any(ph in draft.rotation for ph in ("僅列 verified quote", "弱資料模組不硬填")):
         lines.append(f"- 族群輪動：{draft.rotation}")
     lines.append("")
 
-    # Section 4: 今日關鍵驅動 (Top Market Drivers) - omit if no drivers
-    if draft.drivers:
-        lines.append(f"## {sec_num}. 今日關鍵驅動")
-        sec_num += 1
-        for item in draft.drivers:
-            if rendered := _reader_evidence_line(item):
-                lines.append(f"- {rendered}")
-        lines.append("")
-
-    # Section 5: 相較昨日 (What Changed Since Yesterday) - omit if no changes
     if draft.material_changes:
         previous_date = (
             taiex.previous_session_date if taiex and taiex.previous_session_date
             else get_previous_completed_session_date("TW", context.market_date)
         )
-        lines.append(f"## {sec_num}. 相較前一交易日（{previous_date}）")
-        sec_num += 1
+        lines.append(f"## 【相較前一交易日 {previous_date}】")
         for item in draft.material_changes:
             if rendered := _reader_evidence_line(item):
                 lines.append(f"- {rendered}")
         lines.append("")
 
-    # Section 6: 明日觀察 (Tomorrow's Watch Signals) - omit if no watch signals
+    if draft.portfolio_section:
+        lines.append("## 【我的持股】")
+        lines.append(f"- {draft.portfolio_section.summary}")
+        lines.append("- 今日無法可靠計算整體持股報酬，因此不做相對績效判斷。")
+        lines.append("")
+
     clean_watch = [w for w in draft.watch_signals if "等待下一份" not in w]
     if clean_watch:
-        lines.append(f"## {sec_num}. 明日觀察")
-        sec_num += 1
+        lines.append("## 【明日觀察】")
         for item in clean_watch:
             lines.append(f"- {item}")
         lines.append("")
 
-    # Section 7: 資料說明 (Data Notes)
     if context.degraded_mode:
-        lines.append(f"## {sec_num}. 資料說明")
-        sec_num += 1
+        lines.append("## 【資料說明】")
         lines.append("- 部分外部即時新聞檢索受限，本報告行情數據均以交易所已驗證收盤價為準。")
-        lines.append("")
-
-    if draft.portfolio_section:
-        lines.append(f"## {sec_num}. 持股資料狀態")
-        lines.append(f"- {draft.portfolio_section.summary}")
         lines.append("")
 
     return "\n".join(lines).strip()

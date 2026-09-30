@@ -7,6 +7,7 @@
 - Added official TWSE MI_INDEX/BFI82U ingestion for turnover, breadth, and three institutional flows with current/prior exchange-session dates and source URLs. Added Coinbase Exchange as a registered BONK fallback after Yahoo/CoinGecko; it retains timestamp and provider provenance. Taiwan-close Telegram output translates evidence labels, uses the prior exchange session date, treats zero return as `持平`, and omits unproven round-number levels.
 - Local verification: full non-live suite 154 PASS; four-report dry run PASS; Python compile, workflow YAML/Vercel JSON parsing, and `git diff --check` PASS. PIOS remains a read-only source; no holdings were edited.
 - Production artifact inspection then found that the validated TWSE MI_INDEX summary was not also represented in the canonical quote-observation collection, causing the renderer to label TAIEX unavailable. Added a provenance-preserving `twse_mi_index` TAIEX observation and named quote, with a regression test for the exact Taiwan-close build path. Full suite now passes 155 tests; compile and diff checks pass.
+- Reworked the Taiwan-close public renderer into the Telegram scan structure: one-sentence summary, market, key points, prior-session deltas, holdings status, and next-session watch items. It retains quote/numeric provenance checks, omits the private holdings section when no portfolio context exists, and keeps aggregate portfolio-relative performance fail-closed when evidence is insufficient.
 
 ## 2026-09-24
 

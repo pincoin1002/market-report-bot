@@ -372,7 +372,7 @@ class ReportStructuralValidationTest(unittest.TestCase):
         self.assertNotIn("1,485", telegram_output)
 
         # C. No nested report (exactly 1 bold title line in telegram)
-        self.assertEqual(telegram_output.count("台股收盤日報 2026-09-17"), 1)
+        self.assertEqual(telegram_output.count("📊 台股收盤｜2026-09-17"), 1)
 
         # D. No diagnostic tokens
         for token in ("VALID", "PARTIAL", "DATA_BLOCKED", "DATE_MISMATCH", "MarketContext"):
@@ -390,13 +390,14 @@ class ReportStructuralValidationTest(unittest.TestCase):
         for ph in ("等待下一份", "僅列 verified quote", "弱資料模組不硬填"):
             self.assertNotIn(ph, telegram_output)
 
-        # H. Verify all 6 core sections exist
-        self.assertIn("1. 今日市場", telegram_output)
-        self.assertIn("2. 法人與資金", telegram_output)
-        self.assertIn("3. 權值與族群", telegram_output)
-        self.assertIn("4. 今日關鍵驅動", telegram_output)
-        self.assertIn("5. 相較前一交易日（2026-09-16）", telegram_output)
-        self.assertIn("6. 明日觀察", telegram_output)
+        # H. Taiwan-close Telegram uses the reader-facing scan structure.
+        self.assertIn("【今天一句話】", telegram_output)
+        self.assertIn("【市場】", telegram_output)
+        self.assertIn("【今天盤面重點】", telegram_output)
+        self.assertIn("【相較前一交易日 2026-09-16】", telegram_output)
+        # Holdings is intentionally omitted when no private portfolio context exists.
+        self.assertNotIn("【我的持股】", telegram_output)
+        self.assertIn("【明日觀察】", telegram_output)
 
         # I. Character length is within expected institutional brief length (~700 - 1300 chars)
         char_count = len(rendered)

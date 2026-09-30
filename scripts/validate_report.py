@@ -22,7 +22,7 @@ log = logging.getLogger("validate")
 
 REQUIRED_SECTIONS = {
     "tw_open": [("Executive Market State", "市場核心概況")],
-    "tw_close": [("今日市場", "Executive Market State", "市場核心概況")],
+    "tw_close": [("【市場】", "今日市場", "Executive Market State", "市場核心概況")],
     "us_open": [("Executive Market State", "市場核心概況")],
     "us_close": [("Executive Market State", "市場核心概況")],
 }
@@ -292,7 +292,7 @@ def validate_numeric_provenance(report_text: str, context: MarketContext) -> tup
         if line_s.startswith("## ") and any(k in line_s for k in ("Top Market Drivers", "今日走勢", "Rotation", "輪動", "Events", "事件", "今日關鍵驅動", "相較昨日", "相較前一交易日", "明日觀察")):
             in_narrative = True
             continue
-        elif line_s.startswith("## ") and any(k in line_s for k in ("Executive Market State", "市場核心概況", "What Changed", "今日市場", "法人與資金", "權值與族群", "持股資料狀態")):
+        elif line_s.startswith("## ") and any(k in line_s for k in ("Executive Market State", "市場核心概況", "What Changed", "今日市場", "法人與資金", "權值與族群", "持股資料狀態", "【市場】", "【我的持股】")):
             in_narrative = False
             continue
         elif line_s.startswith("# "):

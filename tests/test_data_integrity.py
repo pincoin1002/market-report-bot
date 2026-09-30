@@ -1011,7 +1011,7 @@ class SafetyAndWorkflowTest(unittest.TestCase):
         draft = build_public_draft(context, narrative)
         self.assertTrue(all("台積電領軍" not in item for item in draft.drivers))
         self.assertTrue(all("99999" not in item for item in draft.drivers))
-        self.assertEqual(draft.rendered_markdown.count("台股收盤日報"), 1)
+        self.assertEqual(draft.rendered_markdown.count("📊 台股收盤"), 1)
         self.assertNotIn("指數與市場概況", draft.rendered_markdown)
         self.assertNotIn("99999", draft.rendered_markdown)
 
