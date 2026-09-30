@@ -207,6 +207,10 @@ def validate_numeric_provenance(report_text: str, context: MarketContext) -> tup
     for p in context.market_date.split("-"):
         if p.isdigit():
             allowed_numbers.add(float(p))
+    if context.taiex_summary and context.taiex_summary.previous_session_date:
+        for p in context.taiex_summary.previous_session_date.split("-"):
+            if p.isdigit():
+                allowed_numbers.add(float(p))
     for n in range(1, 10):
         allowed_numbers.add(float(n))
     for symbol, obs in context.quotes.items():

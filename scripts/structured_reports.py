@@ -7,11 +7,12 @@ import re
 from dataclasses import dataclass
 from datetime import datetime
 
-from market_session import get_previous_completed_session_date, human_session_label
+from market_session import get_previous_completed_session_date, get_target_market_date, human_session_label
 from models import (
     MarketContext, MarketReportDraft, OptionalModule, PortfolioActionBrief,
     PortfolioActionItem, PortfolioContext, PriceReference, Trigger,
 )
+from portfolio_analytics import calculate_portfolio_analytics, format_portfolio_section
 from trigger_engine import technical_trigger
 
 ROUNDING_TOLERANCE = 0.005
@@ -82,23 +83,36 @@ def _reader_evidence_line(line: str) -> str | None:
     """Translate internal evidence labels at the final Telegram boundary."""
     match = re.match(r"^\[(OBSERVED|SUPPORTED_ASSOCIATION|UNRESOLVED)\]\s*(.*)$", line)
     if not match:
-        return line
-    classification, text = match.groups()
-    if classification != "UNRESOLVED":
-        return text
-    if text.startswith("Portfolio"):
-        return None
-    subject = text.split("：", 1)[0]
-    translations = {
-        "法人買賣超、成交金額、市場廣度": "官方市場統計尚未通過驗證，暫不判讀。",
-        "成交金額": "今日官方成交統計尚未通過驗證，暫不判讀。",
-        "市場廣度": "今日官方廣度統計尚未通過驗證，暫不判讀。",
-        "三大法人": "今日官方法人資料尚未通過驗證，暫不判讀。",
-        "TAIEX session-over-session": "缺少已驗證加權指數收盤，暫不判讀。",
-        "權值單日變化": "缺少已驗證權值收盤，暫不判讀。",
-        "USD/TWD session-over-session": "缺少已驗證匯率收盤，暫不判讀。",
-    }
-    return f"{subject}：{translations.get(subject, '今日資料尚未通過驗證，暫不判讀。')}"
+        clean = line
+    else:
+        classification, text = match.groups()
+        if classification != "UNRESOLVED":
+            clean = text
+        elif text.startswith("Portfolio"):
+            return None
+        else:
+            subject = text.split("：", 1)[0]
+            translations = {
+                "法人買賣超、成交金額、市場廣度": "官方市場統計尚未通過驗證，暫不判讀。",
+                "成交金額": "今日官方成交統計尚未通過驗證，暫不判讀。",
+                "市場廣度": "今日官方廣度統計尚未通過驗證，暫不判讀。",
+                "三大法人": "今日官方法人資料尚未通過驗證，暫不判讀。",
+                "加權指數": "缺少已驗證加權指數收盤，暫不判讀。",
+                "TAIEX": "缺少已驗證加權指數收盤，暫不判讀。",
+                "權值單日變化": "缺少已驗證權值收盤，暫不判讀。",
+                "USD/TWD": "缺少已驗證匯率收盤，暫不判讀。",
+            }
+            clean = f"{subject}：{translations.get(subject, '今日資料尚未通過驗證，暫不判讀。')}"
+
+    # Strip forbidden engineering terms if present
+    clean = clean.replace("session-over-session", "單日變化")
+    clean = clean.replace("前一已完成 TWSE session", "前一交易日")
+    clean = clean.replace("較前一 session", "較前一交易日")
+    clean = clean.replace("；比較基準為前一正式收盤。", "。")
+    clean = clean.replace("；皆以各自前一正式收盤為基準。", "。")
+    clean = clean.replace("；此為關聯性觀察，未推定單一因果。", "。")
+    clean = clean.replace("億台幣", "億元")
+    return clean.strip()
 
 
 def select_report_symbols(context: MarketContext) -> list[str]:
@@ -190,16 +204,16 @@ def derive_state_changes(context: MarketContext) -> list[str]:
         prev = inst.foreign_buy_sell_prev_ntd_billions
         if prev is not None:
             if prev < 0 and curr > 0:
-                changes.append(f"外資現貨由賣轉買：前日賣超 {abs(prev):.2f} 億 $\\to$ 今日買超 {curr:.2f} 億台幣。")
+                changes.append(f"外資現貨由賣轉買：前日賣超 {abs(prev):.2f} 億 $\\to$ 今日買超 {curr:.2f} 億元。")
             elif prev > 0 and curr < 0:
-                changes.append(f"外資現貨由買轉賣：前日買超 {prev:.2f} 億 $\\to$ 今日賣超 {abs(curr):.2f} 億台幣。")
+                changes.append(f"外資現貨由買轉賣：前日買超 {prev:.2f} 億 $\\to$ 今日賣超 {abs(curr):.2f} 億元。")
             elif curr > 0 and curr > prev + 50:
-                changes.append(f"外資買超擴大：由 {prev:.2f} 億增至 {curr:.2f} 億台幣。")
+                changes.append(f"外資買超擴大：由 {prev:.2f} 億增至 {curr:.2f} 億元。")
             elif curr < 0 and curr < prev - 50:
-                changes.append(f"外資賣超擴大：由 {abs(prev):.2f} 億擴至 {abs(curr):.2f} 億台幣。")
+                changes.append(f"外資賣超擴大：由 {abs(prev):.2f} 億擴至 {abs(curr):.2f} 億元。")
         else:
             action = "買超" if curr >= 0 else "賣超"
-            changes.append(f"外資現貨單日{action} {abs(curr):.2f} 億台幣。")
+            changes.append(f"外資現貨單日{action} {abs(curr):.2f} 億元。")
 
     if inst and inst.foreign_futures_net_oi is not None:
         oi = inst.foreign_futures_net_oi
@@ -217,7 +231,7 @@ def derive_state_changes(context: MarketContext) -> list[str]:
         t_delta = round(curr_t - prev_t, 2)
         if abs(t_delta) >= 100:
             dir_str = "擴增" if t_delta > 0 else "萎縮"
-            changes.append(f"成交量{dir_str}：由前日 {prev_t:,.2f} 億{dir_str} {abs(t_delta):,.2f} 億至 {curr_t:,.2f} 億台幣。")
+            changes.append(f"成交量{dir_str}：由前日 {prev_t:,.2f} 億{dir_str} {abs(t_delta):,.2f} 億至 {curr_t:,.2f} 億元。")
 
     if taiex and taiex.advancing is not None and taiex.declining is not None:
         if taiex.advancing > taiex.declining * 1.5:
@@ -313,11 +327,11 @@ def derive_evidence_supported_drivers(context: MarketContext) -> list[str]:
         ))
     if len(leaders) >= 2:
         if taiex and taiex.change_pct < 0:
-            association = "；大型權值逆勢上漲，部分抵銷權值跌勢；此為關聯性觀察，未推定單一因果。"
+            association = "；少數大型權值逆勢上漲，部分抵銷權值跌勢；此為關聯性觀察，未推定單一因果。"
         elif taiex and taiex.change_pct > 0:
             association = "；多個大型權值同步上漲，與加權指數表現一致；此為關聯性觀察，未推定單一因果。"
         else:
-            association = "；多個大型權值同步上漲；此為關聯性觀察，未推定單一因果。"
+            association = "；大型權值表現穩健；此為關聯性觀察，未推定單一因果。"
         candidates.append(EvidenceCandidate(
             "SUPPORTED_ASSOCIATION",
             sum(abs(observation.change_pct) for _, observation in leaders[:3]),
@@ -353,21 +367,13 @@ def derive_evidence_supported_drivers(context: MarketContext) -> list[str]:
 
 
 def derive_tw_session_deltas(context: MarketContext) -> list[str]:
-    """Compare only the current and previous completed TWSE sessions.
-
-    The quote contract provides price and ``previous_regular_close``.  Fields
-    without a verified previous-session statistic are kept explicit rather
-    than silently becoming prose or an invented delta.
-    """
+    """Compare only the current and previous completed TWSE sessions."""
     if context.report_type != "tw_close":
         return []
     deltas: list[str] = []
     taiex = _valid_quote(context, "TAIEX")
+
     if taiex:
-        # Calendar resolution is deliberately performed even though the public
-        # line names the prior completed session rather than printing a date.
-        # This prevents a weekend/holiday from being treated as a session.
-        get_previous_completed_session_date("TW", taiex.market_date)
         point_delta = taiex.price - taiex.previous_regular_close
         deltas.append(
             f"[OBSERVED] TAIEX session-over-session：收在 {taiex.price:,.2f} 點，較前一已完成 TWSE session "
@@ -730,7 +736,7 @@ def _render_tw_close_report(draft: MarketReportDraft, context: MarketContext) ->
     if taiex:
         summary = f"加權指數{return_direction(taiex.point_change)} {abs(taiex.point_change):,.2f} 點，收在 {taiex.close:,.2f} 點（{taiex.change_pct:+.2f}%）"
         if taiex.turnover_ntd_billions is not None:
-            summary += f"；成交金額 {taiex.turnover_ntd_billions:,.2f} 億台幣"
+            summary += f"；成交金額 {taiex.turnover_ntd_billions:,.2f} 億元"
         if taiex.advancing is not None and taiex.declining is not None:
             summary += f"，上漲／下跌家數 {taiex.advancing}/{taiex.declining}"
         lines.append(f"- {summary}。")
@@ -771,7 +777,7 @@ def _render_tw_close_report(draft: MarketReportDraft, context: MarketContext) ->
         if taiex.high is not None and taiex.low is not None:
             stats_parts.append(f"區間 {taiex.low:,.2f}–{taiex.high:,.2f}")
         if taiex.turnover_ntd_billions is not None:
-            stats_parts.append(f"成交量 {taiex.turnover_ntd_billions:,.2f} 億台幣")
+            stats_parts.append(f"成交金額 {taiex.turnover_ntd_billions:,.2f} 億元")
         if stats_parts:
             lines.append(f"- 市場量價：{'、'.join(stats_parts)}。")
         if taiex.advancing is not None and taiex.declining is not None:
@@ -819,16 +825,16 @@ def _render_tw_close_report(draft: MarketReportDraft, context: MarketContext) ->
         flows_parts = []
         if inst.foreign_buy_sell_ntd_billions is not None:
             act = "買超" if inst.foreign_buy_sell_ntd_billions >= 0 else "賣超"
-            flows_parts.append(f"外資{act} {abs(inst.foreign_buy_sell_ntd_billions):.2f} 億")
+            flows_parts.append(f"外資{act} {abs(inst.foreign_buy_sell_ntd_billions):.2f} 億元")
         if inst.investment_trust_buy_sell_ntd_billions is not None:
             act = "買超" if inst.investment_trust_buy_sell_ntd_billions >= 0 else "賣超"
-            flows_parts.append(f"投信{act} {abs(inst.investment_trust_buy_sell_ntd_billions):.2f} 億")
+            flows_parts.append(f"投信{act} {abs(inst.investment_trust_buy_sell_ntd_billions):.2f} 億元")
         if inst.dealer_buy_sell_ntd_billions is not None:
             act = "買超" if inst.dealer_buy_sell_ntd_billions >= 0 else "賣超"
-            flows_parts.append(f"自營商{act} {abs(inst.dealer_buy_sell_ntd_billions):.2f} 億")
+            flows_parts.append(f"自營商{act} {abs(inst.dealer_buy_sell_ntd_billions):.2f} 億元")
         if inst.total_buy_sell_ntd_billions is not None:
             act = "買超" if inst.total_buy_sell_ntd_billions >= 0 else "賣超"
-            flows_parts.append(f"三大法人合計{act} {abs(inst.total_buy_sell_ntd_billions):.2f} 億台幣")
+            flows_parts.append(f"三大法人合計{act} {abs(inst.total_buy_sell_ntd_billions):.2f} 億元")
 
         if flows_parts:
             lines.append(f"- 三大法人現貨：{'，'.join(flows_parts)}。")
@@ -859,15 +865,35 @@ def _render_tw_close_report(draft: MarketReportDraft, context: MarketContext) ->
         lines.append("")
 
     if draft.portfolio_section:
-        lines.append("## 【我的持股】")
-        lines.append(f"- {draft.portfolio_section.summary}")
-        lines.append("- 今日無法可靠計算整體持股報酬，因此不做相對績效判斷。")
+        prev_us_date = get_target_market_date("tw_close", "US", now=context.generated_at)
+        expected_dates = {"TW": context.market_date, "US": prev_us_date}
+        taiex_ret = taiex.change_pct if taiex else None
+        p_ctx = getattr(context, "portfolio_context", None)
+        if p_ctx is None:
+            try:
+                from portfolio_context import load_authoritative_portfolio
+                p_ctx = load_authoritative_portfolio()
+            except Exception:
+                p_ctx = None
+
+        analytics = calculate_portfolio_analytics(
+            p_ctx,
+            context.quotes,
+            taiex_change_pct=taiex_ret,
+            expected_dates=expected_dates,
+        )
+        if analytics.status == "SUCCESS":
+            lines.extend(format_portfolio_section(analytics, summary=draft.portfolio_section.summary))
+        else:
+            lines.append("## 【我的持股】")
+            lines.append(f"- {draft.portfolio_section.summary}")
+            lines.append("- 今日無法可靠計算整體持股報酬，因此不做相對績效判斷。")
         lines.append("")
 
     clean_watch = [w for w in draft.watch_signals if "等待下一份" not in w]
     if clean_watch:
         lines.append("## 【明日觀察】")
-        for item in clean_watch:
+        for item in clean_watch[:3]:
             lines.append(f"- {item}")
         lines.append("")
 

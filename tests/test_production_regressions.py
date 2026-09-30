@@ -444,12 +444,14 @@ class Reproduction20260929Test(unittest.TestCase):
         for s in crypto_syms:
             spec = resolve_instrument(s)
             provider = "coinbase_exchange" if s == "BONK" else "coingecko"
+            price = 1.0 if "USD" in s else (60000.0 if s == "BTC" else (2600.0 if s == "ETH" else (0.000012 if s == "BONK" else 0.15)))
+            prev = price / 1.001
             obs = QuoteObservation(
                 quote_id=f"{s}:2026-09-29T06:00:00Z:REGULAR:{provider}", instrument_id=s, canonical_symbol=s,
-                price=1.0 if "USD" in s else (60000.0 if s == "BTC" else 0.000012), currency="USD", session="REGULAR",
+                price=price, currency="USD", session="REGULAR",
                 market_date="2026-09-29", observed_at=retrieved_at, retrieved_at=retrieved_at,
                 provider=provider, quote_type="TRADE", is_delayed=True, quality_status="VALID",
-                previous_regular_close=1.0 if "USD" in s else 59000.0, change_pct=0.1, market="CRYPTO",
+                previous_regular_close=prev, change_pct=0.1, market="CRYPTO",
             )
             quotes[s] = obs
             named_quotes[s] = NamedQuote(name=spec.display_name, currency="USD", symbol=s, price=obs.price, prev_close=obs.previous_regular_close, change_pct=0.1, data_date="2026-09-29")
@@ -507,7 +509,11 @@ class Reproduction20260929Test(unittest.TestCase):
         self.assertIn("台積電 (2330) 單日持平（+0.00%）。", report_text)
         self.assertIn("【相較前一交易日 2026-09-24】", report_text)
         self.assertIn("行情覆蓋：23/23 FULL", report_text)
-        self.assertIn("今日無法可靠計算整體持股報酬，因此不做相對績效判斷。", report_text)
+        self.assertIn("總資產：NT$", report_text)
+        self.assertIn("本次組合變動：", report_text)
+        self.assertIn("台股部位：", report_text)
+        self.assertIn("美股部位：", report_text)
+        self.assertIn("Crypto：", report_text)
         self.assertNotIn("OBSERVED", report_text)
         self.assertNotIn("SUPPORTED_ASSOCIATION", report_text)
         self.assertNotIn("UNRESOLVED", report_text)
@@ -517,6 +523,183 @@ class Reproduction20260929Test(unittest.TestCase):
 
         ok, errors = validate_rendered_report_structure(report_text, "tw_close")
         self.assertTrue(ok, f"Structural validation errors: {errors}")
+
+
+class PortfolioAnalyticsContractSuiteTest(unittest.TestCase):
+    def setUp(self):
+        from portfolio_context import load_authoritative_portfolio
+        self.portfolio = load_authoritative_portfolio()
+        self.retrieved_at = datetime(2026, 9, 29, 13, 30, tzinfo=timezone.utc)
+
+    def _build_valid_23_quotes(self):
+        quotes = {}
+        # TW quotes (6)
+        tw_syms = ["0050", "006208", "1519", "2327", "2330", "2383"]
+        for s in tw_syms:
+            quotes[s] = QuoteObservation(
+                quote_id=f"{s}:2026-09-29:REGULAR:twse", instrument_id=s, canonical_symbol=s,
+                price=100.0, currency="TWD", session="REGULAR", market_date="2026-09-29",
+                observed_at=self.retrieved_at, retrieved_at=self.retrieved_at,
+                provider="twse", quote_type="TRADE", is_delayed=False, quality_status="VALID",
+                previous_regular_close=99.0, change_pct=1.01, market="TW",
+            )
+        # US quotes (11)
+        us_syms = ["AMZN", "DRAM", "GOOG", "IBKR", "MU", "NVDA", "QQQ", "TSLA", "VOO", "VST", "VTI"]
+        for s in us_syms:
+            quotes[s] = QuoteObservation(
+                quote_id=f"{s}:2026-09-28:REGULAR:yfinance", instrument_id=s, canonical_symbol=s,
+                price=200.0, currency="USD", session="REGULAR", market_date="2026-09-28",
+                observed_at=self.retrieved_at, retrieved_at=self.retrieved_at,
+                provider="yfinance", quote_type="TRADE", is_delayed=False, quality_status="VALID",
+                previous_regular_close=196.0, change_pct=2.04, market="US",
+            )
+        # Crypto quotes (6)
+        crypto_syms = ["BTC", "ETH", "USDC", "USDT", "BONK", "SXT"]
+        for s in crypto_syms:
+            price = 60000.0 if s == "BTC" else (2600.0 if s == "ETH" else (0.000012 if s == "BONK" else (0.15 if s == "SXT" else 1.0)))
+            quotes[s] = QuoteObservation(
+                quote_id=f"{s}:2026-09-29T06:00:00Z:REGULAR:coingecko", instrument_id=s, canonical_symbol=s,
+                price=price, currency="USD", session="REGULAR", market_date="2026-09-29",
+                observed_at=self.retrieved_at, retrieved_at=self.retrieved_at,
+                provider="coingecko", quote_type="TRADE", is_delayed=False, quality_status="VALID",
+                previous_regular_close=price * 0.99, change_pct=1.01, market="CRYPTO",
+            )
+        # FX quote
+        quotes["USDTWD"] = QuoteObservation(
+            quote_id="USDTWD:2026-09-29:REGULAR:yfinance", instrument_id="USDTWD", canonical_symbol="USDTWD",
+            price=31.800, currency="TWD", session="REGULAR", market_date="2026-09-29",
+            observed_at=self.retrieved_at, retrieved_at=self.retrieved_at,
+            provider="yfinance", quote_type="TRADE", is_delayed=False, quality_status="VALID",
+            previous_regular_close=31.780, change_pct=0.06, market="FOREX",
+        )
+        return quotes
+
+    def test_complete_23_valuation_math_and_bp_contributions(self):
+        from portfolio_analytics import calculate_portfolio_analytics
+        quotes = self._build_valid_23_quotes()
+        expected_dates = {"TW": "2026-09-29", "US": "2026-09-28"}
+        res = calculate_portfolio_analytics(self.portfolio, quotes, taiex_change_pct=-0.82, expected_dates=expected_dates)
+        self.assertEqual(res.status, "SUCCESS")
+        self.assertEqual(res.comparable_positions, 23)
+        self.assertEqual(res.expected_positions, 23)
+        self.assertGreater(res.total_valuation_twd, 0)
+        self.assertGreater(res.previous_valuation_twd, 0)
+        self.assertEqual(res.daily_pl_twd, res.total_valuation_twd - res.previous_valuation_twd)
+
+        # Verify sum of basis point contributions equals total return in bp (within rounding tolerance)
+        total_bp_from_positions = sum(p.contribution_bp for p in res.positions)
+        expected_return_bp = res.daily_return_pct * 100
+        self.assertAlmostEqual(total_bp_from_positions, expected_return_bp, delta=0.5)
+
+        # Asset class weights sum to 100%
+        weight_sum = res.tw_equities_weight + res.us_equities_weight + res.crypto_weight
+        self.assertAlmostEqual(weight_sum, 100.0, delta=0.1)
+
+        # P/L sum equals total daily P/L
+        pl_sum = res.tw_equities_pl_twd + res.us_equities_pl_twd + res.crypto_pl_twd
+        self.assertAlmostEqual(pl_sum, res.daily_pl_twd, delta=1.0)
+
+        # TAIEX comparison
+        self.assertAlmostEqual(res.taiex_diff_pct, round(res.daily_return_pct - (-0.82), 2), places=2)
+
+    def test_missing_fx_fails_closed(self):
+        from portfolio_analytics import calculate_portfolio_analytics
+        quotes = self._build_valid_23_quotes()
+        del quotes["USDTWD"]
+        expected_dates = {"TW": "2026-09-29", "US": "2026-09-28"}
+        res = calculate_portfolio_analytics(self.portfolio, quotes, taiex_change_pct=-0.82, expected_dates=expected_dates)
+        self.assertEqual(res.status, "MISSING_FX")
+
+    def test_incomplete_quotes_fails_closed(self):
+        from portfolio_analytics import calculate_portfolio_analytics
+        quotes = self._build_valid_23_quotes()
+        # Remove US quotes
+        for s in ["AMZN", "DRAM", "GOOG"]:
+            del quotes[s]
+        expected_dates = {"TW": "2026-09-29", "US": "2026-09-28"}
+        res = calculate_portfolio_analytics(self.portfolio, quotes, taiex_change_pct=-0.82, expected_dates=expected_dates)
+        self.assertEqual(res.status, "INCOMPLETE_QUOTES")
+
+    def test_incomplete_us_session_date_mismatch_fails_closed(self):
+        from portfolio_analytics import calculate_portfolio_analytics
+        quotes = self._build_valid_23_quotes()
+        quotes["AMZN"] = quotes["AMZN"].model_copy(update={"market_date": "2026-09-27"})
+        expected_dates = {"TW": "2026-09-29", "US": "2026-09-28"}
+        res = calculate_portfolio_analytics(self.portfolio, quotes, taiex_change_pct=-0.82, expected_dates=expected_dates)
+        self.assertEqual(res.status, "INCOMPLETE_QUOTES")
+        self.assertIn("22/23", res.reason)
+
+    def test_missing_quantity_fails_closed(self):
+        from models import PortfolioContext, PositionContext
+        from portfolio_analytics import calculate_portfolio_analytics
+        quotes = self._build_valid_23_quotes()
+        bad_pos = [PositionContext.model_construct(
+            position_id="test-pos", instrument_id="2330", ticker="2330",
+            name="台積電", currency="TWD", quantity=0.0, market="TW", asset_type="EQUITY",
+        )]
+        bad_portfolio = PortfolioContext(source="PIOS_TEST", positions=bad_pos)
+        res = calculate_portfolio_analytics(bad_portfolio, quotes)
+        self.assertEqual(res.status, "MISSING_QUANTITY")
+
+
+class TelegramReadabilityAndForbiddenTokensTest(unittest.TestCase):
+    def test_forbidden_tokens_scrubbed_from_report_and_telegram(self):
+        from generate_report import _clean_markdown_for_telegram_report
+        raw_markdown = (
+            "# 📊 台股收盤｜2026-09-29\n\n"
+            "## 【今天盤面重點】\n"
+            "- [OBSERVED] 加權指數：收在 47,631.96 點，較前一交易日下跌 392.64 點。\n"
+            "- [SUPPORTED_ASSOCIATION] 相對支撐：台達電 (2308) +3.00%；多個大型權值同步上漲，與加權指數表現一致；此為關聯性觀察，未推定單一因果。\n"
+            "- 成交金額：836.14 億台幣，較前一 session +73.02 億。\n"
+            "- TAIEX session-over-session：收在 47,631.96 點，較前一已完成 TWSE session -392.64 點；比較基準為前一正式收盤。\n"
+            "- [UNRESOLVED] 成交金額：缺少已驗證成交統計。\n"
+            "- Portfolio relative performance：UNRESOLVED（尚無滿足既有信心合約的跨幣別 canonical portfolio valuation evidence）。\n"
+        )
+        cleaned = _clean_markdown_for_telegram_report(raw_markdown)
+
+        forbidden_tokens = [
+            "OBSERVED",
+            "UNRESOLVED",
+            "SUPPORTED_ASSOCIATION",
+            "session-over-session",
+            "前一已完成 TWSE session",
+            "較前一 session",
+            "canonical",
+            "confidence contract",
+            "artifact",
+            "此為關聯性觀察，未推定單一因果",
+            "比較基準為前一正式收盤",
+            "億台幣",
+        ]
+        for token in forbidden_tokens:
+            self.assertNotIn(token, cleaned, f"Forbidden token '{token}' found in Telegram output")
+
+        self.assertIn("億元", cleaned)
+
+    def test_large_quote_table_pruned_on_telegram_to_scannable_movers(self):
+        from generate_report import _clean_markdown_for_telegram_report
+        table_markdown = (
+            "## 【市場】\n"
+            "| 標的 | 最新報價 | 漲跌幅 | 狀態 |\n"
+            "|---|---:|---:|---|\n"
+            "| 加權指數 (TAIEX) | 47,940.13 | +0.65% | 正式收盤 |\n"
+            "| 台積電 (2330) | 2,480.00 | +0.20% | 正式收盤 |\n"
+            "| 鴻海 (2317) | 251.5 | +0.40% | 正式收盤 |\n"
+            "| 聯發科 (2454) | 4,920.00 | +0.20% | 正式收盤 |\n"
+            "| 台達電 (2308) | 1,890.00 | +3.00% | 正式收盤 |\n"
+            "| 廣達 (2382) | 333.5 | -0.89% | 正式收盤 |\n"
+            "| 聯電 (2303) | 154.5 | +0.65% | 正式收盤 |\n"
+            "| 日月光投控 (3711) | 703.0 | +2.33% | 正式收盤 |\n"
+            "| 英業達 (2356) | 59.5 | +0.51% | 正式收盤 |\n"
+            "| 緯創 (3231) | 184.5 | -0.54% | 正式收盤 |\n"
+            "| 台光電 (2383) | 4,935.00 | +0.30% | 正式收盤 |\n"
+            "| 臻鼎-KY (4958) | 507.0 | +1.71% | 正式收盤 |\n"
+        )
+        cleaned = _clean_markdown_for_telegram_report(table_markdown)
+        lines = [line for line in cleaned.splitlines() if line.startswith("•")]
+        self.assertLessEqual(len(lines), 6)
+        self.assertTrue(any("TAIEX" in line for line in lines))
+        self.assertTrue(any("2308" in line for line in lines))
 
 
 if __name__ == "__main__":

@@ -363,12 +363,66 @@ def _split_message(text: str, max_len: int = 4096) -> list[str]:
 def _clean_markdown_for_telegram_report(text: str) -> str:
     """Format markdown report specifically to look beautiful, table-free, and header-clean on Telegram."""
     import re
-    # 1. Parse tables into structured bullet points
+
+    def _flush_table(headers: list[str], rows: list[list[str]], out_lines: list[str]):
+        if not headers or not rows:
+            return
+        is_quote_table = (
+            len(headers) >= 3 and headers[0] in ("標的", "Symbol", "代號", "股票")
+            and headers[1] in ("最新報價", "收盤價", "最新", "收盤", "Quote")
+        )
+        if not is_quote_table:
+            for parts in rows:
+                row_items = []
+                for header, val in zip(headers, parts):
+                    if val and val != "⚠️ 未取得" and val != "None":
+                        row_items.append(f"{header}: *{val}*")
+                if row_items:
+                    out_lines.append("• " + ", ".join(row_items))
+            return
+
+        # If table has more than 7 rows (like the 12-item watchlist dump):
+        if len(rows) > 7:
+            benchmark_kw = ("TAIEX", "加權指數", "2330", "台積電", "SPX", "S&P", "NDX", "Nasdaq", "納斯達克", "DJI", "道瓊", "SOX", "費半", "費城半導體", "NVDA", "輝達")
+            benchmark_rows = []
+            mover_candidates = []
+            for parts in rows:
+                name = parts[0]
+                price = parts[1]
+                chg_str = parts[2]
+                extra = " ｜ ".join(p for p in parts[3:] if p and p not in ("⚠️ 未取得", "None", "—"))
+                row_str = f"• *{name}*: {price} ({chg_str})" + (f" ｜ {extra}" if extra else "")
+                m = re.search(r'([+-]?\d+(?:\.\d+)?)%?', chg_str)
+                pct_val = abs(float(m.group(1))) if m else 0.0
+
+                if any(kw in name for kw in benchmark_kw):
+                    benchmark_rows.append(row_str)
+                else:
+                    mover_candidates.append((pct_val, row_str))
+
+            mover_candidates.sort(key=lambda x: x[0], reverse=True)
+            selected_movers = [r for val, r in mover_candidates if val >= 1.0]
+            if not selected_movers and mover_candidates:
+                selected_movers = [r for _, r in mover_candidates[:3]]
+
+            combined = benchmark_rows + [r for r in selected_movers if r not in benchmark_rows]
+            final_rows = combined[:6] if len(combined) > 6 else combined
+            out_lines.extend(final_rows)
+        else:
+            for parts in rows:
+                name = parts[0]
+                price = parts[1]
+                chg = parts[2]
+                extra = " ｜ ".join(p for p in parts[3:] if p and p not in ("⚠️ 未取得", "None", "—"))
+                row_str = f"• *{name}*: {price} ({chg})" + (f" ｜ {extra}" if extra else "")
+                out_lines.append(row_str)
+
     lines = text.splitlines()
     cleaned_lines = []
     in_table = False
     headers = []
-    
+    table_rows = []
+
     for line in lines:
         stripped = line.strip()
         # Detect table separator row (e.g. |---|---|)
@@ -380,32 +434,21 @@ def _clean_markdown_for_telegram_report(text: str) -> str:
             if not in_table:
                 # This is the header row
                 headers = parts
+                table_rows = []
                 in_table = True
                 cleaned_lines.append("")
                 continue
             else:
-                # This is a data row, convert to bulleted text
-                if (headers and len(headers) >= 3 and headers[0] in ("標的", "Symbol", "代號", "股票")
-                        and headers[1] in ("最新報價", "收盤價", "最新", "收盤", "Quote")):
-                    name = parts[0]
-                    price = parts[1]
-                    chg = parts[2]
-                    extra = " ｜ ".join(p for p in parts[3:] if p and p not in ("⚠️ 未取得", "None", "—"))
-                    row_str = f"• *{name}*: {price} ({chg})" + (f" ｜ {extra}" if extra else "")
-                    cleaned_lines.append(row_str)
-                    continue
-                row_items = []
-                for header, val in zip(headers, parts):
-                    if val and val != "⚠️ 未取得" and val != "None":
-                        row_items.append(f"{header}: *{val}*")
-                if row_items:
-                    cleaned_lines.append(f"• " + ", ".join(row_items))
+                table_rows.append(parts)
                 continue
         else:
             if in_table:
                 in_table = False
+                _flush_table(headers, table_rows, cleaned_lines)
+                headers = []
+                table_rows = []
                 cleaned_lines.append("")
-            
+
         # 2. Scrub headers wrapped with bold (e.g. ## **Title** -> *Title*)
         line = re.sub(r'^\s*#+\s*\**([^*]+)\**\s*$', r'*\1*', line)
         # 3. Scrub standard markdown headers (e.g. ## Title -> *Title*)
@@ -417,7 +460,33 @@ def _clean_markdown_for_telegram_report(text: str) -> str:
         line = line.replace("***", "*").replace("**", "*")
         cleaned_lines.append(line)
 
-    cleaned_text = "\n".join(cleaned_lines)
+    if in_table:
+        _flush_table(headers, table_rows, cleaned_lines)
+
+    # 6. Scrub forbidden engineering terms and drop unresolved diagnostic lines
+    filtered_lines = []
+    for line in cleaned_lines:
+        if "UNRESOLVED" in line:
+            continue
+        filtered_lines.append(line)
+
+    cleaned_text = "\n".join(filtered_lines)
+
+    forbidden_terms = [
+        "[OBSERVED] ", "[SUPPORTED_ASSOCIATION] ",
+        "[OBSERVED]", "[SUPPORTED_ASSOCIATION]",
+        "；此為關聯性觀察，未推定單一因果。", "；此為關聯性觀察，未推定單一因果",
+        "；比較基準為前一正式收盤。", "；比較基準為前一正式收盤",
+        "；皆以各自前一正式收盤為基準。", "；皆以各自前一正式收盤為基準",
+        "canonical", "confidence contract", "artifact",
+    ]
+    for ft in forbidden_terms:
+        cleaned_text = cleaned_text.replace(ft, "")
+    cleaned_text = cleaned_text.replace("session-over-session", "單日變化")
+    cleaned_text = cleaned_text.replace("前一已完成 TWSE session", "前一交易日")
+    cleaned_text = cleaned_text.replace("較前一 session", "較前一交易日")
+    cleaned_text = cleaned_text.replace("億台幣", "億元")
+
     # Collapse multiple blank lines
     cleaned_text = re.sub(r'\n{3,}', '\n\n', cleaned_text)
     return cleaned_text.strip()
