@@ -8,17 +8,20 @@ import os
 import time
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, time as clock_time, timezone
 from http.server import BaseHTTPRequestHandler
 from typing import Literal
 
 from zoneinfo import ZoneInfo
 
+from market_session import is_nyse_trading_day
+
 
 NY = ZoneInfo("America/New_York")
 UTC = timezone.utc
 INTENDED_HOUR = 8
-INTENDED_MINUTE = 55
+STAGING_START = clock_time(8, 0)
+STAGING_END = clock_time(9, 0)
 REPOSITORY = "pincoin1002/market-report-bot"
 WORKFLOW = "us-open.yml"
 SchedulerSlot = Literal["edt", "est"]
@@ -26,7 +29,7 @@ SchedulerSlot = Literal["edt", "est"]
 
 def intended_scheduler_time(now: datetime | None = None) -> datetime:
     local = (now or datetime.now(tz=NY)).astimezone(NY)
-    return local.replace(hour=INTENDED_HOUR, minute=INTENDED_MINUTE, second=0, microsecond=0)
+    return local.replace(hour=INTENDED_HOUR, minute=0, second=0, microsecond=0)
 
 
 def slot_matches_new_york_offset(slot: SchedulerSlot, now: datetime | None = None) -> bool:
@@ -35,22 +38,36 @@ def slot_matches_new_york_offset(slot: SchedulerSlot, now: datetime | None = Non
     return (slot == "edt" and expected_utc_hour == 12) or (slot == "est" and expected_utc_hour == 13)
 
 
+def scheduler_decision(slot: SchedulerSlot, now: datetime | None = None) -> str:
+    """Classify a cron candidate without ever creating a late normal intent."""
+    local = (now or datetime.now(tz=NY)).astimezone(NY)
+    if not slot_matches_new_york_offset(slot, local):
+        return "IGNORED_DST_SLOT"
+    if not is_nyse_trading_day(local):
+        return "MARKET_CLOSED"
+    if STAGING_START <= local.time() < STAGING_END:
+        return "DISPATCH"
+    return "OUTSIDE_STAGING_WINDOW"
+
+
 def should_dispatch(slot: SchedulerSlot, now: datetime | None = None) -> bool:
-    local = (now or datetime.now(tz=NY)).astimezone(NY)
-    return slot_matches_new_york_offset(slot, local) and local >= intended_scheduler_time(local)
+    return scheduler_decision(slot, now) == "DISPATCH"
 
 
-def dispatch_payload(now: datetime | None = None) -> dict[str, object]:
+def dispatch_payload(now: datetime | None = None, scheduler_terminal_state: str | None = None) -> dict[str, object]:
     local = (now or datetime.now(tz=NY)).astimezone(NY)
+    inputs: dict[str, str] = {
+        "send_telegram": "true",
+        "intended_market_date": local.strftime("%Y-%m-%d"),
+        "intended_market_time": "09:05",
+        "trigger_source": "vercel_cron",
+        "scheduler_triggered_at": local.astimezone(UTC).isoformat(),
+    }
+    if scheduler_terminal_state:
+        inputs["scheduler_terminal_state"] = scheduler_terminal_state
     return {
         "ref": "main",
-        "inputs": {
-            "send_telegram": "true",
-            "intended_market_date": local.strftime("%Y-%m-%d"),
-            "intended_market_time": "09:05",
-            "trigger_source": "vercel_cron",
-            "scheduler_triggered_at": local.astimezone(UTC).isoformat(),
-        },
+        "inputs": inputs,
     }
 
 
@@ -100,10 +117,24 @@ def handle_cron_request(
         return 401, {"ok": False, "status": "UNAUTHORIZED"}
 
     current = (now or datetime.now(tz=NY)).astimezone(NY)
-    if not should_dispatch(slot, current):
+    decision = scheduler_decision(slot, current)
+    if decision in {"IGNORED_DST_SLOT", "MARKET_CLOSED"}:
         return 200, {
             "ok": True,
-            "status": "IGNORED_DST_SLOT",
+            "status": decision,
+            "trigger_source": "vercel_cron",
+        }
+    if decision == "OUTSIDE_STAGING_WINDOW":
+        try:
+            dispatch_workflow(
+                os.getenv("GITHUB_WORKFLOW_DISPATCH_TOKEN", ""),
+                dispatch_payload(current, scheduler_terminal_state="SCHEDULER_WINDOW_EXPIRED"),
+            )
+        except Exception:
+            return 502, {"ok": False, "status": "DISPATCH_FAILED"}
+        return 202, {
+            "ok": True,
+            "status": "SCHEDULER_WINDOW_EXPIRED",
             "trigger_source": "vercel_cron",
         }
     try:

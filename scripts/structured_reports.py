@@ -16,6 +16,7 @@ from trigger_engine import technical_trigger
 
 ROUNDING_TOLERANCE = 0.005
 QUOTE_KINDS = {"CURRENT_QUOTE", "PREMARKET_QUOTE", "REGULAR_QUOTE", "AFTER_HOURS_QUOTE", "PREVIOUS_CLOSE"}
+RETURN_EPSILON = 0.005
 
 
 def price_ref_kind(session: str) -> str:
@@ -66,6 +67,38 @@ def _weight_return_text(symbol: str, observation) -> str:
     spec = resolve_instrument(symbol)
     name = f"{spec.display_name} ({symbol})" if spec.display_name != symbol else symbol
     return f"{name} {observation.change_pct:+.2f}%"
+
+
+def return_direction(change: float, epsilon: float = RETURN_EPSILON) -> str:
+    """Natural-language direction that cannot describe a zero move as down."""
+    if change > epsilon:
+        return "上漲"
+    if change < -epsilon:
+        return "下跌"
+    return "持平"
+
+
+def _reader_evidence_line(line: str) -> str | None:
+    """Translate internal evidence labels at the final Telegram boundary."""
+    match = re.match(r"^\[(OBSERVED|SUPPORTED_ASSOCIATION|UNRESOLVED)\]\s*(.*)$", line)
+    if not match:
+        return line
+    classification, text = match.groups()
+    if classification != "UNRESOLVED":
+        return text
+    if text.startswith("Portfolio"):
+        return None
+    subject = text.split("：", 1)[0]
+    translations = {
+        "法人買賣超、成交金額、市場廣度": "官方市場統計尚未通過驗證，暫不判讀。",
+        "成交金額": "今日官方成交統計尚未通過驗證，暫不判讀。",
+        "市場廣度": "今日官方廣度統計尚未通過驗證，暫不判讀。",
+        "三大法人": "今日官方法人資料尚未通過驗證，暫不判讀。",
+        "TAIEX session-over-session": "缺少已驗證加權指數收盤，暫不判讀。",
+        "權值單日變化": "缺少已驗證權值收盤，暫不判讀。",
+        "USD/TWD session-over-session": "缺少已驗證匯率收盤，暫不判讀。",
+    }
+    return f"{subject}：{translations.get(subject, '今日資料尚未通過驗證，暫不判讀。')}"
 
 
 def select_report_symbols(context: MarketContext) -> list[str]:
@@ -186,15 +219,6 @@ def derive_state_changes(context: MarketContext) -> list[str]:
             dir_str = "擴增" if t_delta > 0 else "萎縮"
             changes.append(f"成交量{dir_str}：由前日 {prev_t:,.2f} 億{dir_str} {abs(t_delta):,.2f} 億至 {curr_t:,.2f} 億台幣。")
 
-    if taiex:
-        close_p = taiex.close
-        prev_p = close_p - taiex.point_change
-        increment = 1000.0 if close_p >= 10_000 else 100.0
-        round_level = round(close_p / increment) * increment
-        if min(prev_p, close_p) < round_level <= max(prev_p, close_p):
-            verb = "站回" if close_p > prev_p else "跌破"
-            changes.append(f"指數跨越當日鄰近整數關：收在 {close_p:,.2f} 點，{verb} {int(round_level):,} 點。")
-
     if taiex and taiex.advancing is not None and taiex.declining is not None:
         if taiex.advancing > taiex.declining * 1.5:
             changes.append(f"市場結構轉強：上漲 {taiex.advancing} 家明顯多於下跌 {taiex.declining} 家，多方擴散良好。")
@@ -215,14 +239,11 @@ def derive_tomorrow_watch_signals(context: MarketContext) -> list[str]:
     taiex = context.taiex_summary
     inst = context.institutional_flows
 
-    if taiex:
-        increment = 1000.0 if taiex.close >= 10_000 else 100.0
-        support = (taiex.close // increment) * increment
+    if taiex and taiex.high and taiex.high > taiex.close + 30:
         signals.append(
-            f"加權指數：現值 {taiex.close:,.2f} 點；明日觀察是否守住動態參考 {support:,.0f} 點，失守即代表收盤強度未延續。"
+            f"加權指數：今日高點 {taiex.high:,.2f} 點至收盤回落 {taiex.high - taiex.close:,.2f} 點；"
+            "明日觀察是否能收斂盤中賣壓。"
         )
-        if taiex.high and taiex.high > taiex.close + 30:
-            signals.append(f"盤中高點反壓：今日高點 {taiex.high:,.2f} 點留有上影線賣壓，明日需量能維持方具消化動能。")
 
     if inst and inst.foreign_futures_net_oi is not None and inst.foreign_futures_net_oi < -30000:
         signals.append(f"外資期貨空單防線：目前淨空單 {abs(inst.foreign_futures_net_oi):,} 口仍處高位，觀察是否出現實質減倉以確認避險情緒放緩。")
@@ -387,18 +408,27 @@ def derive_tw_session_deltas(context: MarketContext) -> list[str]:
     else:
         deltas.append("[UNRESOLVED] 成交金額：UNRESOLVED（缺少 current 與前一已完成 TWSE session 的已驗證統計）。")
 
-    if taiex_summary and taiex_summary.advancing is not None and taiex_summary.declining is not None:
+    if (taiex_summary and taiex_summary.advancing is not None and taiex_summary.declining is not None
+            and taiex_summary.advancing_prev is not None and taiex_summary.declining_prev is not None):
+        net = taiex_summary.advancing - taiex_summary.declining
+        previous_net = taiex_summary.advancing_prev - taiex_summary.declining_prev
         deltas.append(
             f"[OBSERVED] 市場廣度：上漲 {taiex_summary.advancing} 家、下跌 {taiex_summary.declining} 家；"
-            "前一 session 廣度未提供，無法計算廣度 delta。"
+            f"淨廣度 {net:+d} 家，較前一 session {net - previous_net:+d} 家。"
         )
     else:
         deltas.append("[UNRESOLVED] 市場廣度：UNRESOLVED（缺少 current 與前一已完成 TWSE session 的已驗證統計）。")
 
-    if inst and inst.foreign_buy_sell_ntd_billions is not None and inst.foreign_buy_sell_prev_ntd_billions is not None:
+    if (inst and inst.foreign_buy_sell_ntd_billions is not None and inst.foreign_buy_sell_prev_ntd_billions is not None
+            and inst.investment_trust_buy_sell_ntd_billions is not None and inst.investment_trust_buy_sell_prev_ntd_billions is not None
+            and inst.dealer_buy_sell_ntd_billions is not None and inst.dealer_buy_sell_prev_ntd_billions is not None):
         foreign_delta = inst.foreign_buy_sell_ntd_billions - inst.foreign_buy_sell_prev_ntd_billions
+        trust_delta = inst.investment_trust_buy_sell_ntd_billions - inst.investment_trust_buy_sell_prev_ntd_billions
+        dealer_delta = inst.dealer_buy_sell_ntd_billions - inst.dealer_buy_sell_prev_ntd_billions
         deltas.append(
-            f"[OBSERVED] 外資現貨：{inst.foreign_buy_sell_ntd_billions:+.2f} 億台幣，較前一 session {foreign_delta:+.2f} 億。"
+            f"[OBSERVED] 三大法人：外資 {inst.foreign_buy_sell_ntd_billions:+.2f} 億（較前一 session {foreign_delta:+.2f} 億）、"
+            f"投信 {inst.investment_trust_buy_sell_ntd_billions:+.2f} 億（{trust_delta:+.2f} 億）、"
+            f"自營商 {inst.dealer_buy_sell_ntd_billions:+.2f} 億（{dealer_delta:+.2f} 億）。"
         )
     else:
         deltas.append("[UNRESOLVED] 三大法人：UNRESOLVED（缺少外資、投信、自營商 current 與前一 session 的完整已驗證統計）。")
@@ -419,10 +449,22 @@ def portfolio_report_section(context: MarketContext) -> OptionalModule | None:
             summary=f"持股行情覆蓋完整（{coverage.covered_positions}/{coverage.expected_positions}）；明細僅送往私人 Action Brief。",
         )
     if coverage.status == "NOT_APPLICABLE":
-        return OptionalModule(name="Portfolio Status", state="UNAVAILABLE", summary="未取得可分析的 canonical active positions；未產生持股結論。")
+        return OptionalModule(name="Portfolio Status", state="UNAVAILABLE", summary="未取得可分析的有效持股；未產生持股結論。")
+    unresolved = [*coverage.stale, *coverage.missing, *coverage.unsupported]
+    reasons = []
+    for item in unresolved[:6]:
+        if item.state == "STALE":
+            reason = "收盤資料日期不符"
+        elif item.state == "UNSUPPORTED":
+            reason = "未設定報價來源"
+        else:
+            reason = "報價未取得"
+        reasons.append(f"{item.canonical_symbol}（{reason}）")
+    detail = f"未取得行情：{'、'.join(reasons)}。" if reasons else ""
     return OptionalModule(
         name="Portfolio Status", state="PARTIAL",
-        summary=f"持股行情覆蓋 {coverage.covered_positions}/{coverage.expected_positions}（{coverage.coverage_ratio:.0%}）；私人持股結論已 fail-closed。",
+        summary=(f"持股行情覆蓋 {coverage.covered_positions}/{coverage.expected_positions}（{coverage.coverage_ratio:.0%}）；"
+                 f"操作建議暫停。{detail}"),
     )
 
 
@@ -787,8 +829,8 @@ def _render_tw_close_report(draft: MarketReportDraft, context: MarketContext) ->
     if "2330" in context.quotes and context.quotes["2330"].quality_status == "VALID":
         q2330 = context.quotes["2330"]
         delta = round(q2330.price - q2330.previous_regular_close, 2)
-        dir_t = "上漲" if delta > 0 else "下跌"
-        lines.append(f"- 台積電 (2330) 單日{dir_t} {abs(delta):,.2f} 元（{q2330.change_pct:+.2f}%），對大盤具關鍵指引動能。")
+        dir_t = return_direction(delta)
+        lines.append(f"- 台積電 (2330) 單日{dir_t} {abs(delta):,.2f} 元（{q2330.change_pct:+.2f}%）。")
 
     if draft.rotation and not any(ph in draft.rotation for ph in ("僅列 verified quote", "弱資料模組不硬填")):
         lines.append(f"- 族群輪動：{draft.rotation}")
@@ -799,15 +841,21 @@ def _render_tw_close_report(draft: MarketReportDraft, context: MarketContext) ->
         lines.append(f"## {sec_num}. 今日關鍵驅動")
         sec_num += 1
         for item in draft.drivers:
-            lines.append(f"- {item}")
+            if rendered := _reader_evidence_line(item):
+                lines.append(f"- {rendered}")
         lines.append("")
 
     # Section 5: 相較昨日 (What Changed Since Yesterday) - omit if no changes
     if draft.material_changes:
-        lines.append(f"## {sec_num}. 相較昨日")
+        previous_date = (
+            taiex.previous_session_date if taiex and taiex.previous_session_date
+            else get_previous_completed_session_date("TW", context.market_date)
+        )
+        lines.append(f"## {sec_num}. 相較前一交易日（{previous_date}）")
         sec_num += 1
         for item in draft.material_changes:
-            lines.append(f"- {item}")
+            if rendered := _reader_evidence_line(item):
+                lines.append(f"- {rendered}")
         lines.append("")
 
     # Section 6: 明日觀察 (Tomorrow's Watch Signals) - omit if no watch signals

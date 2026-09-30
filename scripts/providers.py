@@ -25,15 +25,27 @@ log = logging.getLogger("providers")
 class QuoteProvider(Protocol):
     name: str
 
-    def fetch_many(self, symbols: list[str]) -> dict[str, Quote]: ...
+    def fetch_many(self, symbols: list[str], expected_dates: dict[str, str] | None = None) -> dict[str, Quote]: ...
 
 
-def _quote_from_closes(closes: list[tuple[str, float]]) -> Quote | None:
-    """closes: [(YYYY-MM-DD, close), …] ascending. Needs >= 1 row."""
+def _quote_from_closes(closes: list[tuple[str, float]], expected_date: str | None = None) -> Quote | None:
+    """Select an official daily close, optionally pinned to a session date.
+
+    A daily provider may include an in-progress current-session bar.  Cross-
+    market reports must not accept that bar merely because it is last; when a
+    completed-session contract supplies ``expected_date`` we select that exact
+    row and leave a provider miss if it is absent.
+    """
     if not closes:
         return None
-    date, last = closes[-1]
-    prev = closes[-2][1] if len(closes) >= 2 else last
+    selected_index = len(closes) - 1
+    if expected_date:
+        matching = [i for i, (date, _value) in enumerate(closes) if date == expected_date]
+        if not matching:
+            return None
+        selected_index = matching[-1]
+    date, last = closes[selected_index]
+    prev = closes[selected_index - 1][1] if selected_index else last
     change = (last - prev) / prev * 100 if prev else 0.0
     return Quote(price=round(last, 4), prev_close=round(prev, 4),
                  change_pct=round(change, 2), data_date=date)
@@ -42,10 +54,10 @@ def _quote_from_closes(closes: list[tuple[str, float]]) -> Quote | None:
 class YFinanceBatchProvider:
     name = "yfinance_batch"
 
-    def fetch_many(self, symbols: list[str]) -> dict[str, Quote]:
+    def fetch_many(self, symbols: list[str], expected_dates: dict[str, str] | None = None) -> dict[str, Quote]:
         out: dict[str, Quote] = {}
         try:
-            df = yf.download(symbols, period="5d", group_by="ticker",
+            df = yf.download(symbols, period="10d", group_by="ticker",
                              progress=False, threads=True)
         except Exception:
             log.warning("batch download failed", exc_info=True)
@@ -58,7 +70,7 @@ class YFinanceBatchProvider:
                           else df["Close"]).dropna()
                 closes = [(idx.strftime("%Y-%m-%d"), float(v))
                           for idx, v in series.items()]
-                if (q := _quote_from_closes(closes)):
+                if (q := _quote_from_closes(closes, (expected_dates or {}).get(sym))):
                     out[sym] = q
             except (KeyError, TypeError, ValueError):
                 continue
@@ -70,19 +82,19 @@ class YFinanceSingleProvider:
 
     @retry(reraise=True, stop=stop_after_attempt(3),
            wait=wait_exponential_jitter(initial=2, max=15))
-    def _one(self, symbol: str) -> Quote | None:
-        hist = yf.Ticker(symbol).history(period="5d")
+    def _one(self, symbol: str, expected_date: str | None = None) -> Quote | None:
+        hist = yf.Ticker(symbol).history(period="10d")
         if hist.empty:
             return None
         closes = [(idx.strftime("%Y-%m-%d"), float(v))
                   for idx, v in hist["Close"].dropna().items()]
-        return _quote_from_closes(closes)
+        return _quote_from_closes(closes, expected_date)
 
-    def fetch_many(self, symbols: list[str]) -> dict[str, Quote]:
+    def fetch_many(self, symbols: list[str], expected_dates: dict[str, str] | None = None) -> dict[str, Quote]:
         out: dict[str, Quote] = {}
         for sym in symbols:
             try:
-                if (q := self._one(sym)):
+                if (q := self._one(sym, (expected_dates or {}).get(sym))):
                     out[sym] = q
             except Exception:
                 log.warning("single fetch failed", extra={"symbol": sym})
@@ -102,7 +114,7 @@ class TWSEProvider:
             return f"{year}-{date_str[3:5]}-{date_str[5:7]}"
         return date_str
 
-    def fetch_many(self, symbols: list[str]) -> dict[str, Quote]:
+    def fetch_many(self, symbols: list[str], expected_dates: dict[str, str] | None = None) -> dict[str, Quote]:
         wanted = {s.split(".")[0]: s for s in symbols if s.endswith(".TW")}
         if not wanted:
             return {}
@@ -122,10 +134,14 @@ class TWSEProvider:
                 last = float(row["ClosingPrice"])
                 change = float(row.get("Change") or 0)
                 prev = last - change
-                out[wanted[code]] = Quote(
+                symbol = wanted[code]
+                date = self._roc_to_iso(row.get("Date", ""))
+                if (expected_dates or {}).get(symbol) and date != expected_dates[symbol]:
+                    continue
+                out[symbol] = Quote(
                     price=round(last, 4), prev_close=round(prev, 4),
                     change_pct=round(change / prev * 100, 2) if prev else 0.0,
-                    data_date=self._roc_to_iso(row.get("Date", "")))
+                    data_date=date)
             except (KeyError, ValueError):
                 continue
         return out
@@ -138,9 +154,9 @@ class YahooChartProvider:
     name = "yahoo_chart"
     URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
 
-    def _one(self, symbol: str) -> Quote | None:
+    def _one(self, symbol: str, expected_date: str | None = None) -> Quote | None:
         resp = requests.get(self.URL.format(symbol=symbol),
-                            params={"range": "5d", "interval": "1d"},
+                            params={"range": "10d", "interval": "1d"},
                             headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
         resp.raise_for_status()
         result = resp.json()["chart"]["result"][0]
@@ -148,13 +164,13 @@ class YahooChartProvider:
         timestamps = result["timestamp"]
         closes = [(datetime.fromtimestamp(t).strftime("%Y-%m-%d"), float(c))
                   for t, c in zip(timestamps, raw_closes) if c is not None]
-        return _quote_from_closes(closes)
+        return _quote_from_closes(closes, expected_date)
 
-    def fetch_many(self, symbols: list[str]) -> dict[str, Quote]:
+    def fetch_many(self, symbols: list[str], expected_dates: dict[str, str] | None = None) -> dict[str, Quote]:
         out: dict[str, Quote] = {}
         for sym in symbols:
             try:
-                if (q := self._one(sym)):
+                if (q := self._one(sym, (expected_dates or {}).get(sym))):
                     out[sym] = q
             except Exception:
                 log.warning("yahoo chart fetch failed", extra={"symbol": sym})
@@ -239,6 +255,68 @@ class CoinGeckoCryptoProvider:
                 market=spec.market,
             )
             observations[spec.canonical_symbol] = validate_observation(observation, spec)
+        return observations
+
+
+class CoinbaseCryptoProvider:
+    """Read-only Coinbase Exchange fallback for explicitly registered crypto pairs."""
+    name = "coinbase_exchange"
+    BASE_URL = "https://api.exchange.coinbase.com/products/{product}"
+    MAX_AGE_SECONDS = 15 * 60
+
+    def fetch_many(self, specs: list[InstrumentSpec]) -> dict[str, QuoteObservation]:
+        now = datetime.now(tz=timezone.utc)
+        observations: dict[str, QuoteObservation] = {}
+        for spec in specs:
+            product = spec.provider_symbols.get("coinbase")
+            if spec.asset_type != "CRYPTO" or not product:
+                continue
+            try:
+                ticker = requests.get(
+                    self.BASE_URL.format(product=product) + "/ticker",
+                    headers={"User-Agent": "market-report-bot/1.0"}, timeout=15,
+                )
+                ticker.raise_for_status()
+                ticker_data = ticker.json()
+                stats = requests.get(
+                    self.BASE_URL.format(product=product) + "/stats",
+                    headers={"User-Agent": "market-report-bot/1.0"}, timeout=15,
+                )
+                stats.raise_for_status()
+                stats_data = stats.json()
+                price = float(ticker_data["price"])
+                previous = float(stats_data["open"])
+                updated_at = datetime.fromisoformat(str(ticker_data["time"]).replace("Z", "+00:00"))
+            except (requests.RequestException, KeyError, TypeError, ValueError):
+                log.warning("Coinbase crypto fallback failed", extra={"symbol": spec.canonical_symbol})
+                continue
+            age = (now - updated_at).total_seconds()
+            if (not math.isfinite(price) or price <= 0 or not math.isfinite(previous) or previous <= 0
+                    or age < 0 or age > self.MAX_AGE_SECONDS):
+                log.warning("Coinbase crypto quote rejected for freshness/validity", extra={"symbol": spec.canonical_symbol})
+                continue
+            change_pct = (price - previous) / previous * 100
+            obs = QuoteObservation(
+                quote_id=f"{spec.canonical_symbol}:{updated_at.strftime('%Y-%m-%dT%H:%M:%SZ')}:REGULAR:{self.name}",
+                instrument_id=spec.canonical_symbol,
+                canonical_symbol=spec.canonical_symbol,
+                price=round(price, spec.price_precision),
+                currency="USD",
+                session="REGULAR",
+                market_date=updated_at.strftime("%Y-%m-%d"),
+                observed_at=updated_at,
+                provider_timestamp=updated_at,
+                retrieved_at=now,
+                provider=self.name,
+                quote_type="TRADE",
+                is_delayed=True,
+                quality_status="VALID",
+                previous_regular_close=round(previous, spec.price_precision),
+                change_pct=round(change_pct, 2),
+                quality_notes=["24-hour open supplied by Coinbase Exchange"],
+                market=spec.market,
+            )
+            observations[spec.canonical_symbol] = validate_observation(obs, spec)
         return observations
 
 
@@ -349,7 +427,7 @@ def observation_from_daily_quote(spec: InstrumentSpec, q: Quote, provider: str,
 
 
 
-def fetch_with_failover(symbols: list[str]) -> tuple[dict[str, Quote], dict[str, str]]:
+def fetch_with_failover(symbols: list[str], expected_dates: dict[str, str] | None = None) -> tuple[dict[str, Quote], dict[str, str]]:
     """Return ({symbol: Quote}, {symbol: provider_name}), trying each tier for
     whatever the previous tiers missed."""
     chain: list[QuoteProvider] = [
@@ -362,7 +440,7 @@ def fetch_with_failover(symbols: list[str]) -> tuple[dict[str, Quote], dict[str,
     for provider in chain:
         if not remaining:
             break
-        got = provider.fetch_many(remaining)
+        got = provider.fetch_many(remaining, expected_dates=expected_dates)
         for sym, q in got.items():
             quotes[sym] = q
             sources[sym] = provider.name
@@ -406,7 +484,12 @@ def fetch_session_observations(specs: list[InstrumentSpec], expected_session: Se
 
     remaining_specs = [s for s in specs if s.canonical_symbol not in observations]
     provider_symbols = [s.provider_symbols["yfinance"] for s in remaining_specs]
-    daily_quotes, daily_sources = fetch_with_failover(provider_symbols)
+    expected_dates_by_provider = {
+        spec.provider_symbols["yfinance"]: expected_date
+        for spec in remaining_specs
+        if (expected_date := ((expected_dates or {}).get(spec.canonical_symbol) or (expected_dates or {}).get(spec.market)))
+    }
+    daily_quotes, daily_sources = fetch_with_failover(provider_symbols, expected_dates=expected_dates_by_provider)
     provider_to_spec = {s.provider_symbols["yfinance"]: s for s in remaining_specs}
     fallback_session: Session = "PREVIOUS_CLOSE" if expected_session in ("PREMARKET", "CLOSED_REFERENCE") else expected_session
     if expected_session == "AFTER_HOURS":
@@ -434,6 +517,20 @@ def fetch_session_observations(specs: list[InstrumentSpec], expected_session: Se
             "provider": CoinGeckoCryptoProvider.name,
             "hit": len(crypto_observations),
             "miss": len(remaining_crypto_specs) - len(crypto_observations),
+        })
+    remaining_crypto_specs = [
+        spec for spec in remaining_crypto_specs if spec.canonical_symbol not in observations
+    ]
+    coinbase_observations = CoinbaseCryptoProvider().fetch_many(remaining_crypto_specs)
+    for symbol, observation in coinbase_observations.items():
+        observations[symbol] = observation
+        spec = specs_by_symbol(specs)[symbol]
+        sources[spec.provider_symbols["coinbase"]] = observation.provider
+    if remaining_crypto_specs:
+        log.info("crypto fallback tier done", extra={
+            "provider": CoinbaseCryptoProvider.name,
+            "hit": len(coinbase_observations),
+            "miss": len(remaining_crypto_specs) - len(coinbase_observations),
         })
     return observations, sources
 

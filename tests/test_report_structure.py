@@ -395,7 +395,7 @@ class ReportStructuralValidationTest(unittest.TestCase):
         self.assertIn("2. 法人與資金", telegram_output)
         self.assertIn("3. 權值與族群", telegram_output)
         self.assertIn("4. 今日關鍵驅動", telegram_output)
-        self.assertIn("5. 相較昨日", telegram_output)
+        self.assertIn("5. 相較前一交易日（2026-09-16）", telegram_output)
         self.assertIn("6. 明日觀察", telegram_output)
 
         # I. Character length is within expected institutional brief length (~700 - 1300 chars)

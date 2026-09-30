@@ -116,6 +116,13 @@ class TaiexMarketSummary(BaseModel):
     advancing: int | None = None
     declining: int | None = None
     unchanged: int | None = None
+    advancing_prev: int | None = None
+    declining_prev: int | None = None
+    unchanged_prev: int | None = None
+    session_date: str | None = None
+    previous_session_date: str | None = None
+    source: str | None = None
+    retrieved_at: datetime | None = None
 
 
 class InstitutionalFlows(BaseModel):
@@ -128,7 +135,13 @@ class InstitutionalFlows(BaseModel):
     foreign_buy_sell_prev_ntd_billions: float | None = None
     total_buy_sell_prev_ntd_billions: float | None = None
     turnover_prev_ntd_billions: float | None = None
+    investment_trust_buy_sell_prev_ntd_billions: float | None = None
+    dealer_buy_sell_prev_ntd_billions: float | None = None
     twd_direction: str | None = None
+    session_date: str | None = None
+    previous_session_date: str | None = None
+    source: str | None = None
+    retrieved_at: datetime | None = None
 
 
 class PortfolioQuoteCoverageItem(BaseModel):

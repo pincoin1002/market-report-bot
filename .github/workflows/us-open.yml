@@ -45,6 +45,10 @@ on:
         description: "External scheduler UTC timestamp for latency telemetry"
         required: false
         type: string
+      scheduler_terminal_state:
+        description: "External scheduler terminal state; never generates a market report"
+        required: false
+        type: string
 
 
 jobs:
@@ -62,6 +66,7 @@ jobs:
       US_OPEN_INTENDED_TIME: ${{ github.event.inputs.intended_market_time || github.event.client_payload.intended_market_time || '09:05' }}
       US_OPEN_TRIGGER_SOURCE: ${{ github.event.inputs.trigger_source || github.event.client_payload.trigger_source || github.event_name }}
       US_OPEN_SCHEDULER_TRIGGERED_AT: ${{ github.event.inputs.scheduler_triggered_at || github.event.client_payload.scheduler_triggered_at || '' }}
+      US_OPEN_SCHEDULER_TERMINAL_STATE: ${{ github.event.inputs.scheduler_terminal_state || github.event.client_payload.scheduler_terminal_state || '' }}
     timeout-minutes: 30
     permissions:
       contents: write
@@ -79,9 +84,38 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Record expired external scheduler window
+        if: github.event.inputs.scheduler_terminal_state == 'SCHEDULER_WINDOW_EXPIRED'
+        run: python scripts/us_open_run_status.py SCHEDULER_WINDOW_EXPIRED "external scheduler invoked outside 08:00-08:59 New York staging window"
+
+      - name: Send expired scheduler operational alert
+        if: github.event.inputs.scheduler_terminal_state == 'SCHEDULER_WINDOW_EXPIRED'
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python - <<'PY'
+          import os
+          import requests
+
+          response = requests.post(
+              f"https://api.telegram.org/bot{os.environ['TELEGRAM_BOT_TOKEN']}/sendMessage",
+              json={"chat_id": os.environ["TELEGRAM_CHAT_ID"], "text": "⚠️ 美股開盤日報未送出\n原因：排程觸發過晚，已超過有效盤前時間。\n正常市場內容未生成，避免使用過期資料。"},
+              timeout=30,
+          )
+          response.raise_for_status()
+          if not response.json().get("ok"):
+              raise SystemExit("Telegram operational alert rejected")
+          print("US Open operational alert accepted by Telegram")
+          PY
+
+      - name: Fail expired scheduler window
+        if: github.event.inputs.scheduler_terminal_state == 'SCHEDULER_WINDOW_EXPIRED'
+        run: exit 1
+
       - name: Resolve canonical US Open intent and idempotency
         id: intent
-        if: github.event_name != 'workflow_dispatch' || (github.event.inputs.safe_verify != 'true' && github.event.inputs.scheduler_delivery_test != 'true')
+        if: (github.event_name != 'workflow_dispatch' || (github.event.inputs.safe_verify != 'true' && github.event.inputs.scheduler_delivery_test != 'true')) && github.event.inputs.scheduler_terminal_state != 'SCHEDULER_WINDOW_EXPIRED'
         run: python scripts/us_open_intent.py
 
       - name: Verify Telegram configuration safely
@@ -176,13 +210,15 @@ jobs:
           import os
           import requests
 
-          text = "⚠️ US Open scheduler status: INTENT_EXPIRED. No market report was sent."
+          text = "⚠️ 美股開盤日報未送出\n原因：排程觸發過晚，已超過有效盤前時間。\n正常市場內容未生成，避免使用過期資料。"
           response = requests.post(
               f"https://api.telegram.org/bot{os.environ['TELEGRAM_BOT_TOKEN']}/sendMessage",
               json={"chat_id": os.environ["TELEGRAM_CHAT_ID"], "text": text}, timeout=30,
           )
           response.raise_for_status()
-          print("US Open operational alert sent")
+          if not response.json().get("ok"):
+              raise SystemExit("Telegram operational alert rejected")
+          print("US Open operational alert accepted by Telegram")
           PY
 
       - name: Fail unavailable US Open intent
@@ -277,6 +313,27 @@ jobs:
         run: |
           STATE="${{ steps.generate.outputs.terminal_state || steps.validate.outputs.terminal_state || steps.deliver.outputs.terminal_state }}"
           python scripts/us_open_run_status.py "$STATE"
+
+      - name: Send validation or delivery operational alert
+        if: always() && (steps.generate.outputs.terminal_state == 'VALIDATION_BLOCKED' || steps.validate.outputs.terminal_state == 'VALIDATION_BLOCKED' || steps.deliver.outputs.terminal_state == 'DELIVERY_FAILED')
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python - <<'PY'
+          import os
+          import requests
+
+          response = requests.post(
+              f"https://api.telegram.org/bot{os.environ['TELEGRAM_BOT_TOKEN']}/sendMessage",
+              json={"chat_id": os.environ["TELEGRAM_CHAT_ID"], "text": "⚠️ 美股開盤日報未送出\n原因：資料驗證或傳送未完成。\n正常市場內容未送出，請查看執行紀錄。"},
+              timeout=30,
+          )
+          response.raise_for_status()
+          if not response.json().get("ok"):
+              raise SystemExit("Telegram operational alert rejected")
+          print("US Open operational alert accepted by Telegram")
+          PY
 
       - name: Fail blocked validation or failed delivery
         if: always() && (steps.generate.outputs.terminal_state == 'VALIDATION_BLOCKED' || steps.validate.outputs.terminal_state == 'VALIDATION_BLOCKED' || steps.deliver.outputs.terminal_state == 'DELIVERY_FAILED')

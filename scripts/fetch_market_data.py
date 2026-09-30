@@ -28,12 +28,13 @@ from logging_config import setup_logging
 from instrument_registry import build_universe, quote_symbol
 from market_context import build_market_context
 from market_session import (
-    classify_tw_session, classify_us_session, get_target_market_date,
+    classify_tw_session, classify_us_session, get_previous_completed_session_date, get_target_market_date,
     us_open_snapshot_contract_status,
 )
 from models import NamedQuote, PortfolioQuoteCoverage, PortfolioQuoteCoverageItem, Snapshot
 from portfolio_context import load_authoritative_portfolio
 from providers import fetch_session_observations
+from twse_market_evidence import fetch_twse_close_evidence
 
 log = logging.getLogger("fetch")
 
@@ -244,11 +245,11 @@ def _set_github_output(key: str, value: str) -> None:
 
 # ── Core fetch ─────────────────────────────────────────────────────────────────
 
-def build_snapshot(report_type: str) -> Snapshot:
+def build_snapshot(report_type: str, retrieved_at: datetime | None = None) -> Snapshot:
     portfolio = load_authoritative_portfolio()
     universe = build_universe(portfolio_context=portfolio)
-    expected_session = _expected_session(report_type)
-    retrieved_at = datetime.now(tz=TPE)
+    retrieved_at = retrieved_at or datetime.now(tz=TPE)
+    expected_session = _expected_session(report_type, now=retrieved_at)
     
     us_target_date = get_target_market_date(report_type, "US", now=retrieved_at)
     tw_target_date = get_target_market_date(report_type, "TW", now=retrieved_at)
@@ -303,6 +304,14 @@ def build_snapshot(report_type: str) -> Snapshot:
     snapshot.portfolio_quote_coverage = build_portfolio_quote_coverage(
         portfolio, observations, universe, retrieved_at, expected_dates
     )
+    if report_type == "tw_close":
+        previous_tw_date = get_previous_completed_session_date("TW", tw_target_date)
+        evidence = fetch_twse_close_evidence(tw_target_date, previous_tw_date, retrieved_at)
+        if evidence is not None:
+            snapshot.taiex_summary = evidence.taiex_summary
+            snapshot.institutional_flows = evidence.institutional_flows.model_copy(update={
+                "turnover_prev_ntd_billions": evidence.previous_turnover_ntd_billions,
+            })
     missing_by_role = classify_missing_quote_roles(report_type, portfolio, universe, observations)
     if any(missing_by_role.values()):
         log.warning("quote observations missing or invalid by role", extra=missing_by_role)
@@ -319,20 +328,22 @@ def build_snapshot(report_type: str) -> Snapshot:
     return snapshot
 
 
-def _expected_session(report_type: str) -> str:
+def _expected_session(report_type: str, now: datetime | None = None) -> str:
+    if now is None:
+        now = datetime.now(tz=TPE if report_type != "us_close" else NY)
     if report_type == "tw_close":
-        now = datetime.now(tz=TPE)
         target = get_target_market_date(report_type, "TW", now=now)
-        return "REGULAR" if target == now.strftime("%Y-%m-%d") else "PREVIOUS_CLOSE"
+        local = now.astimezone(TPE)
+        return "REGULAR" if target == local.strftime("%Y-%m-%d") else "PREVIOUS_CLOSE"
     if report_type == "us_close":
-        now = datetime.now(tz=NY)
         target = get_target_market_date(report_type, "US", now=now)
-        return "REGULAR" if target == now.strftime("%Y-%m-%d") else "PREVIOUS_CLOSE"
+        local = now.astimezone(NY)
+        return "REGULAR" if target == local.strftime("%Y-%m-%d") else "PREVIOUS_CLOSE"
     if report_type.startswith("us_"):
         # us_open is a premarket snapshot contract, not a label for whichever
         # US session happens to be live when a delayed runner starts.
-        return "PREMARKET" if report_type == "us_open" else classify_us_session(extended_quote_available=True)
-    return classify_tw_session(report_type=report_type)
+        return "PREMARKET" if report_type == "us_open" else classify_us_session(now, extended_quote_available=True)
+    return classify_tw_session(now, report_type=report_type)
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────

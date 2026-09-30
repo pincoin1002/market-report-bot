@@ -1,5 +1,12 @@
 # PROGRESS
 
+## 2026-09-30
+
+- Diagnosed the 2026-09-29 production incidents from Actions artifacts: the Vercel-triggered US-open run started at 09:44 EDT and correctly reached `INTENT_EXPIRED`; Taiwan-close expected the completed 2026-09-28 US session but daily providers selected the in-progress 2026-09-29 bar, making 11 US portfolio positions stale. The new daily-close selection pins fallback rows to the required session date instead of weakening validation.
+- Vercel US-open candidates now run at the start of the EDT/EST UTC hours and only dispatch during 08:00–08:59 New York. A late invocation creates only a terminal alert workflow (`SCHEDULER_WINDOW_EXPIRED`), never a normal report. Telegram operational alerts now require an accepted Telegram API response and validation/delivery failures also alert once.
+- Added official TWSE MI_INDEX/BFI82U ingestion for turnover, breadth, and three institutional flows with current/prior exchange-session dates and source URLs. Added Coinbase Exchange as a registered BONK fallback after Yahoo/CoinGecko; it retains timestamp and provider provenance. Taiwan-close Telegram output translates evidence labels, uses the prior exchange session date, treats zero return as `持平`, and omits unproven round-number levels.
+- Local verification: full non-live suite 154 PASS; four-report dry run PASS; Python compile, workflow YAML/Vercel JSON parsing, and `git diff --check` PASS. PIOS remains a read-only source; no holdings were edited.
+
 ## 2026-09-24
 
 - Linked Vercel production project `pincoin1002s-projects/market-report-us-open-scheduler` and set production-only encrypted `CRON_SECRET` plus `GITHUB_WORKFLOW_DISPATCH_TOKEN`; neither value is in the repo, local output, or logs. The first production deployment exposed Vercel's current Python-runtime entrypoint detection requirement. Reworked the two cron routes into Vercel-recognized `api/index.py` with rewrite-selected EDT/EST slots and preserved the existing authorization, DST, bounded retry, metadata, and fail-closed behavior. Production deployment is READY at the Vercel alias; an unauthenticated endpoint probe returned only `401 UNAUTHORIZED` and did not dispatch GitHub.

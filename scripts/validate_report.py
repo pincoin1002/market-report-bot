@@ -109,7 +109,8 @@ def validate_rendered_report_structure(report_text: str, report_type: str) -> tu
     forbidden_tokens = [
         "VALID", "PARTIAL", "DATA_BLOCKED", "DATEMISMATCH", "DATE_MISMATCH",
         "MarketContext", "弱資料模組", "UNAVAILABLE", "NO_MATERIAL_CHANGE",
-        "SIZE_NOT_COMPUTED", "QUOTE_UNAVAILABLE_OR_INVALID",
+        "SIZE_NOT_COMPUTED", "QUOTE_UNAVAILABLE_OR_INVALID", "OBSERVED",
+        "SUPPORTED_ASSOCIATION", "UNRESOLVED",
     ]
     for token in forbidden_tokens:
         pattern = rf"(?:\b|\||\s){re.escape(token)}(?:\b|\||\s)"
@@ -224,7 +225,8 @@ def validate_numeric_provenance(report_text: str, context: MarketContext) -> tup
     if context.taiex_summary:
         ts = context.taiex_summary
         for val in [ts.open, ts.high, ts.low, ts.close, ts.point_change, ts.change_pct,
-                    ts.turnover_ntd_billions, ts.advancing, ts.declining, ts.unchanged]:
+                    ts.turnover_ntd_billions, ts.advancing, ts.declining, ts.unchanged,
+                    ts.advancing_prev, ts.declining_prev, ts.unchanged_prev]:
             if val is not None:
                 allowed_numbers.add(round(float(val), 2))
                 allowed_numbers.add(round(abs(float(val)), 2))
@@ -249,7 +251,9 @@ def validate_numeric_provenance(report_text: str, context: MarketContext) -> tup
         for val in [fl.foreign_buy_sell_ntd_billions, fl.investment_trust_buy_sell_ntd_billions,
                     fl.dealer_buy_sell_ntd_billions, fl.total_buy_sell_ntd_billions,
                     fl.foreign_futures_net_oi, fl.foreign_futures_oi_change,
-                    fl.foreign_buy_sell_prev_ntd_billions, fl.turnover_prev_ntd_billions]:
+                    fl.foreign_buy_sell_prev_ntd_billions, fl.turnover_prev_ntd_billions,
+                    fl.investment_trust_buy_sell_prev_ntd_billions,
+                    fl.dealer_buy_sell_prev_ntd_billions]:
             if val is not None:
                 allowed_numbers.add(round(float(val), 2))
                 allowed_numbers.add(round(abs(float(val)), 2))
@@ -262,6 +266,21 @@ def validate_numeric_provenance(report_text: str, context: MarketContext) -> tup
             foreign_delta = round(abs(fl.foreign_buy_sell_ntd_billions - fl.foreign_buy_sell_prev_ntd_billions), 2)
             allowed_numbers.add(foreign_delta)
             allowed_numbers.add(float(int(foreign_delta)))
+        for current, previous in [
+            (fl.investment_trust_buy_sell_ntd_billions, fl.investment_trust_buy_sell_prev_ntd_billions),
+            (fl.dealer_buy_sell_ntd_billions, fl.dealer_buy_sell_prev_ntd_billions),
+        ]:
+            if current is not None and previous is not None:
+                delta = round(abs(current - previous), 2)
+                allowed_numbers.add(delta)
+                allowed_numbers.add(float(int(delta)))
+
+    if context.taiex_summary and context.taiex_summary.advancing is not None and context.taiex_summary.declining is not None:
+        net = context.taiex_summary.advancing - context.taiex_summary.declining
+        allowed_numbers.add(float(net))
+        if context.taiex_summary.advancing_prev is not None and context.taiex_summary.declining_prev is not None:
+            previous_net = context.taiex_summary.advancing_prev - context.taiex_summary.declining_prev
+            allowed_numbers.add(float(net - previous_net))
 
     # Methodology thresholds are not price targets; dynamic report levels must
     # still originate from the current deterministic context above.
@@ -270,7 +289,7 @@ def validate_numeric_provenance(report_text: str, context: MarketContext) -> tup
     in_narrative = False
     for line in report_text.splitlines():
         line_s = line.strip()
-        if line_s.startswith("## ") and any(k in line_s for k in ("Top Market Drivers", "今日走勢", "Rotation", "輪動", "Events", "事件", "今日關鍵驅動", "相較昨日", "明日觀察")):
+        if line_s.startswith("## ") and any(k in line_s for k in ("Top Market Drivers", "今日走勢", "Rotation", "輪動", "Events", "事件", "今日關鍵驅動", "相較昨日", "相較前一交易日", "明日觀察")):
             in_narrative = True
             continue
         elif line_s.startswith("## ") and any(k in line_s for k in ("Executive Market State", "市場核心概況", "What Changed", "今日市場", "法人與資金", "權值與族群", "持股資料狀態")):

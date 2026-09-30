@@ -392,7 +392,7 @@ class PortfolioCoverageRegressionTest(unittest.TestCase):
         self.assertEqual(observation.retrieved_at, now)
         self.assertNotIn("若匯價走升將有助於外資現貨買超延續", rendered)
 
-    def test_watch_levels_are_derived_from_current_index_not_a_template(self):
+    def test_watch_levels_never_invent_round_number_support(self):
         context = build_market_context(Snapshot(
             generated_at=datetime(2026, 9, 24, tzinfo=timezone.utc),
             report_type="tw_close", report_market_date="2026-09-24",
@@ -400,7 +400,7 @@ class PortfolioCoverageRegressionTest(unittest.TestCase):
         ), "tw_close")
         from structured_reports import derive_tomorrow_watch_signals
         rendered = "\n".join(derive_tomorrow_watch_signals(context))
-        self.assertIn("48,000", rendered)
+        self.assertNotIn("48,000", rendered)
         self.assertNotIn("46,000", rendered)
 
 
@@ -546,10 +546,12 @@ class ExternalUSOpenSchedulerTest(unittest.TestCase):
 
         self.assertFalse(should_dispatch("est", datetime(2026, 9, 24, 9, 55, tzinfo=NY)))
 
-    def test_delayed_matching_external_slot_still_dispatches_to_surface_expiry(self):
-        from scheduler.us_open_dispatch import should_dispatch
+    def test_delayed_matching_external_slot_is_terminal_not_normal_dispatch(self):
+        from scheduler.us_open_dispatch import scheduler_decision, should_dispatch
 
-        self.assertTrue(should_dispatch("edt", datetime(2026, 9, 24, 9, 31, tzinfo=NY)))
+        late = datetime(2026, 9, 24, 9, 31, tzinfo=NY)
+        self.assertFalse(should_dispatch("edt", late))
+        self.assertEqual(scheduler_decision("edt", late), "OUTSIDE_STAGING_WINDOW")
 
     def test_dispatch_payload_carries_only_intent_metadata(self):
         from scheduler.us_open_dispatch import dispatch_payload
@@ -847,7 +849,7 @@ class StructuredReportTest(unittest.TestCase):
         context = build_market_context(snapshot, "tw_close", run_id="tw-degraded-public")
         draft = build_public_draft(context)
         self.assertTrue(validate_public_draft(draft, context)[0])
-        self.assertIn("私人持股結論已 fail-closed", draft.rendered_markdown)
+        self.assertIn("操作建議暫停", draft.rendered_markdown)
 
 
 class StructuredBriefTest(unittest.TestCase):
@@ -1120,7 +1122,7 @@ class SafetyAndWorkflowTest(unittest.TestCase):
     def test_vercel_scheduler_is_server_side_and_has_no_embedded_token(self):
         config = json.loads((ROOT / "vercel.json").read_text(encoding="utf-8"))
         self.assertEqual(len(config["crons"]), 2)
-        self.assertEqual({item["schedule"] for item in config["crons"]}, {"55 12 * * 1-5", "55 13 * * 1-5"})
+        self.assertEqual({item["schedule"] for item in config["crons"]}, {"0 12 * * 1-5", "0 13 * * 1-5"})
         source = (ROOT / "scheduler" / "us_open_dispatch.py").read_text(encoding="utf-8")
         self.assertIn('os.getenv("GITHUB_WORKFLOW_DISPATCH_TOKEN"', source)
         self.assertIn('os.getenv("CRON_SECRET"', source)

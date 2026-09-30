@@ -80,7 +80,7 @@ def _macro(symbol: str, name: str, provider: str, currency: str = "",
 
 
 def _crypto(symbol: str, name: str, coingecko_id: str,
-            provider: str | None = None) -> InstrumentSpec:
+            provider: str | None = None, coinbase: str | None = None) -> InstrumentSpec:
     return InstrumentSpec(
         canonical_symbol=symbol,
         display_name=name,
@@ -92,6 +92,7 @@ def _crypto(symbol: str, name: str, coingecko_id: str,
             "yfinance": provider or f"{symbol}-USD",
             "yahoo_chart": provider or f"{symbol}-USD",
             "coingecko": coingecko_id,
+            **({"coinbase": coinbase} if coinbase else {}),
         },
         aliases=[],
         price_precision=8,
@@ -148,7 +149,7 @@ REGISTRY: dict[str, InstrumentSpec] = {
     "ETH": _crypto("ETH", "Ethereum", "ethereum"),
     "USDC": _crypto("USDC", "USD Coin", "usd-coin"),
     "USDT": _crypto("USDT", "Tether", "tether"),
-    "BONK": _crypto("BONK", "Bonk", "bonk"),
+    "BONK": _crypto("BONK", "Bonk", "bonk", coinbase="BONK-USD"),
     "SXT": _crypto("SXT", "Space and Time", "space-and-time"),
     "0050": _tw("0050", "元大台灣50", asset_type="ETF"),
     "006208": _tw("006208", "富邦台50", asset_type="ETF"),

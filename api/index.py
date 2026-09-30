@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
 
@@ -18,6 +19,14 @@ class handler(BaseHTTPRequestHandler):
             self._respond(404, {"ok": False, "status": "NOT_FOUND"})
             return
         status, payload = handle_cron_request(slot, self.headers.get("Authorization", ""))
+        # This is intentionally payload-only: no authorization header or
+        # dispatch credential can enter Vercel logs.  It gives operators the
+        # actual invocation timestamp for future incident reconstruction.
+        print(json.dumps({
+            "scheduler_invoked_at": datetime.now(tz=timezone.utc).isoformat(),
+            "slot": slot,
+            "status": payload.get("status"),
+        }))
         self._respond(status, payload)
 
     def _respond(self, status: int, payload: dict[str, object]) -> None:
