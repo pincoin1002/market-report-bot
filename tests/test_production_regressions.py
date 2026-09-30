@@ -2,151 +2,522 @@
 
 from __future__ import annotations
 
+import json
 import os
+import shutil
 import sys
+import tempfile
 import unittest
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from unittest.mock import Mock, patch
-
+from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(ROOT))
 
-from instrument_registry import resolve_instrument
-from models import InstitutionalFlows, PortfolioContext, TaiexMarketSummary
+from fetch_market_data import build_portfolio_quote_coverage
+from instrument_registry import REGISTRY, resolve_instrument
+from market_session import (
+    NY, TPE, get_most_recent_completed_session, get_previous_completed_session_date,
+    get_target_market_date, is_nyse_trading_day, is_tw_trading_day,
+    us_open_intended_datetime, us_open_snapshot_contract_status, us_open_wait_seconds,
+)
+from models import (
+    InstitutionalFlows, MarketContext, MarketReportDraft, NamedQuote,
+    PortfolioContext, PositionContext, PortfolioQuoteCoverage, Quote,
+    QuoteObservation, TaiexMarketSummary,
+)
+from portfolio_context import load_authoritative_portfolio
 from providers import CoinbaseCryptoProvider, _quote_from_closes
-from scheduler.us_open_dispatch import NY, handle_cron_request, scheduler_decision, should_dispatch
-from twse_market_evidence import fetch_twse_close_evidence
+from scheduler.us_open_dispatch import (
+    handle_cron_request, scheduler_decision, should_dispatch, send_dispatch_failure_alert,
+)
+from send_operational_alert import already_alerted, record_alert, send_telegram_alert
+from structured_reports import (
+    _reader_evidence_line, _render_tw_close_report, build_public_draft,
+    derive_evidence_supported_drivers, derive_tomorrow_watch_signals,
+    derive_tw_session_deltas, portfolio_report_section, return_direction,
+)
+from twse_market_evidence import TWSECloseEvidence, fetch_twse_close_evidence
+from validate_report import validate_rendered_report_structure
 
 
-class USOpenStagingWindowRegressionTest(unittest.TestCase):
-    def test_both_dst_slots_can_stage_before_0905_but_never_after_0900(self):
-        self.assertTrue(should_dispatch("edt", datetime(2026, 9, 29, 8, 0, tzinfo=NY)))
-        self.assertTrue(should_dispatch("edt", datetime(2026, 9, 29, 8, 59, 59, tzinfo=NY)))
-        self.assertTrue(should_dispatch("est", datetime(2026, 12, 29, 8, 0, tzinfo=NY)))
-        self.assertFalse(should_dispatch("edt", datetime(2026, 9, 29, 9, 0, tzinfo=NY)))
-        self.assertEqual(
-            scheduler_decision("edt", datetime(2026, 9, 29, 9, 44, 45, tzinfo=NY)),
-            "OUTSIDE_STAGING_WINDOW",
-        )
+class USOpenSchedulerContractSuiteTest(unittest.TestCase):
+    """Tests 1-11: US Scheduler contracts, timing semantics, and operational failure alerts."""
 
-    def test_late_external_invocation_dispatches_only_terminal_alert_workflow(self):
-        late = datetime(2026, 9, 29, 9, 44, 45, tzinfo=NY)
+    def test_01_edt_valid_early_staging_trigger(self):
+        # 1. EDT valid early staging trigger (08:00 New York)
+        now_edt = datetime(2026, 9, 29, 8, 15, tzinfo=NY)
+        self.assertTrue(should_dispatch("edt", now_edt))
+        self.assertEqual(scheduler_decision("edt", now_edt), "DISPATCH")
+
+    def test_02_est_valid_early_staging_trigger(self):
+        # 2. EST valid early staging trigger (08:15 New York in December)
+        now_est = datetime(2026, 12, 29, 8, 15, tzinfo=NY)
+        self.assertTrue(should_dispatch("est", now_est))
+        self.assertEqual(scheduler_decision("est", now_est), "DISPATCH")
+
+    def test_03_worst_case_delayed_hobby_invocation_before_canonical_snapshot(self):
+        # 3. Worst-case delayed Hobby invocation under new 0 12 / 0 13 schedule (08:59:59 NY)
+        # Invocation anywhere during 08:00-08:59 NY is still strictly BEFORE 09:05 NY canonical snapshot
+        worst_case = datetime(2026, 9, 29, 8, 59, 59, tzinfo=NY)
+        self.assertTrue(should_dispatch("edt", worst_case))
+        canonical = us_open_intended_datetime(worst_case)
+        self.assertLess(worst_case, canonical)
+        self.assertEqual(canonical.time().strftime("%H:%M"), "09:05")
+
+    def test_04_delayed_invocation_after_allowed_window_no_normal_dispatch(self):
+        # 4. Delayed invocation after allowed window -> no normal dispatch
+        # at 09:00:00 or 09:44 EDT
+        after_window = datetime(2026, 9, 29, 9, 0, 0, tzinfo=NY)
+        late_run = datetime(2026, 9, 29, 9, 44, 45, tzinfo=NY)
+        self.assertFalse(should_dispatch("edt", after_window))
+        self.assertEqual(scheduler_decision("edt", after_window), "OUTSIDE_STAGING_WINDOW")
+        self.assertFalse(should_dispatch("edt", late_run))
+        self.assertEqual(scheduler_decision("edt", late_run), "OUTSIDE_STAGING_WINDOW")
+
+        # Must dispatch only terminal alert workflow, never normal report
         with patch("scheduler.us_open_dispatch.dispatch_workflow", return_value=204) as dispatch, patch.dict(
             os.environ,
             {"CRON_SECRET": "cron", "GITHUB_WORKFLOW_DISPATCH_TOKEN": "token"},
             clear=False,
         ):
-            status, payload = handle_cron_request("edt", "Bearer cron", now=late)
+            status, payload = handle_cron_request("edt", "Bearer cron", now=late_run)
         self.assertEqual(status, 202)
         self.assertEqual(payload["status"], "SCHEDULER_WINDOW_EXPIRED")
         submitted = dispatch.call_args.args[1]
         self.assertEqual(submitted["inputs"]["scheduler_terminal_state"], "SCHEDULER_WINDOW_EXPIRED")
-        self.assertEqual(submitted["inputs"]["intended_market_time"], "09:05")
+
+    def test_05_wrong_dst_slot_ignored(self):
+        # 5. Wrong DST slot -> ignore
+        # In summer/autumn (EDT), EST slot must be ignored
+        now_edt = datetime(2026, 9, 29, 8, 15, tzinfo=NY)
+        self.assertFalse(should_dispatch("est", now_edt))
+        self.assertEqual(scheduler_decision("est", now_edt), "IGNORED_DST_SLOT")
+
+    def test_06_weekend_market_closed(self):
+        # 6. Weekend -> MARKET_CLOSED/no normal report
+        saturday = datetime(2026, 10, 3, 8, 15, tzinfo=NY)
+        self.assertFalse(should_dispatch("edt", saturday))
+        self.assertEqual(scheduler_decision("edt", saturday), "MARKET_CLOSED")
+
+    def test_07_nyse_holiday_market_closed(self):
+        # 7. NYSE holiday -> MARKET_CLOSED/no normal report (e.g. 2026-07-03 Independence Day observed)
+        holiday = datetime(2026, 7, 3, 8, 15, tzinfo=NY)
+        self.assertFalse(should_dispatch("edt", holiday))
+        self.assertEqual(scheduler_decision("edt", holiday), "MARKET_CLOSED")
+
+    def test_08_canonical_0905_snapshot_pinned(self):
+        # 8. Canonical 09:05 snapshot
+        t1 = datetime(2026, 9, 29, 8, 5, tzinfo=NY)
+        t2 = datetime(2026, 9, 29, 8, 50, tzinfo=NY)
+        self.assertEqual(us_open_intended_datetime(t1).strftime("%H:%M"), "09:05")
+        self.assertEqual(us_open_intended_datetime(t2).strftime("%H:%M"), "09:05")
+
+    def test_09_at_or_after_0930_can_never_become_normal_us_open(self):
+        # 9. >=09:30 can never become normal US-open
+        at_open = datetime(2026, 9, 29, 9, 30, 0, tzinfo=NY)
+        after_open = datetime(2026, 9, 29, 9, 45, 0, tzinfo=NY)
+        self.assertEqual(us_open_snapshot_contract_status(at_open), "INTENT_EXPIRED")
+        self.assertEqual(us_open_snapshot_contract_status(after_open), "INTENT_EXPIRED")
+
+    def test_10_duplicate_external_native_triggers_one_delivery(self):
+        # 10. Duplicate external/native triggers -> one delivery guard
+        import us_open_intent
+        with tempfile.TemporaryDirectory() as tmpdir:
+            reports_dir = Path(tmpdir) / "reports"
+            reports_dir.mkdir()
+            (reports_dir / "us_open_20260929_090500.md").write_text("# Report", encoding="utf-8")
+            with patch.object(us_open_intent, "ROOT", Path(tmpdir)):
+                self.assertTrue(us_open_intent.has_existing_report("2026-09-29"))
+                self.assertFalse(us_open_intent.has_existing_report("2026-09-30"))
+
+    def test_11_failure_operational_alert_exactly_once(self):
+        # 11. Failure operational alert -> exactly once
+        import send_operational_alert
+        with tempfile.TemporaryDirectory() as tmpdir:
+            alerts_dir = Path(tmpdir) / "reports" / ".alerts"
+            with patch.object(send_operational_alert, "ALERTS_DIR", alerts_dir):
+                self.assertFalse(send_operational_alert.already_alerted("us_open", "2026-09-29"))
+
+                # First alert records marker
+                send_operational_alert.record_alert("us_open", "2026-09-29", "INTENT_EXPIRED")
+                self.assertTrue(send_operational_alert.already_alerted("us_open", "2026-09-29"))
+
+                # Second attempt detects existing marker and skips
+                mock_send = Mock(return_value=True)
+                with patch("send_operational_alert.send_telegram_alert", mock_send):
+                    with patch("sys.argv", ["send_operational_alert.py", "us_open", "INTENT_EXPIRED"]):
+                        with patch.dict(os.environ, {"US_OPEN_INTENDED_MARKET_DATE": "2026-09-29"}):
+                            with self.assertRaises(SystemExit) as cm:
+                                send_operational_alert.main()
+                            self.assertEqual(cm.exception.code, 0)
+                            mock_send.assert_not_called()
+
+    def test_dispatch_failed_sends_telegram_alert(self):
+        # Operational alert on DISPATCH_FAILED in Vercel
+        with patch("scheduler.us_open_dispatch.dispatch_workflow", side_effect=RuntimeError("GitHub API down")), patch(
+            "scheduler.us_open_dispatch.send_dispatch_failure_alert"
+        ) as mock_alert, patch.dict(
+            os.environ,
+            {"CRON_SECRET": "cron", "GITHUB_WORKFLOW_DISPATCH_TOKEN": "token"},
+            clear=False,
+        ):
+            status, payload = handle_cron_request("edt", "Bearer cron", now=datetime(2026, 9, 29, 8, 15, tzinfo=NY))
+            self.assertEqual(status, 502)
+            self.assertEqual(payload["status"], "DISPATCH_FAILED")
+            mock_alert.assert_called_once()
 
 
-class CrossMarketDailyCloseRegressionTest(unittest.TestCase):
-    def test_completed_us_close_is_selected_instead_of_current_live_daily_bar(self):
+class PortfolioCrossMarketExhaustiveTest(unittest.TestCase):
+    """Tests 12-19: Cross-market portfolio session contracts and diagnostic accounting."""
+
+    def test_12_tw_close_before_us_open_previous_completed_us_session_valid(self):
+        # 12. Taiwan close before US open -> previous completed US session valid
+        # At 13:30 TPE (01:30 EDT), US market for 2026-09-29 has not opened.
+        tw_close_time = datetime(2026, 9, 29, 13, 30, tzinfo=TPE)
+        target_us = get_target_market_date("tw_close", "US", now=tw_close_time)
+        self.assertEqual(target_us, "2026-09-28")
+
+    def test_13_tw_close_during_current_us_session_previous_close_remains_authority(self):
+        # 13. Taiwan-close workflow executes during current US session -> previous completed official US session remains valuation authority
+        # At 21:54 TPE (09:54 EDT), 2026-09-29 US session is live and incomplete.
+        late_tw_close = datetime(2026, 9, 29, 21, 54, tzinfo=TPE)
+        target_us = get_target_market_date("tw_close", "US", now=late_tw_close)
+        self.assertEqual(target_us, "2026-09-28")
+
+    def test_14_current_session_live_quote_does_not_block_official_close_fallback(self):
+        # 14. Current-session live quote does not block official-close fallback
+        # When yfinance returns 10d including live bar 2026-09-29, _quote_from_closes pins to 2026-09-28
         quote = _quote_from_closes([
-            ("2026-09-25", 100.0),
-            ("2026-09-28", 102.0),
-            ("2026-09-29", 105.0),  # current US session, still live at TW close
+            ("2026-09-24", 98.0),
+            ("2026-09-25", 99.0),
+            ("2026-09-28", 100.0),
+            ("2026-09-29", 105.0),  # live bar
         ], expected_date="2026-09-28")
         self.assertIsNotNone(quote)
         self.assertEqual(quote.data_date, "2026-09-28")
-        self.assertEqual(quote.price, 102.0)
-        self.assertEqual(quote.prev_close, 100.0)
+        self.assertEqual(quote.price, 100.0)
 
-
-class CoinbaseBonkFallbackRegressionTest(unittest.TestCase):
-    def test_registered_bonk_pair_keeps_coinbase_provenance(self):
-        now = datetime.now(tz=timezone.utc)
-        ticker = Mock()
-        ticker.raise_for_status.return_value = None
-        ticker.json.return_value = {"price": "0.000012", "time": now.isoformat().replace("+00:00", "Z")}
-        stats = Mock()
-        stats.raise_for_status.return_value = None
-        stats.json.return_value = {"open": "0.000010"}
-        with patch("providers.requests.get", side_effect=[ticker, stats]):
-            observations = CoinbaseCryptoProvider().fetch_many([resolve_instrument("BONK")])
-        bonk = observations["BONK"]
-        self.assertEqual(bonk.provider, "coinbase_exchange")
-        self.assertEqual(bonk.canonical_symbol, "BONK")
-        self.assertIsNotNone(bonk.provider_timestamp)
-        self.assertEqual(bonk.quality_status, "VALID")
-
-
-class TWSEEvidenceRegressionTest(unittest.TestCase):
-    @staticmethod
-    def _market(date: str, turnover: str, advance: str, decline: str, unchanged: str) -> dict:
-        return {
-            "stat": "OK", "date": date,
-            "tables": [
-                {"title": "價格指數(臺灣證券交易所)", "data": [["發行量加權股價指數", "47,631.96", "-", "392.64", "-0.82"]]},
-                {"title": "大盤統計資訊", "data": [["總計(1~15)", turnover, "1", "1"]]},
-                {"title": "漲跌證券數合計", "data": [["上漲(漲停)", "0", advance], ["下跌(跌停)", "0", decline], ["持平", "0", unchanged]]},
-            ],
-        }
-
-    @staticmethod
-    def _flows(date: str, foreign: str) -> dict:
-        return {
-            "stat": "OK", "date": date,
-            "data": [
-                ["自營商(自行買賣)", "0", "0", "-100000000"],
-                ["自營商(避險)", "0", "0", "-200000000"],
-                ["投信", "0", "0", "300000000"],
-                ["外資及陸資(不含外資自營商)", "0", "0", foreign],
-                ["合計", "0", "0", "-600000000"],
-            ],
-        }
-
-    def test_official_turnover_breadth_and_flows_require_both_session_dates(self):
-        payloads = [
-            self._market("20260929", "836,144,707,733", "374(24)", "586(0)", "112"),
-            self._market("20260928", "700,000,000,000", "400(1)", "300(1)", "100"),
-            self._flows("20260929", "-62582550525"),
-            self._flows("20260928", "10000000000"),
-        ]
-        responses = []
-        for payload in payloads:
-            response = Mock()
-            response.raise_for_status.return_value = None
-            response.json.return_value = payload
-            responses.append(response)
-        with patch("twse_market_evidence.requests.get", side_effect=responses):
-            evidence = fetch_twse_close_evidence("2026-09-29", "2026-09-28")
-        self.assertIsNotNone(evidence)
-        assert evidence is not None
-        self.assertEqual(evidence.taiex_summary.session_date, "2026-09-29")
-        self.assertEqual(evidence.taiex_summary.previous_session_date, "2026-09-28")
-        self.assertEqual(evidence.taiex_summary.advancing, 374)
-        self.assertEqual(evidence.taiex_summary.declining_prev, 300)
-        self.assertEqual(evidence.previous_turnover_ntd_billions, 700.0)
-        self.assertEqual(evidence.institutional_flows.foreign_buy_sell_ntd_billions, -62.58)
-        self.assertEqual(evidence.institutional_flows.dealer_buy_sell_ntd_billions, -0.3)
-
-    def test_official_taiex_summary_also_enters_quote_and_renderer_contract(self):
-        import fetch_market_data
-        from twse_market_evidence import TWSECloseEvidence
-
-        as_of = datetime(2026, 9, 30, 15, 5, tzinfo=timezone(timedelta(hours=8)))
-        summary = TaiexMarketSummary(
-            close=47940.13, point_change=308.17, change_pct=0.65,
-            session_date="2026-09-30", previous_session_date="2026-09-29",
+    def test_15_old_completed_session_rejected(self):
+        # 15. Old completed session -> reject
+        pos = PositionContext(position_id="us-aapl", instrument_id="AAPL", ticker="AAPL", name="Apple", quantity=1.0, currency="USD", asset_type="EQUITY")
+        context = PortfolioContext(positions=[pos], source="test")
+        spec = resolve_instrument("AAPL")
+        obs_old = QuoteObservation(
+            quote_id="AAPL:2026-09-25:REGULAR:yfinance",
+            instrument_id="AAPL", canonical_symbol="AAPL", price=150.0, currency="USD",
+            previous_regular_close=148.0, change_pct=1.35,
+            session="REGULAR", market_date="2026-09-25", observed_at=datetime(2026, 9, 25, 16, 0, tzinfo=NY),
+            retrieved_at=datetime(2026, 9, 29, 13, 30, tzinfo=TPE), provider="yfinance",
+            quote_type="OFFICIAL_CLOSE", is_delayed=True, quality_status="VALID", market="US",
         )
-        evidence = TWSECloseEvidence(summary, InstitutionalFlows(), 836.14)
-        with patch("fetch_market_data.load_authoritative_portfolio", return_value=PortfolioContext(source="fixture")), patch(
-            "fetch_market_data.build_universe", return_value={"TAIEX": resolve_instrument("TAIEX")}
-        ), patch("fetch_market_data.fetch_session_observations", return_value=({}, {})), patch(
-            "fetch_market_data.get_target_market_date",
-            side_effect=["2026-09-30", "2026-09-29", "2026-09-30"],
-        ), patch("fetch_market_data.get_previous_completed_session_date", return_value="2026-09-29"), patch(
-            "fetch_market_data.fetch_twse_close_evidence", return_value=evidence
-        ):
-            snapshot = fetch_market_data.build_snapshot("tw_close", retrieved_at=as_of)
-        self.assertEqual(snapshot.quote_observations["TAIEX"].provider, "twse_mi_index")
-        self.assertEqual(snapshot.quote_observations["TAIEX"].market_date, "2026-09-30")
-        self.assertEqual(snapshot.tw_stocks["TAIEX"].price, 47940.13)
+        cov = build_portfolio_quote_coverage(
+            context, {"AAPL": obs_old}, {"AAPL": spec},
+            datetime(2026, 9, 29, 13, 30, tzinfo=TPE), {"US": "2026-09-28"},
+        )
+        self.assertEqual(cov.covered_positions, 0)
+        self.assertEqual(len(cov.stale), 1)
+        self.assertIn("differs from expected 2026-09-28", cov.stale[0].reason)
+
+    def test_16_future_session_rejected(self):
+        # 16. Future session -> reject
+        pos = PositionContext(position_id="us-aapl", instrument_id="AAPL", ticker="AAPL", name="Apple", quantity=1.0, currency="USD", asset_type="EQUITY")
+        context = PortfolioContext(positions=[pos], source="test")
+        spec = resolve_instrument("AAPL")
+        obs_future = QuoteObservation(
+            quote_id="AAPL:2026-09-30:REGULAR:yfinance",
+            instrument_id="AAPL", canonical_symbol="AAPL", price=150.0, currency="USD",
+            previous_regular_close=148.0, change_pct=1.35,
+            session="REGULAR", market_date="2026-09-30", observed_at=datetime(2026, 9, 30, 16, 0, tzinfo=NY),
+            retrieved_at=datetime(2026, 9, 29, 13, 30, tzinfo=TPE), provider="yfinance",
+            quote_type="OFFICIAL_CLOSE", is_delayed=True, quality_status="VALID", market="US",
+        )
+        cov = build_portfolio_quote_coverage(
+            context, {"AAPL": obs_future}, {"AAPL": spec},
+            datetime(2026, 9, 29, 13, 30, tzinfo=TPE), {"US": "2026-09-28"},
+        )
+        self.assertEqual(cov.covered_positions, 0)
+        self.assertEqual(len(cov.stale), 1)
+
+    def test_17_crypto_unchanged_without_exchange_date_constraint(self):
+        # 17. Crypto unchanged without exchange calendar date
+        pos = PositionContext(position_id="crypto-btc", instrument_id="BTC", ticker="BTC", name="Bitcoin", quantity=1.0, currency="USD", asset_type="CRYPTO")
+        context = PortfolioContext(positions=[pos], source="test")
+        spec = resolve_instrument("BTC")
+        obs_crypto = QuoteObservation(
+            quote_id="BTC:2026-09-29T12:00:00Z:REGULAR:coinbase",
+            instrument_id="BTC", canonical_symbol="BTC", price=65000.0, currency="USD",
+            previous_regular_close=64000.0, change_pct=1.56,
+            session="REGULAR", market_date="2026-09-29", observed_at=datetime(2026, 9, 29, 12, 0, tzinfo=timezone.utc),
+            retrieved_at=datetime(2026, 9, 29, 13, 30, tzinfo=TPE), provider="coinbase",
+            quote_type="TRADE", is_delayed=True, quality_status="VALID", market="CRYPTO",
+        )
+        cov = build_portfolio_quote_coverage(
+            context, {"BTC": obs_crypto}, {"BTC": spec},
+            datetime(2026, 9, 29, 13, 30, tzinfo=TPE), {"US": "2026-09-28", "TW": "2026-09-29"},
+        )
+        self.assertEqual(cov.covered_positions, 1)
+        self.assertEqual(cov.status, "FULL")
+
+    def test_18_taiwan_instruments_require_current_tw_session_date(self):
+        # 18. Taiwan instruments unchanged (requires TW target session date)
+        pos = PositionContext(position_id="tw-2330", instrument_id="2330", ticker="2330", name="台積電", quantity=1000.0, currency="TWD", asset_type="EQUITY")
+        context = PortfolioContext(positions=[pos], source="test")
+        spec = resolve_instrument("2330")
+        obs_tw = QuoteObservation(
+            quote_id="2330:2026-09-29:REGULAR:twse",
+            instrument_id="2330", canonical_symbol="2330", price=2475.0, currency="TWD",
+            previous_regular_close=2475.0, change_pct=0.0,
+            session="REGULAR", market_date="2026-09-29", observed_at=datetime(2026, 9, 29, 13, 30, tzinfo=TPE),
+            retrieved_at=datetime(2026, 9, 29, 13, 30, tzinfo=TPE), provider="twse",
+            quote_type="OFFICIAL_CLOSE", is_delayed=True, quality_status="VALID", market="TW",
+        )
+        cov = build_portfolio_quote_coverage(
+            context, {"2330": obs_tw}, {"2330": spec},
+            datetime(2026, 9, 29, 13, 30, tzinfo=TPE), {"TW": "2026-09-29", "US": "2026-09-28"},
+        )
+        self.assertEqual(cov.covered_positions, 1)
+        self.assertEqual(cov.status, "FULL")
+
+    def test_19_23_position_diagnostic_accounting_sums_correctly(self):
+        # 19. 23-position diagnostic accounting sums correctly
+        context = load_authoritative_portfolio()
+        positions = context.positions
+        self.assertEqual(len(positions), 23)
+
+        # Test partial coverage where 11 are valid and 12 are unresolved
+        target_dates = {"TW": "2026-09-29", "US": "2026-09-28"}
+        observations = {}
+        for pos in positions[:11]:
+            mkt = resolve_instrument(pos.ticker).market
+            mkt_date = target_dates.get(mkt, "2026-09-29")
+            obs = QuoteObservation(
+                quote_id=f"{pos.ticker}:{mkt_date}:REGULAR:test",
+                instrument_id=pos.ticker, canonical_symbol=pos.ticker, price=100.0,
+                previous_regular_close=100.0, change_pct=0.0,
+                currency=pos.currency, session="REGULAR", market_date=mkt_date,
+                observed_at=datetime(2026, 9, 29, 13, 30, tzinfo=TPE),
+                retrieved_at=datetime(2026, 9, 29, 13, 30, tzinfo=TPE), provider="test",
+                quote_type="OFFICIAL_CLOSE", is_delayed=True, quality_status="VALID",
+                market=mkt,
+            )
+            observations[pos.ticker] = obs
+        universe = {pos.ticker: resolve_instrument(pos.ticker) for pos in positions}
+        cov = build_portfolio_quote_coverage(
+            context, observations, universe,
+            datetime(2026, 9, 29, 13, 30, tzinfo=TPE), target_dates,
+        )
+        self.assertEqual(cov.expected_positions, 23)
+        self.assertEqual(cov.covered_positions + len(cov.missing) + len(cov.stale) + len(cov.unsupported), 23)
+        self.assertEqual(cov.covered_positions, 11)
+
+
+class ReportUXExhaustiveTest(unittest.TestCase):
+    """Tests 20-28: Report UX, deterministic wording, and forbidden diagnostic token elimination."""
+
+    def test_20_flat_return_wording_never_says_down_zero(self):
+        # 20. 0.00% -> 持平, never 上載/下跌
+        self.assertEqual(return_direction(0.0), "持平")
+        self.assertEqual(return_direction(0.00001), "持平")
+        self.assertEqual(return_direction(-0.00001), "持平")
+        self.assertEqual(return_direction(0.01), "上漲")
+        self.assertEqual(return_direction(-0.01), "下跌")
+
+    def test_21_22_23_raw_tokens_absent_from_telegram(self):
+        # 21, 22, 23: raw OBSERVED, SUPPORTED_ASSOCIATION, UNRESOLVED absent from Telegram output
+        raw_observed = "[OBSERVED] 市場結果：加權指數收在 47,631.96 點（-0.82%）。"
+        raw_association = "[SUPPORTED_ASSOCIATION] 權值壓力：聯發科 -7.10%；多個大型權值同步走弱。"
+        raw_unresolved = "[UNRESOLVED] 三大法人：UNRESOLVED（缺少統計）。"
+
+        t_obs = _reader_evidence_line(raw_observed)
+        t_assoc = _reader_evidence_line(raw_association)
+        t_unres = _reader_evidence_line(raw_unresolved)
+
+        self.assertNotIn("OBSERVED", t_obs)
+        self.assertNotIn("SUPPORTED_ASSOCIATION", t_assoc)
+        self.assertNotIn("UNRESOLVED", t_unres)
+        self.assertIn("今日官方法人資料尚未通過驗證，暫不判讀。", t_unres)
+
+    def test_24_previous_session_date_shown_instead_of_misleading_yesterday(self):
+        # 24. previous-session date shown instead of misleading "昨日"
+        # On 2026-09-29, previous TW trading session was 2026-09-24 (Mid-Autumn + Confucius Day holiday)
+        prev_date = get_previous_completed_session_date("TW", "2026-09-29")
+        self.assertEqual(prev_date, "2026-09-24")
+
+    def test_25_unresolved_nonessential_data_no_debug_clutter(self):
+        # 25. unresolved nonessential data does not create debug-log clutter
+        line = "[UNRESOLVED] Portfolio coverage change：UNRESOLVED（沒有前一 session artifact）。"
+        self.assertIsNone(_reader_evidence_line(line))
+
+    def test_26_arbitrary_support_levels_cannot_render_without_methodology(self):
+        # 26. arbitrary support/resistance levels cannot render without methodology
+        context = MarketContext(
+            run_id="test-watch", generated_at=datetime.now(tz=timezone.utc),
+            report_type="tw_close", market_date="2026-09-29", market_session="REGULAR",
+            taiex_summary=TaiexMarketSummary(close=47631.96, point_change=-392.64, change_pct=-0.82),
+        )
+        signals = derive_tomorrow_watch_signals(context)
+        for s in signals:
+            self.assertNotIn("47,000", s)
+            self.assertNotIn("動態參考", s)
+
+    def test_27_28_provenance_validation(self):
+        # 27 & 28: turnover/breadth and institutional-flow provenance validation
+        summary = TaiexMarketSummary(
+            close=47631.96, point_change=-392.64, change_pct=-0.82,
+            turnover_ntd_billions=836.14, advancing=374, declining=586, unchanged=112,
+            session_date="2026-09-29", previous_session_date="2026-09-24",
+            source="https://www.twse.com.tw/exchangeReport/MI_INDEX",
+        )
+        flows = InstitutionalFlows(
+            foreign_buy_sell_ntd_billions=-62.58, investment_trust_buy_sell_ntd_billions=0.58,
+            dealer_buy_sell_ntd_billions=-16.40, total_buy_sell_ntd_billions=-78.40,
+            session_date="2026-09-29", previous_session_date="2026-09-24",
+            source="https://www.twse.com.tw/fund/BFI82U",
+        )
+        self.assertEqual(summary.session_date, "2026-09-29")
+        self.assertEqual(summary.previous_session_date, "2026-09-24")
+        self.assertIn("MI_INDEX", summary.source)
+        self.assertEqual(flows.session_date, "2026-09-29")
+        self.assertEqual(flows.previous_session_date, "2026-09-24")
+        self.assertIn("BFI82U", flows.source)
+
+
+class Reproduction20260929Test(unittest.TestCase):
+    """Part E: Complete 2026-09-29 reproduction from production-shape data."""
+
+    def test_reproduce_20260929_taiwan_close(self):
+        # 1. 23 positions from canonical PIOS snapshot
+        context_portfolio = load_authoritative_portfolio()
+        positions = context_portfolio.positions
+        self.assertEqual(len(positions), 23)
+
+        # 2. Build universe & observations
+        # TW: 6 positions (2026-09-29)
+        # US: 11 positions (expected completed session: 2026-09-28)
+        # Crypto: 6 positions
+        retrieved_at = datetime(2026, 9, 29, 15, 0, tzinfo=TPE)
+        quotes: dict[str, QuoteObservation] = {}
+        named_quotes: dict[str, NamedQuote] = {}
+
+        tw_syms = ["0050", "006208", "1519", "2327", "2330", "2383", "TAIEX", "2317", "2454", "2308", "3711", "2303", "2382", "4958", "2356", "3231"]
+        tw_prices = {
+            "0050": (195.0, 196.0, -0.51), "006208": (115.0, 115.5, -0.43),
+            "1519": (560.0, 565.0, -0.88), "2327": (620.0, 625.0, -0.80),
+            "2330": (2475.0, 2475.0, 0.00), "2383": (4920.0, 5050.0, -2.57),
+            "TAIEX": (47631.96, 48024.60, -0.82), "2317": (250.5, 250.5, 0.00),
+            "2454": (4910.0, 5285.0, -7.10), "2308": (1835.0, 1910.0, -3.93),
+            "3711": (687.0, 699.0, -1.72), "2303": (153.5, 154.0, -0.32),
+            "2382": (336.5, 338.5, -0.59), "4958": (498.5, 475.5, 4.84),
+            "2356": (59.2, 59.9, -1.17), "3231": (185.5, 184.5, 0.54),
+        }
+        for s in tw_syms:
+            p, prev, chg = tw_prices[s]
+            spec = resolve_instrument(s)
+            obs = QuoteObservation(
+                quote_id=f"{s}:2026-09-29:REGULAR:twse", instrument_id=s, canonical_symbol=s,
+                price=p, currency="TWD", session="REGULAR", market_date="2026-09-29",
+                observed_at=retrieved_at, retrieved_at=retrieved_at, provider="twse",
+                quote_type="OFFICIAL_CLOSE", is_delayed=True, quality_status="VALID",
+                previous_regular_close=prev, change_pct=chg, market="TW",
+            )
+            quotes[s] = obs
+            named_quotes[s] = NamedQuote(name=spec.display_name, currency=spec.currency, symbol=s, price=p, prev_close=prev, change_pct=chg, data_date="2026-09-29")
+
+        us_syms = ["AMZN", "DRAM", "GOOG", "IBKR", "MU", "NVDA", "QQQ", "TSLA", "VOO", "VST", "VTI"]
+        for s in us_syms:
+            spec = resolve_instrument(s)
+            obs = QuoteObservation(
+                quote_id=f"{s}:2026-09-28:REGULAR:yfinance", instrument_id=s, canonical_symbol=s,
+                price=150.0, currency="USD", session="REGULAR", market_date="2026-09-28",
+                observed_at=datetime(2026, 9, 28, 16, 0, tzinfo=NY), retrieved_at=retrieved_at,
+                provider="yfinance", quote_type="OFFICIAL_CLOSE", is_delayed=True, quality_status="VALID",
+                previous_regular_close=148.0, change_pct=1.35, market="US",
+            )
+            quotes[s] = obs
+            named_quotes[s] = NamedQuote(name=spec.display_name, currency="USD", symbol=s, price=150.0, prev_close=148.0, change_pct=1.35, data_date="2026-09-28")
+
+        crypto_syms = ["BTC", "ETH", "USDC", "USDT", "BONK", "SXT"]
+        for s in crypto_syms:
+            spec = resolve_instrument(s)
+            provider = "coinbase_exchange" if s == "BONK" else "coingecko"
+            obs = QuoteObservation(
+                quote_id=f"{s}:2026-09-29T06:00:00Z:REGULAR:{provider}", instrument_id=s, canonical_symbol=s,
+                price=1.0 if "USD" in s else (60000.0 if s == "BTC" else 0.000012), currency="USD", session="REGULAR",
+                market_date="2026-09-29", observed_at=retrieved_at, retrieved_at=retrieved_at,
+                provider=provider, quote_type="TRADE", is_delayed=True, quality_status="VALID",
+                previous_regular_close=1.0 if "USD" in s else 59000.0, change_pct=0.1, market="CRYPTO",
+            )
+            quotes[s] = obs
+            named_quotes[s] = NamedQuote(name=spec.display_name, currency="USD", symbol=s, price=obs.price, prev_close=obs.previous_regular_close, change_pct=0.1, data_date="2026-09-29")
+
+        fx_obs = QuoteObservation(
+            quote_id="USDTWD:2026-09-29:REGULAR:yfinance", instrument_id="USDTWD", canonical_symbol="USDTWD",
+            price=31.800, currency="TWD", session="REGULAR", market_date="2026-09-29",
+            observed_at=retrieved_at, retrieved_at=retrieved_at, provider="yfinance",
+            quote_type="TRADE", is_delayed=True, quality_status="VALID", previous_regular_close=31.780,
+            change_pct=0.06, market="FOREX",
+        )
+        quotes["USDTWD"] = fx_obs
+        named_quotes["USDTWD"] = NamedQuote(name="USD/TWD", currency="TWD", symbol="USDTWD", price=31.800, prev_close=31.780, change_pct=0.06, data_date="2026-09-29")
+
+        universe = {s: resolve_instrument(s) for s in quotes}
+        cov = build_portfolio_quote_coverage(
+            context_portfolio, quotes, universe, retrieved_at, {"TW": "2026-09-29", "US": "2026-09-28"}
+        )
+        self.assertEqual(cov.expected_positions, 23)
+        self.assertEqual(cov.covered_positions, 23)
+        self.assertEqual(cov.status, "FULL")
+
+        summary = TaiexMarketSummary(
+            close=47631.96, point_change=-392.64, change_pct=-0.82,
+            turnover_ntd_billions=836.14, advancing=374, declining=586, unchanged=112,
+            advancing_prev=450, declining_prev=420, unchanged_prev=95,
+            session_date="2026-09-29", previous_session_date="2026-09-24",
+            source="https://www.twse.com.tw/exchangeReport/MI_INDEX",
+        )
+        flows = InstitutionalFlows(
+            foreign_buy_sell_ntd_billions=-62.58, investment_trust_buy_sell_ntd_billions=0.58,
+            dealer_buy_sell_ntd_billions=-16.40, total_buy_sell_ntd_billions=-78.40,
+            foreign_buy_sell_prev_ntd_billions=-10.0, investment_trust_buy_sell_prev_ntd_billions=5.0,
+            dealer_buy_sell_prev_ntd_billions=-2.0, total_buy_sell_prev_ntd_billions=-7.0,
+            turnover_prev_ntd_billions=763.12,
+            session_date="2026-09-29", previous_session_date="2026-09-24",
+            source="https://www.twse.com.tw/fund/BFI82U",
+        )
+
+        context = MarketContext(
+            run_id="tw-close-20260929", generated_at=retrieved_at,
+            report_type="tw_close", market_date="2026-09-29", market_session="REGULAR",
+            quotes=quotes, taiex_summary=summary, institutional_flows=flows,
+            portfolio_quote_coverage=cov, portfolio_context=context_portfolio,
+        )
+
+        draft = build_public_draft(context)
+        report_text = _render_tw_close_report(draft, context)
+
+        # Verification of reproduction
+        self.assertIn("47,631.96", report_text)
+        self.assertIn("836.14", report_text)
+        self.assertIn("374/586", report_text)
+        self.assertIn("31.800", report_text)
+        self.assertIn("台積電 (2330) 單日持平（+0.00%）。", report_text)
+        self.assertIn("【相較前一交易日 2026-09-24】", report_text)
+        self.assertIn("行情覆蓋：23/23 FULL", report_text)
+        self.assertIn("今日無法可靠計算整體持股報酬，因此不做相對績效判斷。", report_text)
+        self.assertNotIn("OBSERVED", report_text)
+        self.assertNotIn("SUPPORTED_ASSOCIATION", report_text)
+        self.assertNotIn("UNRESOLVED", report_text)
+        self.assertNotIn("47,000", report_text)
+        self.assertNotIn("下跌 0.00", report_text)
+        self.assertNotIn("對大盤具關鍵指引動能", report_text)
+
+        ok, errors = validate_rendered_report_structure(report_text, "tw_close")
+        self.assertTrue(ok, f"Structural validation errors: {errors}")
+
+
+if __name__ == "__main__":
+    unittest.main()

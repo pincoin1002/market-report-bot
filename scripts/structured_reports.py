@@ -446,25 +446,25 @@ def portfolio_report_section(context: MarketContext) -> OptionalModule | None:
     if coverage.status == "FULL":
         return OptionalModule(
             name="Portfolio Status", state="AVAILABLE",
-            summary=f"持股行情覆蓋完整（{coverage.covered_positions}/{coverage.expected_positions}）；明細僅送往私人 Action Brief。",
+            summary=f"行情覆蓋：{coverage.covered_positions}/{coverage.expected_positions} FULL",
         )
     if coverage.status == "NOT_APPLICABLE":
         return OptionalModule(name="Portfolio Status", state="UNAVAILABLE", summary="未取得可分析的有效持股；未產生持股結論。")
     unresolved = [*coverage.stale, *coverage.missing, *coverage.unsupported]
     reasons = []
-    for item in unresolved[:6]:
-        if item.state == "STALE":
-            reason = "收盤資料日期不符"
+    for item in unresolved:
+        reason = item.reason
+        if "differs from expected" in reason or "session" in reason:
+            r_short = "session mismatch"
         elif item.state == "UNSUPPORTED":
-            reason = "未設定報價來源"
+            r_short = "unsupported provider"
         else:
-            reason = "報價未取得"
-        reasons.append(f"{item.canonical_symbol}（{reason}）")
-    detail = f"未取得行情：{'、'.join(reasons)}。" if reasons else ""
+            r_short = "provider failure"
+        reasons.append(f"{item.canonical_symbol}（{r_short}）")
+    detail = f"\n- 未取得行情：{'、'.join(reasons)}" if reasons else ""
     return OptionalModule(
         name="Portfolio Status", state="PARTIAL",
-        summary=(f"持股行情覆蓋 {coverage.covered_positions}/{coverage.expected_positions}（{coverage.coverage_ratio:.0%}）；"
-                 f"操作建議暫停。{detail}"),
+        summary=f"行情覆蓋：{coverage.covered_positions}/{coverage.expected_positions} — 操作建議暫停{detail}",
     )
 
 
@@ -664,7 +664,8 @@ def render_public_report(draft: MarketReportDraft, context: MarketContext,
         lines.append(f"## {sec_num}. 相較上一交易日變化 (What Changed Since Last Report)")
         sec_num += 1
         for item in draft.material_changes:
-            lines.append(f"- {item}")
+            if rendered := _reader_evidence_line(item):
+                lines.append(f"- {rendered}")
         lines.append("")
 
     # Section 3: Top Market Drivers
@@ -672,7 +673,8 @@ def render_public_report(draft: MarketReportDraft, context: MarketContext,
         lines.append(f"## {sec_num}. 今日走勢與市場驅動 (Top Market Drivers)")
         sec_num += 1
         for item in draft.drivers:
-            lines.append(f"- {item}")
+            if rendered := _reader_evidence_line(item):
+                lines.append(f"- {rendered}")
         lines.append("")
 
     # Section 4: Rotation & Sectors (omit placeholders!)
@@ -794,7 +796,11 @@ def _render_tw_close_report(draft: MarketReportDraft, context: MarketContext) ->
     if "2330" in context.quotes and context.quotes["2330"].quality_status == "VALID":
         q2330 = context.quotes["2330"]
         delta = round(q2330.price - q2330.previous_regular_close, 2)
-        lines.append(f"- 台積電 (2330) 單日{return_direction(delta)} {abs(delta):,.2f} 元（{q2330.change_pct:+.2f}%）。")
+        direction = return_direction(delta)
+        if direction == "持平":
+            lines.append(f"- 台積電 (2330) 單日持平（{q2330.change_pct:+.2f}%）。")
+        else:
+            lines.append(f"- 台積電 (2330) 單日{direction} {abs(delta):,.2f} 元（{q2330.change_pct:+.2f}%）。")
     for item in draft.drivers:
         if rendered := _reader_evidence_line(item):
             # The market block already states the index result and FX level;

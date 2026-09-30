@@ -67,7 +67,7 @@ jobs:
       US_OPEN_TRIGGER_SOURCE: ${{ github.event.inputs.trigger_source || github.event.client_payload.trigger_source || github.event_name }}
       US_OPEN_SCHEDULER_TRIGGERED_AT: ${{ github.event.inputs.scheduler_triggered_at || github.event.client_payload.scheduler_triggered_at || '' }}
       US_OPEN_SCHEDULER_TERMINAL_STATE: ${{ github.event.inputs.scheduler_terminal_state || github.event.client_payload.scheduler_terminal_state || '' }}
-    timeout-minutes: 30
+    timeout-minutes: 90
     permissions:
       contents: write
 
@@ -94,20 +94,13 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          python - <<'PY'
-          import os
-          import requests
-
-          response = requests.post(
-              f"https://api.telegram.org/bot{os.environ['TELEGRAM_BOT_TOKEN']}/sendMessage",
-              json={"chat_id": os.environ["TELEGRAM_CHAT_ID"], "text": "⚠️ 美股開盤日報未送出\n原因：排程觸發過晚，已超過有效盤前時間。\n正常市場內容未生成，避免使用過期資料。"},
-              timeout=30,
-          )
-          response.raise_for_status()
-          if not response.json().get("ok"):
-              raise SystemExit("Telegram operational alert rejected")
-          print("US Open operational alert accepted by Telegram")
-          PY
+          python scripts/send_operational_alert.py us_open SCHEDULER_WINDOW_EXPIRED
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add reports/.alerts/ 2>/dev/null || true
+          git commit -m "chore: record us_open operational alert [skip ci]" || exit 0
+          git pull --rebase
+          git push || true
 
       - name: Fail expired scheduler window
         if: github.event.inputs.scheduler_terminal_state == 'SCHEDULER_WINDOW_EXPIRED'
@@ -206,20 +199,13 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          python - <<'PY'
-          import os
-          import requests
-
-          text = "⚠️ 美股開盤日報未送出\n原因：排程觸發過晚，已超過有效盤前時間。\n正常市場內容未生成，避免使用過期資料。"
-          response = requests.post(
-              f"https://api.telegram.org/bot{os.environ['TELEGRAM_BOT_TOKEN']}/sendMessage",
-              json={"chat_id": os.environ["TELEGRAM_CHAT_ID"], "text": text}, timeout=30,
-          )
-          response.raise_for_status()
-          if not response.json().get("ok"):
-              raise SystemExit("Telegram operational alert rejected")
-          print("US Open operational alert accepted by Telegram")
-          PY
+          python scripts/send_operational_alert.py us_open INTENT_EXPIRED
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add reports/.alerts/ 2>/dev/null || true
+          git commit -m "chore: record us_open operational alert [skip ci]" || exit 0
+          git pull --rebase
+          git push || true
 
       - name: Fail unavailable US Open intent
         if: always() && steps.fetch.outputs.terminal_state == 'INTENT_EXPIRED'
@@ -320,20 +306,14 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          python - <<'PY'
-          import os
-          import requests
-
-          response = requests.post(
-              f"https://api.telegram.org/bot{os.environ['TELEGRAM_BOT_TOKEN']}/sendMessage",
-              json={"chat_id": os.environ["TELEGRAM_CHAT_ID"], "text": "⚠️ 美股開盤日報未送出\n原因：資料驗證或傳送未完成。\n正常市場內容未送出，請查看執行紀錄。"},
-              timeout=30,
-          )
-          response.raise_for_status()
-          if not response.json().get("ok"):
-              raise SystemExit("Telegram operational alert rejected")
-          print("US Open operational alert accepted by Telegram")
-          PY
+          STATE="${{ steps.generate.outputs.terminal_state || steps.validate.outputs.terminal_state || steps.deliver.outputs.terminal_state }}"
+          python scripts/send_operational_alert.py us_open "$STATE"
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add reports/.alerts/ 2>/dev/null || true
+          git commit -m "chore: record us_open operational alert [skip ci]" || exit 0
+          git pull --rebase
+          git push || true
 
       - name: Fail blocked validation or failed delivery
         if: always() && (steps.generate.outputs.terminal_state == 'VALIDATION_BLOCKED' || steps.validate.outputs.terminal_state == 'VALIDATION_BLOCKED' || steps.deliver.outputs.terminal_state == 'DELIVERY_FAILED')

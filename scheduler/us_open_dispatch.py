@@ -104,6 +104,27 @@ def dispatch_workflow(token: str, payload: dict[str, object], attempts: int = 2)
     raise RuntimeError("GitHub workflow dispatch unavailable after bounded retry") from last_error
 
 
+def send_dispatch_failure_alert() -> bool:
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+    chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+    if not token or not chat_id:
+        return False
+    try:
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        body = json.dumps({
+            "chat_id": chat_id,
+            "text": "⚠️ 美股開盤日報未送出\n原因：排程觸發 GitHub Actions 失敗。\n正常市場內容未生成，請檢查排程器狀態。",
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            url, data=body, headers={"Content-Type": "application/json"}, method="POST"
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            return bool(data.get("ok"))
+    except Exception:
+        return False
+
+
 def handle_cron_request(
     slot: SchedulerSlot,
     authorization: str,
@@ -131,6 +152,7 @@ def handle_cron_request(
                 dispatch_payload(current, scheduler_terminal_state="SCHEDULER_WINDOW_EXPIRED"),
             )
         except Exception:
+            send_dispatch_failure_alert()
             return 502, {"ok": False, "status": "DISPATCH_FAILED"}
         return 202, {
             "ok": True,
@@ -145,6 +167,7 @@ def handle_cron_request(
         # Do not echo exception details: provider responses may include
         # sensitive request metadata. Vercel's status code remains the
         # operational signal for a failed external dispatch.
+        send_dispatch_failure_alert()
         return 502, {"ok": False, "status": "DISPATCH_FAILED"}
     return 202, {
         "ok": True,

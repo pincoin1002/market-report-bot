@@ -672,9 +672,22 @@ def validate_portfolio_quotes(raw: dict | None, snapshot: "Snapshot | None",
     if coverage is None:
         return False, "snapshot 未包含 portfolio_quote_coverage，無法確認持股行情覆蓋。"
     if not coverage.is_full:
+        unresolved = [*coverage.stale, *coverage.missing, *coverage.unsupported]
+        reasons = []
+        for item in unresolved:
+            reason = item.reason
+            if "differs from expected" in reason or "session" in reason:
+                r_short = "session mismatch"
+            elif item.state == "UNSUPPORTED":
+                r_short = "unsupported provider"
+            else:
+                r_short = "provider failure"
+            reasons.append(f"{item.canonical_symbol}（{r_short}）")
+        missing_text = f"\n未取得：{'、'.join(reasons)}" if reasons else ""
         return False, (
-            f"持股行情覆蓋率 {coverage.coverage_ratio:.0%}（{coverage.covered_positions}/"
-            f"{coverage.expected_positions}；{coverage.status}），低於 100%。"
+            f"持股行情：{coverage.covered_positions}/{coverage.expected_positions}，"
+            f"覆蓋率 {coverage.coverage_ratio:.0%} 低於 100%（{coverage.status}）。"
+            f"{missing_text}"
         )
     expected = len(positions) if positions else len(_portfolio_tickers(raw))
     if coverage.expected_positions != expected:
