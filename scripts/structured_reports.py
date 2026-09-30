@@ -797,6 +797,10 @@ def _render_tw_close_report(draft: MarketReportDraft, context: MarketContext) ->
         lines.append(f"- 台積電 (2330) 單日{return_direction(delta)} {abs(delta):,.2f} 元（{q2330.change_pct:+.2f}%）。")
     for item in draft.drivers:
         if rendered := _reader_evidence_line(item):
+            # The market block already states the index result and FX level;
+            # retain only distinct decision-relevant driver observations here.
+            if rendered.startswith(("市場結果：", "匯率：")):
+                continue
             lines.append(f"- {rendered}")
 
     if inst and any(v is not None for v in (
