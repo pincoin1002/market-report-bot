@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import sys
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -15,6 +15,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(ROOT))
 
 from instrument_registry import resolve_instrument
+from models import InstitutionalFlows, PortfolioContext, TaiexMarketSummary
 from providers import CoinbaseCryptoProvider, _quote_from_closes
 from scheduler.us_open_dispatch import NY, handle_cron_request, scheduler_decision, should_dispatch
 from twse_market_evidence import fetch_twse_close_evidence
@@ -126,3 +127,26 @@ class TWSEEvidenceRegressionTest(unittest.TestCase):
         self.assertEqual(evidence.previous_turnover_ntd_billions, 700.0)
         self.assertEqual(evidence.institutional_flows.foreign_buy_sell_ntd_billions, -62.58)
         self.assertEqual(evidence.institutional_flows.dealer_buy_sell_ntd_billions, -0.3)
+
+    def test_official_taiex_summary_also_enters_quote_and_renderer_contract(self):
+        import fetch_market_data
+        from twse_market_evidence import TWSECloseEvidence
+
+        as_of = datetime(2026, 9, 30, 15, 5, tzinfo=timezone(timedelta(hours=8)))
+        summary = TaiexMarketSummary(
+            close=47940.13, point_change=308.17, change_pct=0.65,
+            session_date="2026-09-30", previous_session_date="2026-09-29",
+        )
+        evidence = TWSECloseEvidence(summary, InstitutionalFlows(), 836.14)
+        with patch("fetch_market_data.load_authoritative_portfolio", return_value=PortfolioContext(source="fixture")), patch(
+            "fetch_market_data.build_universe", return_value={"TAIEX": resolve_instrument("TAIEX")}
+        ), patch("fetch_market_data.fetch_session_observations", return_value=({}, {})), patch(
+            "fetch_market_data.get_target_market_date",
+            side_effect=["2026-09-30", "2026-09-29", "2026-09-30"],
+        ), patch("fetch_market_data.get_previous_completed_session_date", return_value="2026-09-29"), patch(
+            "fetch_market_data.fetch_twse_close_evidence", return_value=evidence
+        ):
+            snapshot = fetch_market_data.build_snapshot("tw_close", retrieved_at=as_of)
+        self.assertEqual(snapshot.quote_observations["TAIEX"].provider, "twse_mi_index")
+        self.assertEqual(snapshot.quote_observations["TAIEX"].market_date, "2026-09-30")
+        self.assertEqual(snapshot.tw_stocks["TAIEX"].price, 47940.13)

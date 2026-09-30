@@ -31,7 +31,7 @@ from market_session import (
     classify_tw_session, classify_us_session, get_previous_completed_session_date, get_target_market_date,
     us_open_snapshot_contract_status,
 )
-from models import NamedQuote, PortfolioQuoteCoverage, PortfolioQuoteCoverageItem, Snapshot
+from models import NamedQuote, PortfolioQuoteCoverage, PortfolioQuoteCoverageItem, QuoteObservation, Snapshot
 from portfolio_context import load_authoritative_portfolio
 from providers import fetch_session_observations
 from twse_market_evidence import fetch_twse_close_evidence
@@ -312,6 +312,45 @@ def build_snapshot(report_type: str, retrieved_at: datetime | None = None) -> Sn
             snapshot.institutional_flows = evidence.institutional_flows.model_copy(update={
                 "turnover_prev_ntd_billions": evidence.previous_turnover_ntd_billions,
             })
+            # The official MI_INDEX record is the Taiwan-close authority for
+            # TAIEX.  Keep the same observation contract as all other quote
+            # rows so selection, deltas, and renderer provenance cannot lose
+            # the validated index merely because a secondary daily provider
+            # omitted or delayed its own current-session bar.
+            taiex = evidence.taiex_summary
+            taiex_previous_close = round(taiex.close - taiex.point_change, 2)
+            taiex_observation = QuoteObservation(
+                quote_id=f"TAIEX:{tw_target_date}:REGULAR:twse_mi_index",
+                instrument_id="TAIEX",
+                canonical_symbol="TAIEX",
+                price=taiex.close,
+                currency="TWD",
+                session="REGULAR",
+                market_date=tw_target_date,
+                observed_at=retrieved_at,
+                provider_timestamp=None,
+                retrieved_at=retrieved_at,
+                provider="twse_mi_index",
+                quote_type="OFFICIAL_CLOSE",
+                is_delayed=True,
+                quality_status="VALID",
+                previous_regular_close=taiex_previous_close,
+                change_pct=taiex.change_pct,
+                quality_notes=["TWSE MI_INDEX official close"],
+                market="TW",
+            )
+            snapshot.quote_observations["TAIEX"] = taiex_observation
+            snapshot.tw_stocks["TAIEX"] = NamedQuote(
+                name="加權指數",
+                currency="TWD",
+                symbol="TAIEX",
+                price=taiex.close,
+                prev_close=taiex_previous_close,
+                change_pct=taiex.change_pct,
+                data_date=tw_target_date,
+            )
+            snapshot.sources["TAIEX"] = "twse_mi_index"
+            snapshot.data_quality.pop("TAIEX", None)
     missing_by_role = classify_missing_quote_roles(report_type, portfolio, universe, observations)
     if any(missing_by_role.values()):
         log.warning("quote observations missing or invalid by role", extra=missing_by_role)
