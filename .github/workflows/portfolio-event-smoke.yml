@@ -1,5 +1,5 @@
 name: Portfolio Event Smoke
-# attempt: deterministic-window-v4
+# attempt: small-batch-retry-v6
 
 on:
   push:
