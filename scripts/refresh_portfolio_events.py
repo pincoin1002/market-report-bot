@@ -48,9 +48,10 @@ def main() -> int:
         "status_counts": dict(status_counts),
     }, sort_keys=True))
 
-    # Partial refreshes are useful because successful entries are cached.
-    # Return non-zero only when nothing at all was checked.
-    return 0 if checked_ids else 1
+    # Search grounding is an optional/degraded dependency. A provider outage
+    # is reported through aggregate status and downstream event coverage, but it
+    # must not fail the background workflow or any market-report delivery.
+    return 0
 
 
 if __name__ == "__main__":
