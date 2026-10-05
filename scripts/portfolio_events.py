@@ -386,7 +386,10 @@ def fetch_portfolio_events(
                             "upcoming": cached_upcoming_for_ticker,
                         }
                 except Exception as exc:
-                    log.warning("batch event query failed", extra={"batch": batch, "error": str(exc)})
+                    log.warning(
+                        "batch event query failed",
+                        extra={"batch_size": len(batch), "error_type": type(exc).__name__},
+                    )
                     for ticker in batch:
                         inst_id = ticker_positions.get(ticker, ticker)
                         fact_obj = PortfolioEventFact(
