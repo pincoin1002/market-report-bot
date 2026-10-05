@@ -17,6 +17,11 @@ on:
         required: false
         default: false
         type: boolean
+      trigger_source:
+        description: "Operational provenance for external scheduler"
+        required: false
+        default: ""
+        type: string
       debug:
         description: "Enable debug logging (default: false)"
         required: false
@@ -54,9 +59,12 @@ jobs:
     needs: [native-stage]
     if: always() && (github.event_name != 'schedule' || needs.native-stage.result == 'success')
     runs-on: ubuntu-latest
+    concurrency:
+      group: tw-open-canonical-delivery
+      cancel-in-progress: false
     env:
       PIOS_PORTFOLIO_SNAPSHOT_JSON: ${{ secrets.PIOS_PORTFOLIO_SNAPSHOT_JSON }}
-    timeout-minutes: 30
+    timeout-minutes: 90
     permissions:
       contents: write
 
@@ -73,8 +81,41 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Check whether today's Taiwan-open report already completed
+        id: existing
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          from datetime import datetime
+          from pathlib import Path
+          from zoneinfo import ZoneInfo
+
+          today = datetime.now(tz=ZoneInfo("Asia/Taipei")).strftime("%Y%m%d")
+          files = sorted(Path("reports").glob(f"tw_open_{today}_*.md"))
+          print(f"already_reported={'true' if files else 'false'}")
+          PY
+
+      - name: Wait for canonical Taiwan-open snapshot time
+        if: steps.existing.outputs.already_reported != 'true' && github.event_name == 'workflow_dispatch' && github.event.inputs.trigger_source == 'vercel_cron'
+        run: |
+          python - <<'PY'
+          import time
+          from datetime import datetime
+          from zoneinfo import ZoneInfo
+
+          tpe = ZoneInfo("Asia/Taipei")
+          now = datetime.now(tz=tpe)
+          target = now.replace(hour=7, minute=40, second=0, microsecond=0)
+          seconds = max(0, int((target - now).total_seconds()))
+          if seconds:
+              print(f"External Taiwan-open scheduler staged early; waiting {seconds}s until 07:40 Taipei")
+              time.sleep(seconds)
+          else:
+              print("External Taiwan-open scheduler reached canonical window; continuing")
+          PY
+
       - name: Fetch market snapshot
         id: fetch
+        if: steps.existing.outputs.already_reported != 'true'
         run: |
           mkdir -p data
           # set +e: the runner shell is bash -e, so a non-zero exit would kill
@@ -102,11 +143,11 @@ jobs:
           fi
 
       - name: Record expired Taiwan-open intent
-        if: always() && steps.fetch.outputs.terminal_state == 'TW_OPEN_INTENT_EXPIRED'
+        if: always() && steps.existing.outputs.already_reported != 'true' && steps.fetch.outputs.terminal_state == 'TW_OPEN_INTENT_EXPIRED'
         run: echo "TW_OPEN_INTENT_EXPIRED — runner entered after 09:00 Taipei; stale previous-close report blocked."
 
       - name: Send Taiwan-open expiry alert
-        if: always() && steps.fetch.outputs.terminal_state == 'TW_OPEN_INTENT_EXPIRED'
+        if: always() && steps.existing.outputs.already_reported != 'true' && steps.fetch.outputs.terminal_state == 'TW_OPEN_INTENT_EXPIRED'
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -120,11 +161,11 @@ jobs:
           git push || true
 
       - name: Fail expired Taiwan-open intent
-        if: always() && steps.fetch.outputs.terminal_state == 'TW_OPEN_INTENT_EXPIRED'
+        if: always() && steps.existing.outputs.already_reported != 'true' && steps.fetch.outputs.terminal_state == 'TW_OPEN_INTENT_EXPIRED'
         run: exit 1
 
       - name: Generate Taiwan Open Report
-        if: steps.fetch.outputs.market_closed != 'true' && steps.fetch.outputs.intent_unavailable != 'true'
+        if: steps.existing.outputs.already_reported != 'true' && steps.fetch.outputs.market_closed != 'true' && steps.fetch.outputs.intent_unavailable != 'true'
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           PORTFOLIO_KEY: ${{ secrets.PORTFOLIO_KEY }}
@@ -142,18 +183,18 @@ jobs:
           fi
 
       - name: Skip report (market closed)
-        if: steps.fetch.outputs.market_closed == 'true'
+        if: steps.existing.outputs.already_reported != 'true' && steps.fetch.outputs.market_closed == 'true'
         run: echo "Market closed today — report generation skipped."
 
       - name: Validate report prices
-        if: steps.fetch.outputs.market_closed != 'true' && steps.fetch.outputs.intent_unavailable != 'true'
+        if: steps.existing.outputs.already_reported != 'true' && steps.fetch.outputs.market_closed != 'true' && steps.fetch.outputs.intent_unavailable != 'true'
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           REPORT_MODEL: ${{ vars.REPORT_MODEL }}
         run: python scripts/validate_report.py tw_open
 
       - name: Deliver validated Taiwan Open Report
-        if: steps.fetch.outputs.market_closed != 'true' && steps.fetch.outputs.intent_unavailable != 'true' && (github.event_name == 'schedule' || inputs.send_telegram == true || github.event.inputs.send_telegram == 'true')
+        if: steps.existing.outputs.already_reported != 'true' && steps.fetch.outputs.market_closed != 'true' && steps.fetch.outputs.intent_unavailable != 'true' && (github.event_name == 'schedule' || inputs.send_telegram == true || github.event.inputs.send_telegram == 'true')
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           PORTFOLIO_KEY: ${{ secrets.PORTFOLIO_KEY }}
@@ -164,12 +205,12 @@ jobs:
 
 
       - name: Prepare review package
-        if: steps.fetch.outputs.market_closed != 'true' && steps.fetch.outputs.intent_unavailable != 'true'
+        if: steps.existing.outputs.already_reported != 'true' && steps.fetch.outputs.market_closed != 'true' && steps.fetch.outputs.intent_unavailable != 'true'
         continue-on-error: true
         run: python scripts/prepare_review.py tw_open
 
       - name: Commit and push generated report
-        if: steps.fetch.outputs.market_closed != 'true' && steps.fetch.outputs.intent_unavailable != 'true'
+        if: steps.existing.outputs.already_reported != 'true' && steps.fetch.outputs.market_closed != 'true' && steps.fetch.outputs.intent_unavailable != 'true'
         continue-on-error: true
         run: |
           git config --global user.name "github-actions[bot]"
