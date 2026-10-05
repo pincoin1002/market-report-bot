@@ -1226,11 +1226,24 @@ def render_action_brief(brief: PortfolioActionBrief) -> str:
     covered = brief.covered_positions if brief.covered_positions is not None else (total - len(brief.data_issues))
 
     conclusion_lines = []
-    # Line 1: Quote / Price Status
-    if brief.action_queue and not any(i.price_status == "PRICE_WATCH" for i in brief.watchlist):
-        conclusion_lines.append(f"{covered}/{total} 持股行情已驗證；共有 {len(brief.action_queue)} 檔持股建議重新檢視（詳見下方說明）。")
-    elif brief.watchlist:
-        conclusion_lines.append(f"{covered}/{total} 持股行情已驗證；共有 {len(brief.watchlist)} 檔持股觸發價格關注（詳見下方說明）。")
+    # Line 1: keep quote coverage separate from event-driven monitoring.
+    price_watch_count = sum(1 for i in brief.watchlist if i.price_status == "PRICE_WATCH")
+    event_watch_count = sum(
+        1 for i in brief.watchlist
+        if i.event_status == "EVENT_MATERIAL_FOUND" and i.price_status != "PRICE_WATCH"
+    )
+    if brief.action_queue:
+        conclusion_lines.append(
+            f"{covered}/{total} 持股行情已驗證；共有 {len(brief.action_queue)} 檔持股建議重新檢視（詳見下方說明）。"
+        )
+    elif price_watch_count:
+        conclusion_lines.append(
+            f"{covered}/{total} 持股行情已驗證；共有 {price_watch_count} 檔持股觸發價格關注（詳見下方說明）。"
+        )
+    elif event_watch_count:
+        conclusion_lines.append(
+            f"{covered}/{total} 持股行情已驗證；價格面未觸發重大異常，另有 {event_watch_count} 檔公司／資產事件需要關注。"
+        )
     elif brief.data_issues and any("quote unavailable" in d for d in brief.data_issues):
         conclusion_lines.append(f"{covered}/{total} 持股行情已驗證；部分持股行情或資料有缺漏（詳見下方說明）。")
     else:
@@ -1272,8 +1285,12 @@ def render_action_brief(brief: PortfolioActionBrief) -> str:
                 e = evt.get("event") or evt.get("title") or ""
                 d = evt.get("date") or evt.get("event_date") or evt.get("timing") or ""
                 w = evt.get("why") or evt.get("impact") or ""
+                source = evt.get("source") or evt.get("source_name") or ""
                 parts = [p for p in (t, e, d, w) if p]
-                event_lines.append("• " + "｜".join(parts))
+                line = "• " + "｜".join(parts)
+                if source:
+                    line += f"（來源：{source}）"
+                event_lines.append(line)
             else:
                 event_lines.append(f"• {evt}")
     else:
