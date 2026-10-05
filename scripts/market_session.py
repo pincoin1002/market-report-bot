@@ -14,6 +14,7 @@ TPE = timezone(timedelta(hours=8))
 NY = ZoneInfo("America/New_York")
 US_OPEN_INTENDED_TIME = time(9, 5)
 US_OPEN_PREMARKET_CUTOFF = time(9, 30)
+TW_OPEN_CUTOFF = time(9, 0)
 
 
 def is_nyse_trading_day(dt: datetime) -> bool:
@@ -126,6 +127,21 @@ def classify_tw_session(now: datetime | None = None,
     if time(9, 0) <= local.time() <= time(13, 35):
         return "REGULAR"
     return "PREVIOUS_CLOSE"
+
+
+def tw_open_snapshot_contract_status(now: datetime | None = None) -> str:
+    """Return whether a Taiwan-open reference snapshot may still be published.
+
+    The Taiwan-open report is a pre-open briefing based on the latest completed
+    sessions. Once TWSE regular trading begins at 09:00 Taipei time, publishing
+    those prior closes as a same-day "open" report would be stale and misleading.
+    """
+    local = (now or datetime.now(tz=TPE)).astimezone(TPE)
+    if not is_tw_trading_day(local):
+        return "MARKET_CLOSED"
+    if local.time() < TW_OPEN_CUTOFF:
+        return "READY"
+    return "INTENT_EXPIRED"
 
 
 def report_market_date(report_type: str, now: datetime | None = None) -> str:
