@@ -854,9 +854,18 @@ def run_portfolio_advice(report: str, report_type: str,
             send_operational_notice(f"{reason}\n\n已停止產生持股建議，避免用錯誤或缺漏價格下判斷。", report_type)
         return
     context = load_market_context(report_type, snapshot)
+    force_event_refresh = {
+        pos.ticker.upper()
+        for pos in portfolio_context.positions
+        if (
+            (context.quotes.get(pos.instrument_id) or context.quotes.get(pos.ticker))
+            and abs((context.quotes.get(pos.instrument_id) or context.quotes.get(pos.ticker)).change_pct) >= 7.0
+        )
+    }
     event_facts, upcoming_events = fetch_portfolio_events(
         portfolio=portfolio_context,
         model=model,
+        force_refresh_tickers=force_event_refresh,
     )
     brief = build_action_brief(
         context,
