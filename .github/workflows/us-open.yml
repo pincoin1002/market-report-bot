@@ -2,8 +2,10 @@ name: 美股開盤日報
 
 on:
   schedule:
-    # One canonical premarket report at 09:05 New York, Monday-Friday.
-    - cron: "5 9 * * 1-5"
+    # Native backup is intentionally staged hours before 09:05 New York.
+    # Recent GitHub schedule events arrived 4-6 hours late; starting at 00:17
+    # gives the workflow enough slack while preserving the canonical 09:05 snapshot.
+    - cron: "17 0 * * 1-5"
       timezone: "America/New_York"
   repository_dispatch:
     types: [trigger-us-open]
@@ -52,8 +54,34 @@ on:
 
 
 jobs:
+  native-stage:
+    name: Stage native US Open backup
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 270
+    steps:
+      - name: Hold native backup until 04:30 New York
+        run: |
+          python - <<'PY'
+          import time
+          from datetime import datetime
+          from zoneinfo import ZoneInfo
+
+          ny = ZoneInfo("America/New_York")
+          now = datetime.now(tz=ny)
+          target = now.replace(hour=4, minute=30, second=0, microsecond=0)
+          seconds = max(0, int((target - now).total_seconds()))
+          if seconds:
+              print(f"Native US-open backup staged early; waiting {seconds}s until 04:30 New York")
+              time.sleep(seconds)
+          else:
+              print("Native US-open backup arrived after 04:30 New York; handing off immediately")
+          PY
+
   generate-report:
     name: Generate US Open Report
+    needs: [native-stage]
+    if: always() && (github.event_name != 'schedule' || needs.native-stage.result == 'success')
     runs-on: ubuntu-latest
     # One mutable daily report and delivery state means concurrent external,
     # native-backup, and manual triggers must never run side-by-side.
@@ -67,7 +95,7 @@ jobs:
       US_OPEN_TRIGGER_SOURCE: ${{ github.event.inputs.trigger_source || github.event.client_payload.trigger_source || github.event_name }}
       US_OPEN_SCHEDULER_TRIGGERED_AT: ${{ github.event.inputs.scheduler_triggered_at || github.event.client_payload.scheduler_triggered_at || '' }}
       US_OPEN_SCHEDULER_TERMINAL_STATE: ${{ github.event.inputs.scheduler_terminal_state || github.event.client_payload.scheduler_terminal_state || '' }}
-    timeout-minutes: 90
+    timeout-minutes: 330
     permissions:
       contents: write
 
