@@ -657,5 +657,55 @@ class PortfolioEventMonitoringSuiteTest(unittest.TestCase):
         self.assertEqual(codes, ["RuntimeError"])
 
 
+    def test_26_report_mode_does_not_search_full_portfolio_when_cache_missing(self):
+        with tempfile.TemporaryDirectory() as td:
+            cache_file = Path(td) / "missing.json"
+            with patch("portfolio_events._query_gemini_search") as query:
+                facts, upcoming = fetch_portfolio_events(
+                    self.portfolio,
+                    api_key="fake",
+                    cache_path=cache_file,
+                    network_scope="forced_only",
+                )
+            query.assert_not_called()
+            self.assertEqual(len({f.instrument_id for f in facts}), 23)
+            self.assertTrue(all(f.event_status == "EVENT_UNCHECKED" for f in facts))
+            self.assertEqual(upcoming, [])
+
+    def test_27_report_mode_live_searches_only_forced_price_trigger(self):
+        with tempfile.TemporaryDirectory() as td:
+            cache_file = Path(td) / "missing.json"
+            target = self.portfolio.positions[0].ticker
+            result = [{
+                "ticker": target,
+                "event_status": "EVENT_CHECKED_NO_MATERIAL_CHANGE",
+                "event_type": "NONE",
+                "summary": "checked",
+                "severity": "LOW",
+                "is_upcoming": False,
+            }]
+            with patch("portfolio_events._query_batch_with_bounded_fallback", return_value=(result, [], [])) as query:
+                facts, _ = fetch_portfolio_events(
+                    self.portfolio,
+                    api_key="fake",
+                    cache_path=cache_file,
+                    network_scope="forced_only",
+                    force_refresh_tickers={target},
+                )
+            query.assert_called_once()
+            checked = [f for f in facts if f.event_status == "EVENT_CHECKED_NO_MATERIAL_CHANGE"]
+            unchecked = [f for f in facts if f.event_status == "EVENT_UNCHECKED"]
+            self.assertEqual(len(checked), 1)
+            self.assertEqual(len(unchecked), 22)
+
+    def test_28_background_event_workflow_exists_and_report_wiring_is_forced_only(self):
+        workflow = (ROOT / ".github/workflows/portfolio-events.yml").read_text(encoding="utf-8")
+        self.assertIn('cron: "17 */6 * * *"', workflow)
+        self.assertIn("refresh_portfolio_events.py", workflow)
+        self.assertIn("portfolio_event_cache.json.enc", workflow)
+        source = (ROOT / "scripts/generate_report.py").read_text(encoding="utf-8")
+        self.assertIn('network_scope="forced_only"', source)
+
+
 if __name__ == "__main__":
     unittest.main()
