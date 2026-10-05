@@ -29,6 +29,7 @@ ROOT = Path(__file__).resolve().parent.parent
 CACHE_PATH = ROOT / "portfolio_event_cache.json.enc"
 FACTS_AUDIT_PATH = ROOT / "data" / "portfolio_event_facts.json"
 DEFAULT_CACHE_TTL_HOURS = 12
+EVENT_SEARCH_TIMEOUT_MS = 60_000
 
 
 def _cache_key() -> bytes | None:
@@ -166,7 +167,10 @@ def _query_gemini_search(
     if not key:
         raise ValueError("GEMINI_API_KEY is not configured")
 
-    client = genai.Client(api_key=key)
+    client = genai.Client(
+        api_key=key,
+        http_options=types.HttpOptions(timeout=EVENT_SEARCH_TIMEOUT_MS),
+    )
     prompt = _build_search_prompt(instruments)
 
     response = client.models.generate_content(
