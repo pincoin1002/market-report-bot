@@ -866,6 +866,7 @@ def run_portfolio_advice(report: str, report_type: str,
         portfolio=portfolio_context,
         model=model,
         force_refresh_tickers=force_event_refresh,
+        network_scope="forced_only",
     )
     brief = build_action_brief(
         context,
