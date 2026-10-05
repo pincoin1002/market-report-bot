@@ -76,7 +76,7 @@ def _market_summary(payload: dict, session_date: str, previous_date: str,
 
     stats = _table(payload, "大盤統計資訊")
     total_row = _row(stats, "總計(1~15)")
-    turnover_ntd_billions = _compact_number(total_row[1]) / 1_000_000_000
+    turnover_ntd_billions = _compact_number(total_row[1]) / NTD_PER_YI
 
     breadth = _table(payload, "漲跌證券數合計")
     advances = _count(_row(breadth, "上漲(漲停)")[2])
@@ -101,7 +101,7 @@ def _flow_rows(payload: dict) -> dict[str, float]:
     rows: dict[str, float] = {}
     for row in payload.get("data", []):
         if len(row) >= 4:
-            rows[str(row[0])] = _compact_number(row[3]) / 1_000_000_000
+            rows[str(row[0])] = _compact_number(row[3]) / NTD_PER_YI
     return rows
 
 
