@@ -865,29 +865,15 @@ def _render_tw_close_report(draft: MarketReportDraft, context: MarketContext) ->
         lines.append("")
 
     if draft.portfolio_section:
-        prev_us_date = get_target_market_date("tw_close", "US", now=context.generated_at)
-        expected_dates = {"TW": context.market_date, "US": prev_us_date}
-        taiex_ret = taiex.change_pct if taiex else None
-        p_ctx = getattr(context, "portfolio_context", None)
-        if p_ctx is None:
-            try:
-                from portfolio_context import load_authoritative_portfolio
-                p_ctx = load_authoritative_portfolio()
-            except Exception:
-                p_ctx = None
-
-        analytics = calculate_portfolio_analytics(
-            p_ctx,
-            context.quotes,
-            taiex_change_pct=taiex_ret,
-            expected_dates=expected_dates,
-        )
-        if analytics.status == "SUCCESS":
-            lines.extend(format_portfolio_section(analytics, summary=draft.portfolio_section.summary))
-        else:
-            lines.append("## 【我的持股】")
-            lines.append(f"- {draft.portfolio_section.summary}")
-            lines.append("- 今日無法可靠計算整體持股報酬，因此不做相對績效判斷。")
+        # Quote coverage and portfolio performance are different contracts.
+        # The current snapshot mixes TW completed-session closes, the latest
+        # completed US session, and continuous crypto observations.  Until a
+        # common cutoff-to-cutoff valuation series exists, aggregating each
+        # instrument's own previous close into one portfolio return is not an
+        # economically comparable measurement interval.
+        lines.append("## 【我的持股】")
+        lines.append(f"- {draft.portfolio_section.summary}")
+        lines.append("- 跨市場部位目前沒有統一的起訖估值時間，因此暫不顯示整體損益、貢獻度或相對大盤績效。")
         lines.append("")
 
     clean_watch = [w for w in draft.watch_signals if "等待下一份" not in w]
