@@ -29,7 +29,7 @@
     },
     {
       "path": "/api/tw_open_scheduler",
-      "schedule": "0 22 * * 0-4"
+      "schedule": "0 23 * * 0-4"
     }
   ]
 }
