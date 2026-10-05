@@ -19,32 +19,54 @@ import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from cryptography.fernet import Fernet, InvalidToken
 
 from models import PortfolioContext, PortfolioEventFact, PortfolioEventStatus
 
 log = logging.getLogger(__name__)
 
-CACHE_PATH = Path(__file__).resolve().parent.parent / "data" / "portfolio_event_cache.json"
-FACTS_AUDIT_PATH = Path(__file__).resolve().parent.parent / "data" / "portfolio_event_facts.json"
+ROOT = Path(__file__).resolve().parent.parent
+CACHE_PATH = ROOT / "portfolio_event_cache.json.enc"
+FACTS_AUDIT_PATH = ROOT / "data" / "portfolio_event_facts.json"
 DEFAULT_CACHE_TTL_HOURS = 12
 
 
+def _cache_key() -> bytes | None:
+    key = os.getenv("PORTFOLIO_KEY", "").strip()
+    return key.encode() if key else None
+
+
 def load_event_cache(cache_path: Path = CACHE_PATH) -> dict[str, Any]:
-    """Load cached event monitoring state."""
+    """Load event cache. Production default is Fernet-encrypted; test paths may be JSON."""
     if not cache_path.exists():
         return {"updated_at": None, "items": {}}
     try:
+        if cache_path.suffix == ".enc":
+            key = _cache_key()
+            if not key:
+                log.warning("PORTFOLIO_KEY missing; encrypted event cache unavailable")
+                return {"updated_at": None, "items": {}}
+            raw = Fernet(key).decrypt(cache_path.read_bytes())
+            return json.loads(raw.decode("utf-8"))
         return json.loads(cache_path.read_text(encoding="utf-8"))
-    except Exception as exc:
+    except (InvalidToken, ValueError, OSError, json.JSONDecodeError) as exc:
         log.warning("failed to load portfolio event cache", extra={"error": str(exc)})
         return {"updated_at": None, "items": {}}
 
 
 def save_event_cache(cache_data: dict[str, Any], cache_path: Path = CACHE_PATH) -> None:
-    """Save event monitoring state to disk."""
+    """Persist event cache. Production default writes only ciphertext."""
     try:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
-        cache_path.write_text(json.dumps(cache_data, ensure_ascii=False, indent=2), encoding="utf-8")
+        payload = json.dumps(cache_data, ensure_ascii=False, indent=2).encode("utf-8")
+        if cache_path.suffix == ".enc":
+            key = _cache_key()
+            if not key:
+                log.warning("PORTFOLIO_KEY missing; refusing to persist plaintext event cache")
+                return
+            cache_path.write_bytes(Fernet(key).encrypt(payload))
+        else:
+            cache_path.write_text(payload.decode("utf-8"), encoding="utf-8")
     except Exception as exc:
         log.warning("failed to save portfolio event cache", extra={"error": str(exc)})
 
