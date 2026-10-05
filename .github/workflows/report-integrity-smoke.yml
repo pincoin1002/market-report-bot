@@ -1,0 +1,52 @@
+name: Report Integrity Smoke
+
+on:
+  push:
+    branches: [fix/report-integrity-20261005]
+    paths:
+      - ".github/workflows/report-integrity-smoke.yml"
+      - "scripts/twse_market_evidence.py"
+
+jobs:
+  live-twse-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install requests pydantic
+      - name: Verify TWSE official evidence live
+        env:
+          PYTHONPATH: scripts
+        run: |
+          python - <<'PY'
+          from datetime import datetime, timezone
+          from twse_market_evidence import fetch_twse_close_evidence
+
+          e = fetch_twse_close_evidence(
+              "2026-10-02", "2026-10-01",
+              datetime(2026, 10, 2, 14, 0, tzinfo=timezone.utc),
+          )
+          assert e is not None, "TWSE evidence unavailable"
+          print("close", e.taiex_summary.close)
+          print("turnover_yi", e.taiex_summary.turnover_ntd_billions)
+          print("advancing", e.taiex_summary.advancing)
+          print("declining", e.taiex_summary.declining)
+          print("unchanged", e.taiex_summary.unchanged)
+          print("foreign_yi", e.institutional_flows.foreign_buy_sell_ntd_billions)
+          print("trust_yi", e.institutional_flows.investment_trust_buy_sell_ntd_billions)
+          print("dealer_yi", e.institutional_flows.dealer_buy_sell_ntd_billions)
+          print("total_yi", e.institutional_flows.total_buy_sell_ntd_billions)
+
+          assert abs(e.taiex_summary.close - 48475.74) < 0.01
+          assert abs(e.taiex_summary.turnover_ntd_billions - 9382.22) < 0.02
+          assert e.taiex_summary.advancing == 483
+          assert e.taiex_summary.declining == 506
+          assert e.taiex_summary.unchanged == 91
+          assert abs(e.institutional_flows.foreign_buy_sell_ntd_billions - 26.22) < 0.02
+          assert abs(e.institutional_flows.investment_trust_buy_sell_ntd_billions - 57.69) < 0.02
+          assert abs(e.institutional_flows.dealer_buy_sell_ntd_billions - 20.26) < 0.02
+          assert abs(e.institutional_flows.total_buy_sell_ntd_billions - 104.17) < 0.02
+          PY
