@@ -25,11 +25,12 @@ def main() -> None:
         now, intended_market_date=intended_market_date,
         intended_market_time=intended_market_time,
     )
-    # The external dispatcher triggers during the 08:00-08:59 New York staging window.
-    # The maximum expected wait until canonical 09:05 NY is ~65 minutes.
-    # A larger wait means malformed metadata or a stale queued event; do not keep a runner alive.
-    if seconds > 70 * 60:
-        raise SystemExit("US Open intent is more than 70 minutes in the future")
+    # External Vercel dispatch normally arrives during 08:00-08:59 NY.
+    # The native GitHub fallback is intentionally pre-staged around 04:30 NY
+    # because GitHub scheduled events have shown multi-hour delivery delays.
+    # Five hours still leaves this job below GitHub's six-hour hosted-runner cap.
+    if seconds > 300 * 60:
+        raise SystemExit("US Open intent is more than 300 minutes in the future")
     print(f"Waiting {seconds}s for canonical US Open intent")
     time.sleep(seconds)
 
