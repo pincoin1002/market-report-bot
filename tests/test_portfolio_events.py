@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import unittest
 from unittest.mock import MagicMock, patch
+from cryptography.fernet import Fernet
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -527,6 +528,33 @@ class PortfolioEventMonitoringSuiteTest(unittest.TestCase):
             run_portfolio_advice("report", "tw_close", snap, "gemini-2.0-flash", deliver=False)
         _, kwargs = mock_fetch.call_args
         self.assertIn("TSLA", kwargs.get("force_refresh_tickers", set()))
+
+
+    def test_20_encrypted_cache_round_trip_uses_portfolio_key(self):
+        with tempfile.TemporaryDirectory() as td:
+            cache_file = Path(td) / "portfolio_event_cache.json.enc"
+            payload = {
+                "updated_at": "2026-10-05T02:00:00+00:00",
+                "items": {"TEST01": {"event_status": "EVENT_CHECKED_NO_MATERIAL_CHANGE"}},
+            }
+            key = Fernet.generate_key().decode()
+            with patch.dict(os.environ, {"PORTFOLIO_KEY": key}, clear=False):
+                save_event_cache(payload, cache_path=cache_file)
+                raw = cache_file.read_bytes()
+                self.assertNotIn(b"EVENT_CHECKED_NO_MATERIAL_CHANGE", raw)
+                loaded = load_event_cache(cache_path=cache_file)
+            self.assertEqual(loaded, payload)
+
+    def test_21_all_daily_workflows_persist_only_encrypted_event_cache(self):
+        for workflow in (
+            ".github/workflows/tw-open.yml",
+            ".github/workflows/tw-close.yml",
+            ".github/workflows/us-open.yml",
+            ".github/workflows/us-close.yml",
+        ):
+            text = (ROOT / workflow).read_text(encoding="utf-8")
+            self.assertIn("portfolio_event_cache.json.enc", text)
+            self.assertNotIn("git add data/portfolio_event_cache.json", text)
 
 
 if __name__ == "__main__":
