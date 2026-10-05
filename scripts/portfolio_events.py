@@ -391,8 +391,9 @@ def fetch_portfolio_events(
                         }
                 except Exception as exc:
                     log.warning(
-                        "batch event query failed",
-                        extra={"batch_size": len(batch), "error_type": type(exc).__name__},
+                        "batch event query failed: %s (batch_size=%d)",
+                        type(exc).__name__,
+                        len(batch),
                     )
                     for ticker in batch:
                         inst_id = ticker_positions.get(ticker, ticker)
