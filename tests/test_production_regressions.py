@@ -44,8 +44,9 @@ from twse_market_evidence import TWSECloseEvidence, fetch_twse_close_evidence
 from validate_report import validate_rendered_report_structure
 
 TEST_PORTFOLIO_TICKERS = [
-    "0050", "006208", "1519", "2327", "2330", "2383",
-    "AMZN", "DRAM", "GOOG", "IBKR", "MU", "NVDA", "QQQ", "TSLA", "VOO", "VST", "VTI",
+    # Synthetic cross-market fixture. Do not mirror the user's private PIOS holdings.
+    "2317", "2454", "2308", "2382", "2303", "3711",
+    "AAPL", "MSFT", "META", "TSM", "AVGO", "AMD", "MRVL", "ARM", "ASML", "SMCI", "DELL",
     "BTC", "ETH", "USDC", "USDT", "BONK", "SXT",
 ]
 
