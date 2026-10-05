@@ -425,5 +425,108 @@ class PortfolioEventMonitoringSuiteTest(unittest.TestCase):
             self.assertTrue(all(f.event_status == "EVENT_CHECK_FAILED" for f in facts))
 
 
+    def test_16_omitted_ticker_from_search_batch_fails_closed(self):
+        with tempfile.TemporaryDirectory() as td:
+            cache_file = Path(td) / "event_cache.json"
+            small = PortfolioContext(
+                snapshot_id="small",
+                positions=self.portfolio.positions[:2],
+            )
+            grounded_results = [{
+                "ticker": small.positions[0].ticker,
+                "event_status": "EVENT_CHECKED_NO_MATERIAL_CHANGE",
+                "summary": "checked",
+                "is_upcoming": False,
+            }]
+            with patch("portfolio_events._query_gemini_search", return_value=grounded_results):
+                facts, _ = fetch_portfolio_events(
+                    small,
+                    api_key="fake-key",
+                    cache_path=cache_file,
+                    now=datetime(2026, 10, 5, 2, 0, tzinfo=timezone.utc),
+                )
+            by_ticker = {f.ticker: f for f in facts}
+            self.assertEqual(by_ticker[small.positions[0].ticker].event_status, "EVENT_CHECKED_NO_MATERIAL_CHANGE")
+            self.assertEqual(by_ticker[small.positions[1].ticker].event_status, "EVENT_CHECK_FAILED")
+
+    def test_17_material_or_upcoming_event_without_provenance_fails_closed(self):
+        with tempfile.TemporaryDirectory() as td:
+            cache_file = Path(td) / "event_cache.json"
+            single = PortfolioContext(
+                snapshot_id="single",
+                positions=[self.portfolio.positions[11]],  # NVDA
+            )
+            result = [{
+                "ticker": "NVDA",
+                "event_status": "EVENT_MATERIAL_FOUND",
+                "event_type": "GUIDANCE",
+                "title": "Guidance changed",
+                "summary": "Material claim but no source URL",
+                "severity": "HIGH",
+                "source_name": "Some source",
+                "source_url": "",
+                "is_upcoming": False,
+            }]
+            with patch("portfolio_events._query_gemini_search", return_value=result):
+                facts, upcoming = fetch_portfolio_events(
+                    single,
+                    api_key="fake-key",
+                    cache_path=cache_file,
+                    now=datetime(2026, 10, 5, 2, 0, tzinfo=timezone.utc),
+                )
+            self.assertEqual(len(facts), 1)
+            self.assertEqual(facts[0].event_status, "EVENT_CHECK_FAILED")
+            self.assertEqual(upcoming, [])
+
+    def test_18_material_event_surfaces_even_when_quote_is_unavailable(self):
+        quotes = dict(self.quotes)
+        quotes.pop("AMZN")
+        snap = Snapshot(
+            generated_at=datetime(2026, 10, 5, 2, 0, tzinfo=timezone.utc),
+            report_type="tw_close",
+            quote_observations=quotes,
+        )
+        ctx = build_market_context(snap, "tw_close", run_id="event_without_quote")
+        event = PortfolioEventFact(
+            instrument_id="AMZN",
+            ticker="AMZN",
+            checked_at=datetime(2026, 10, 5, 2, 0, tzinfo=timezone.utc),
+            event_status="EVENT_MATERIAL_FOUND",
+            event_type="GUIDANCE",
+            title="AWS guidance cut",
+            summary="Verified guidance change.",
+            severity="HIGH",
+            source_name="Amazon IR",
+            source_url="https://example.com/amazon-ir",
+            source_type="COMPANY_PR",
+        )
+        brief = build_action_brief(ctx, self.portfolio, verified_events=[event])
+        amzn = next(i for i in brief.action_queue if i.ticker == "AMZN")
+        self.assertEqual(amzn.price_status, "DATA_BLOCKED")
+        self.assertEqual(amzn.event_status, "EVENT_MATERIAL_FOUND")
+        self.assertEqual(brief.covered_positions, 22)
+        self.assertEqual(brief.event_checked_positions, 1)
+        ok, reason = validate_action_brief(brief, ctx, self.portfolio)
+        self.assertTrue(ok, reason)
+        rendered = render_action_brief(brief)
+        self.assertIn("AMZN", rendered)
+        self.assertIn("22/23 持股行情已驗證", rendered)
+
+    def test_19_large_price_move_forces_event_refresh_in_production_wiring(self):
+        quotes = dict(self.quotes)
+        quotes["TSLA"] = _obs("TSLA", price=108.0, prev=100.0)
+        snap = Snapshot(
+            generated_at=datetime(2026, 10, 5, 2, 0, tzinfo=timezone.utc),
+            report_type="tw_close",
+            quote_observations=quotes,
+        )
+        with patch("generate_report.fetch_portfolio_events", return_value=([], [])) as mock_fetch, \
+             patch("generate_report.load_authoritative_portfolio", return_value=self.portfolio), \
+             patch("generate_report.validate_portfolio_quotes", return_value=(True, "OK")):
+            run_portfolio_advice("report", "tw_close", snap, "gemini-2.0-flash", deliver=False)
+        _, kwargs = mock_fetch.call_args
+        self.assertIn("TSLA", kwargs.get("force_refresh_tickers", set()))
+
+
 if __name__ == "__main__":
     unittest.main()
