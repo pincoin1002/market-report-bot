@@ -7,7 +7,8 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
 
-from scheduler.us_open_dispatch import handle_cron_request
+from scheduler.us_open_dispatch import handle_cron_request as handle_us_open_cron_request
+from scheduler.tw_open_dispatch import handle_cron_request as handle_tw_open_cron_request
 
 
 class handler(BaseHTTPRequestHandler):
@@ -15,13 +16,19 @@ class handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802 - Vercel's Python handler contract
         slot = parse_qs(urlparse(self.path).query).get("slot", [""])[0]
-        if slot not in {"edt", "est"}:
+        if slot in {"edt", "est"}:
+            status, payload = handle_us_open_cron_request(
+                slot, self.headers.get("Authorization", "")
+            )
+        elif slot == "tw_open":
+            status, payload = handle_tw_open_cron_request(
+                self.headers.get("Authorization", "")
+            )
+        else:
             self._respond(404, {"ok": False, "status": "NOT_FOUND"})
             return
-        status, payload = handle_cron_request(slot, self.headers.get("Authorization", ""))
-        # This is intentionally payload-only: no authorization header or
-        # dispatch credential can enter Vercel logs.  It gives operators the
-        # actual invocation timestamp for future incident reconstruction.
+
+        # Payload-only operational log; never emit credentials.
         print(json.dumps({
             "scheduler_invoked_at": datetime.now(tz=timezone.utc).isoformat(),
             "slot": slot,
