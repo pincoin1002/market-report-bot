@@ -157,6 +157,16 @@ def _query_gemini_search(
     if not response or not response.text:
         raise ValueError("empty response from Gemini search")
 
+    # A response is not considered search-grounded merely because the search
+    # tool was requested. Require actual grounding metadata from Gemini.
+    candidates = getattr(response, "candidates", None) or []
+    grounding_chunks = []
+    if candidates:
+        grounding_metadata = getattr(candidates[0], "grounding_metadata", None)
+        grounding_chunks = getattr(grounding_metadata, "grounding_chunks", None) or []
+    if not grounding_chunks:
+        raise ValueError("Gemini response contained no Google Search grounding metadata")
+
     text = response.text.strip()
     # Strip markdown code blocks if wrapped
     if text.startswith("```"):
@@ -256,15 +266,41 @@ def fetch_portfolio_events(
                         inst_id = ticker_positions.get(ticker, ticker)
                         t_results = results_by_ticker.get(ticker, [])
                         if not t_results:
-                            # If model omitted ticker, treat as clean check
-                            t_results = [{
-                                "ticker": ticker,
-                                "event_status": "EVENT_CHECKED_NO_MATERIAL_CHANGE",
-                                "summary": "行情與公開資訊已檢查，未發現重大公司事件。",
-                                "source_name": "GeminiSearch",
-                                "source_type": "SEARCH_GROUNDED",
-                                "is_upcoming": False,
-                            }]
+                            # Omission is not evidence of absence. A missing
+                            # ticker from a grounded batch must fail closed.
+                            fact_obj = PortfolioEventFact(
+                                instrument_id=inst_id,
+                                ticker=ticker,
+                                checked_at=current_time,
+                                event_status="EVENT_CHECK_FAILED",
+                                summary="搜尋批次未回傳此標的結果，本次事件未完成驗證。",
+                                source_name="GeminiSearch",
+                                source_type="SEARCH_GROUNDED",
+                            )
+                            all_facts.append(fact_obj)
+                            continue
+
+                        # Material/upcoming claims require explicit provenance
+                        # in addition to batch-level grounding metadata.
+                        missing_provenance = any(
+                            (
+                                (r.get("event_status") == "EVENT_MATERIAL_FOUND" or r.get("is_upcoming"))
+                                and (not r.get("source_name") or not r.get("source_url"))
+                            )
+                            for r in t_results
+                        )
+                        if missing_provenance:
+                            fact_obj = PortfolioEventFact(
+                                instrument_id=inst_id,
+                                ticker=ticker,
+                                checked_at=current_time,
+                                event_status="EVENT_CHECK_FAILED",
+                                summary="搜尋結果缺少可驗證來源，本次事件未完成驗證。",
+                                source_name="GeminiSearch",
+                                source_type="SEARCH_GROUNDED",
+                            )
+                            all_facts.append(fact_obj)
+                            continue
 
                         cached_facts_for_ticker = []
                         cached_upcoming_for_ticker = []
