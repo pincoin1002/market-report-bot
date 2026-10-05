@@ -633,5 +633,29 @@ class PortfolioEventMonitoringSuiteTest(unittest.TestCase):
         )
 
 
+    def test_25_transient_server_error_retries_then_succeeds(self):
+        instruments = [
+            {"ticker": "T0", "name": "Test 0", "asset_type": "EQUITY"},
+            {"ticker": "T1", "name": "Test 1", "asset_type": "EQUITY"},
+        ]
+        success = [
+            {"ticker": "T0", "event_status": "EVENT_CHECKED_NO_MATERIAL_CHANGE"},
+            {"ticker": "T1", "event_status": "EVENT_CHECKED_NO_MATERIAL_CHANGE"},
+        ]
+        with patch("portfolio_events.time.sleep"), patch(
+            "portfolio_events._query_gemini_search",
+            side_effect=[RuntimeError("server"), success],
+        ) as query:
+            results, failed, codes = _query_batch_with_bounded_fallback(
+                instruments,
+                model="gemini-2.5-flash",
+                api_key="fake",
+            )
+        self.assertEqual(query.call_count, 2)
+        self.assertEqual(len(results), 2)
+        self.assertEqual(failed, [])
+        self.assertEqual(codes, ["RuntimeError"])
+
+
 if __name__ == "__main__":
     unittest.main()
