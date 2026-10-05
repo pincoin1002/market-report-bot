@@ -154,8 +154,8 @@ def fetch_twse_close_evidence(session_date: str, previous_session_date: str,
     try:
         current_market = _get_json(MI_INDEX_URL, {"response": "json", "date": _twse_date(session_date), "type": "ALL"})
         previous_market = _get_json(MI_INDEX_URL, {"response": "json", "date": _twse_date(previous_session_date), "type": "ALL"})
-        current_flows = _get_json(INSTITUTIONAL_URL, {"response": "json", "date": _twse_date(session_date), "type": "day"})
-        previous_flows = _get_json(INSTITUTIONAL_URL, {"response": "json", "date": _twse_date(previous_session_date), "type": "day"})
+        current_flows = _get_json(INSTITUTIONAL_URL, {"response": "json", "dayDate": _twse_date(session_date), "type": "day"})
+        previous_flows = _get_json(INSTITUTIONAL_URL, {"response": "json", "dayDate": _twse_date(previous_session_date), "type": "day"})
         if current_market.get("date") != _twse_date(session_date):
             raise ValueError("TWSE current market response date mismatch")
         if previous_market.get("date") != _twse_date(previous_session_date):
