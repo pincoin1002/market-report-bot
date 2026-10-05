@@ -28,7 +28,6 @@ from models import (
     QuoteObservation,
     Snapshot,
 )
-from portfolio_context import load_authoritative_portfolio
 from portfolio_events import fetch_portfolio_events, is_entry_fresh, load_event_cache, save_event_cache
 from structured_reports import (
     build_action_brief,
@@ -60,10 +59,13 @@ def _obs(symbol: str, price: float = 100.0, prev: float = 99.0, session: str = "
 
 
 def _make_23_portfolio() -> PortfolioContext:
+    # Synthetic 23-position universe. Do not mirror the user's private
+    # production holdings in this public repository test fixture.
     tickers = [
-        "0050", "006208", "1519", "2327", "2330", "2383",
-        "AMZN", "DRAM", "GOOG", "IBKR", "MU", "NVDA", "QQQ", "TSLA", "VOO", "VST", "VTI",
-        "BTC", "ETH", "USDC", "USDT", "BONK", "SXT",
+        "TEST01", "TEST02", "TEST03", "TEST04", "2330", "TEST05",
+        "TEST06", "AMZN", "TEST07", "TEST08", "TEST09", "NVDA",
+        "TEST10", "TSLA", "TEST11", "TEST12", "TEST13", "TEST14",
+        "TEST15", "TEST16", "TEST17", "TEST18", "TEST19",
     ]
     positions = [
         PositionContext(
@@ -405,23 +407,22 @@ class PortfolioEventMonitoringSuiteTest(unittest.TestCase):
         self.assertIn("23/23 持股行情已驗證，價格面沒有重大異常。", rendered)
         self.assertIn("公司事件目前完成 10/23；其餘 13 檔不做事件結論。", rendered)
 
-    def test_15_all_23_actual_pios_holdings_covered_by_event_universe(self):
-        actual_portfolio = load_authoritative_portfolio()
-        self.assertEqual(len(actual_portfolio.positions), 23)
-        actual_tickers = {p.ticker for p in actual_portfolio.positions}
+    def test_15_all_23_synthetic_holdings_covered_by_event_universe(self):
+        # Public CI must never depend on or disclose the private PIOS snapshot.
+        synthetic_portfolio = self.portfolio
+        expected_tickers = {p.ticker for p in synthetic_portfolio.positions}
+        self.assertEqual(len(expected_tickers), 23)
 
-        # Run fetch_portfolio_events with no API key (safe local mode)
         with tempfile.TemporaryDirectory() as td:
             cache_file = Path(td) / "empty_cache.json"
             facts, _ = fetch_portfolio_events(
-                actual_portfolio,
+                synthetic_portfolio,
                 cache_path=cache_file,
                 api_key=None,  # triggers safe EVENT_CHECK_FAILED
             )
             covered_tickers = {f.ticker for f in facts}
-            self.assertEqual(actual_tickers, covered_tickers)
+            self.assertEqual(expected_tickers, covered_tickers)
             self.assertEqual(len(facts), 23)
-            # Without API key, all are honestly marked EVENT_CHECK_FAILED
             self.assertTrue(all(f.event_status == "EVENT_CHECK_FAILED" for f in facts))
 
 
