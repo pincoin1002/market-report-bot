@@ -500,7 +500,7 @@ class Reproduction20260929Test(unittest.TestCase):
 
         summary = TaiexMarketSummary(
             close=47631.96, point_change=-392.64, change_pct=-0.82,
-            turnover_ntd_billions=836.14, advancing=374, declining=586, unchanged=112,
+            turnover_ntd_billions=8361.45, advancing=374, declining=586, unchanged=112,
             advancing_prev=450, declining_prev=420, unchanged_prev=95,
             session_date="2026-09-29", previous_session_date="2026-09-24",
             source="https://www.twse.com.tw/exchangeReport/MI_INDEX",
@@ -510,7 +510,7 @@ class Reproduction20260929Test(unittest.TestCase):
             dealer_buy_sell_ntd_billions=-16.40, total_buy_sell_ntd_billions=-78.40,
             foreign_buy_sell_prev_ntd_billions=-10.0, investment_trust_buy_sell_prev_ntd_billions=5.0,
             dealer_buy_sell_prev_ntd_billions=-2.0, total_buy_sell_prev_ntd_billions=-7.0,
-            turnover_prev_ntd_billions=763.12,
+            turnover_prev_ntd_billions=7631.20,
             session_date="2026-09-29", previous_session_date="2026-09-24",
             source="https://www.twse.com.tw/fund/BFI82U",
         )
