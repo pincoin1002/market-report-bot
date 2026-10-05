@@ -19,7 +19,7 @@ import re
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from cryptography.fernet import Fernet, InvalidToken
 
 from models import PortfolioContext, PortfolioEventFact, PortfolioEventStatus
@@ -349,8 +349,15 @@ def fetch_portfolio_events(
     force_refresh_tickers: set[str] | None = None,
     api_key: str | None = None,
     cache_path: Path = CACHE_PATH,
+    network_scope: Literal["all", "forced_only", "none"] = "all",
 ) -> tuple[list[PortfolioEventFact], list[dict[str, Any] | str]]:
-    """Fetch or load cached event monitoring evidence for all holdings in portfolio."""
+    """Fetch/cache event evidence.
+
+    network_scope="all" is for the dedicated background refresher.
+    network_scope="forced_only" is for report delivery: fresh cache is reused
+    and only explicitly forced tickers may make live search calls.
+    network_scope="none" is cache-only.
+    """
     current_time = now or datetime.now(tz=timezone.utc)
     if current_time.tzinfo is None:
         current_time = current_time.replace(tzinfo=timezone.utc)
@@ -375,7 +382,8 @@ def fetch_portfolio_events(
             "asset_type": pos.asset_type or "UNKNOWN",
         }
         entry = cached_items.get(ticker)
-        if entry and is_entry_fresh(entry, current_time, force_refresh=(ticker in force_set)):
+        force_refresh = ticker in force_set
+        if entry and is_entry_fresh(entry, current_time, force_refresh=force_refresh):
             # Cache hit: reconstruct facts
             entry_facts = entry.get("facts", [])
             for f in entry_facts:
@@ -387,6 +395,7 @@ def fetch_portfolio_events(
                     event_type=f.get("event_type"),
                     title=f.get("title"),
                     event_date=f.get("event_date"),
+                    published_at=_parse_event_datetime(f.get("published_at")),
                     summary=f.get("summary", ""),
                     impact=f.get("impact", ""),
                     severity=f.get("severity", "LOW"),
@@ -399,7 +408,22 @@ def fetch_portfolio_events(
             for up in entry.get("upcoming", []):
                 upcoming_events.append(up)
         else:
-            tickers_to_query.append(ticker)
+            may_query = (
+                network_scope == "all"
+                or (network_scope == "forced_only" and force_refresh)
+            )
+            if may_query:
+                tickers_to_query.append(ticker)
+            else:
+                all_facts.append(PortfolioEventFact(
+                    instrument_id=pos.instrument_id,
+                    ticker=ticker,
+                    checked_at=current_time,
+                    event_status="EVENT_UNCHECKED",
+                    summary="事件快取尚未更新或已超過有效時間，本次日報不等待外部搜尋。",
+                    source_name="EventCache",
+                    source_type="CACHE",
+                ))
 
     key = api_key or os.environ.get("GEMINI_API_KEY")
 
