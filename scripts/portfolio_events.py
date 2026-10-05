@@ -19,32 +19,54 @@ import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from cryptography.fernet import Fernet, InvalidToken
 
 from models import PortfolioContext, PortfolioEventFact, PortfolioEventStatus
 
 log = logging.getLogger(__name__)
 
-CACHE_PATH = Path(__file__).resolve().parent.parent / "data" / "portfolio_event_cache.json"
-FACTS_AUDIT_PATH = Path(__file__).resolve().parent.parent / "data" / "portfolio_event_facts.json"
+ROOT = Path(__file__).resolve().parent.parent
+CACHE_PATH = ROOT / "portfolio_event_cache.json.enc"
+FACTS_AUDIT_PATH = ROOT / "data" / "portfolio_event_facts.json"
 DEFAULT_CACHE_TTL_HOURS = 12
 
 
+def _cache_key() -> bytes | None:
+    key = os.getenv("PORTFOLIO_KEY", "").strip()
+    return key.encode() if key else None
+
+
 def load_event_cache(cache_path: Path = CACHE_PATH) -> dict[str, Any]:
-    """Load cached event monitoring state."""
+    """Load event cache. Production default is Fernet-encrypted; test paths may be JSON."""
     if not cache_path.exists():
         return {"updated_at": None, "items": {}}
     try:
+        if cache_path.suffix == ".enc":
+            key = _cache_key()
+            if not key:
+                log.warning("PORTFOLIO_KEY missing; encrypted event cache unavailable")
+                return {"updated_at": None, "items": {}}
+            raw = Fernet(key).decrypt(cache_path.read_bytes())
+            return json.loads(raw.decode("utf-8"))
         return json.loads(cache_path.read_text(encoding="utf-8"))
-    except Exception as exc:
+    except (InvalidToken, ValueError, OSError, json.JSONDecodeError) as exc:
         log.warning("failed to load portfolio event cache", extra={"error": str(exc)})
         return {"updated_at": None, "items": {}}
 
 
 def save_event_cache(cache_data: dict[str, Any], cache_path: Path = CACHE_PATH) -> None:
-    """Save event monitoring state to disk."""
+    """Persist event cache. Production default writes only ciphertext."""
     try:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
-        cache_path.write_text(json.dumps(cache_data, ensure_ascii=False, indent=2), encoding="utf-8")
+        payload = json.dumps(cache_data, ensure_ascii=False, indent=2).encode("utf-8")
+        if cache_path.suffix == ".enc":
+            key = _cache_key()
+            if not key:
+                log.warning("PORTFOLIO_KEY missing; refusing to persist plaintext event cache")
+                return
+            cache_path.write_bytes(Fernet(key).encrypt(payload))
+        else:
+            cache_path.write_text(payload.decode("utf-8"), encoding="utf-8")
     except Exception as exc:
         log.warning("failed to save portfolio event cache", extra={"error": str(exc)})
 
@@ -91,25 +113,27 @@ def is_entry_fresh(
     return True
 
 
-def _build_search_prompt(tickers: list[str]) -> str:
-    tickers_str = ", ".join(tickers)
+def _build_search_prompt(instruments: list[dict[str, str]]) -> str:
+    instrument_lines = "\n".join(
+        f"- {item['ticker']} | name={item.get('name', '')} | asset_type={item.get('asset_type', '')}"
+        for item in instruments
+    )
     return f"""You are a professional financial portfolio event monitor.
-Search Google Search for recent material company announcements and upcoming scheduled events for these tickers:
-{tickers_str}
+Use Google Search to check ONLY the last 48 hours for material developments and the next 7 days for confirmed upcoming events for these instruments:
+{instrument_lines}
 
-Material events include:
-- earnings announcements, earnings release dates, guidance updates or cuts
-- major corporate announcements, M&A, divestitures
-- CEO/CFO or key executive leadership changes
-- regulatory, legal, or antitrust actions
-- major product, clinical, or technological breakthroughs
-- material dividends, buybacks, or secondary offerings
+Interpret events by instrument type:
+- Company equity/ADR: earnings, guidance, filings, M&A, management, regulatory/legal action, major product/customer/supplier or capital-allocation events.
+- ETF: material index/rebalance/methodology, distribution, closure/liquidation, split, fee or regulatory changes. Do not invent company-style earnings events for an ETF.
+- Crypto/token/stablecoin: material protocol/network, exploit/security, tokenomics, listing/delisting, issuer/reserve, regulatory/legal or governance developments. Do not invent corporate earnings events for a token.
 
 Rules:
-1. Prefer official filings (SEC, MOPS, IR releases) and reputable primary financial press (Reuters, Bloomberg, WSJ, CNBC).
-2. If NO material event occurred in the last 7 days and NO upcoming event is scheduled in the next 30 days for a ticker, output an entry with event_status: "EVENT_CHECKED_NO_MATERIAL_CHANGE".
-3. If an upcoming event is identified (e.g. earnings call, investor day), set is_upcoming: true.
-4. Output strictly a JSON array matching the schema below, with NO markdown backticks or extra commentary:
+1. Prefer sources in this order: company/issuer IR or official filing; regulator/exchange/protocol/issuer primary source; Reuters/Bloomberg/WSJ or similarly high-quality financial news; other sources only as corroboration.
+2. "EVENT_CHECKED_NO_MATERIAL_CHANGE" means the grounded search actually covered that instrument and found no material item in the last 48 hours and no confirmed upcoming event in the next 7 days.
+3. If an instrument cannot be checked reliably, return "EVENT_CHECK_FAILED". Never use omission as evidence of no event.
+4. For any MATERIAL or UPCOMING event, source_name and source_url are mandatory.
+5. If an upcoming event is identified, set is_upcoming: true.
+6. Output exactly one or more JSON entries per instrument as needed, with NO markdown backticks or extra commentary:
 
 [
   {{
@@ -130,11 +154,11 @@ Rules:
 
 
 def _query_gemini_search(
-    tickers: list[str],
+    instruments: list[dict[str, str]],
     model: str = "gemini-2.0-flash",
     api_key: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Query Gemini with Google Search tool for a batch of tickers."""
+    """Query Gemini with Google Search for a batch of typed instruments."""
     from google import genai
     from google.genai import types
 
@@ -143,7 +167,7 @@ def _query_gemini_search(
         raise ValueError("GEMINI_API_KEY is not configured")
 
     client = genai.Client(api_key=key)
-    prompt = _build_search_prompt(tickers)
+    prompt = _build_search_prompt(instruments)
 
     response = client.models.generate_content(
         model=model,
@@ -156,6 +180,16 @@ def _query_gemini_search(
     )
     if not response or not response.text:
         raise ValueError("empty response from Gemini search")
+
+    # A response is not considered search-grounded merely because the search
+    # tool was requested. Require actual grounding metadata from Gemini.
+    candidates = getattr(response, "candidates", None) or []
+    grounding_chunks = []
+    if candidates:
+        grounding_metadata = getattr(candidates[0], "grounding_metadata", None)
+        grounding_chunks = getattr(grounding_metadata, "grounding_chunks", None) or []
+    if not grounding_chunks:
+        raise ValueError("Gemini response contained no Google Search grounding metadata")
 
     text = response.text.strip()
     # Strip markdown code blocks if wrapped
@@ -191,10 +225,16 @@ def fetch_portfolio_events(
 
     tickers_to_query: list[str] = []
     ticker_positions: dict[str, str] = {}  # ticker -> instrument_id
+    ticker_metadata: dict[str, dict[str, str]] = {}
 
     for pos in portfolio.positions:
         ticker = pos.ticker.upper()
         ticker_positions[ticker] = pos.instrument_id
+        ticker_metadata[ticker] = {
+            "ticker": ticker,
+            "name": pos.name,
+            "asset_type": pos.asset_type or "UNKNOWN",
+        }
         entry = cached_items.get(ticker)
         if entry and is_entry_fresh(entry, current_time, force_refresh=(ticker in force_set)):
             # Cache hit: reconstruct facts
@@ -245,7 +285,8 @@ def fetch_portfolio_events(
             for i in range(0, len(tickers_to_query), batch_size):
                 batch = tickers_to_query[i:i + batch_size]
                 try:
-                    results = _query_gemini_search(batch, model=model, api_key=key)
+                    batch_instruments = [ticker_metadata[t] for t in batch]
+                    results = _query_gemini_search(batch_instruments, model=model, api_key=key)
                     # Organize results by ticker
                     results_by_ticker: dict[str, list[dict[str, Any]]] = {}
                     for r in results:
@@ -256,15 +297,41 @@ def fetch_portfolio_events(
                         inst_id = ticker_positions.get(ticker, ticker)
                         t_results = results_by_ticker.get(ticker, [])
                         if not t_results:
-                            # If model omitted ticker, treat as clean check
-                            t_results = [{
-                                "ticker": ticker,
-                                "event_status": "EVENT_CHECKED_NO_MATERIAL_CHANGE",
-                                "summary": "行情與公開資訊已檢查，未發現重大公司事件。",
-                                "source_name": "GeminiSearch",
-                                "source_type": "SEARCH_GROUNDED",
-                                "is_upcoming": False,
-                            }]
+                            # Omission is not evidence of absence. A missing
+                            # ticker from a grounded batch must fail closed.
+                            fact_obj = PortfolioEventFact(
+                                instrument_id=inst_id,
+                                ticker=ticker,
+                                checked_at=current_time,
+                                event_status="EVENT_CHECK_FAILED",
+                                summary="搜尋批次未回傳此標的結果，本次事件未完成驗證。",
+                                source_name="GeminiSearch",
+                                source_type="SEARCH_GROUNDED",
+                            )
+                            all_facts.append(fact_obj)
+                            continue
+
+                        # Material/upcoming claims require explicit provenance
+                        # in addition to batch-level grounding metadata.
+                        missing_provenance = any(
+                            (
+                                (r.get("event_status") == "EVENT_MATERIAL_FOUND" or r.get("is_upcoming"))
+                                and (not r.get("source_name") or not r.get("source_url"))
+                            )
+                            for r in t_results
+                        )
+                        if missing_provenance:
+                            fact_obj = PortfolioEventFact(
+                                instrument_id=inst_id,
+                                ticker=ticker,
+                                checked_at=current_time,
+                                event_status="EVENT_CHECK_FAILED",
+                                summary="搜尋結果缺少可驗證來源，本次事件未完成驗證。",
+                                source_name="GeminiSearch",
+                                source_type="SEARCH_GROUNDED",
+                            )
+                            all_facts.append(fact_obj)
+                            continue
 
                         cached_facts_for_ticker = []
                         cached_upcoming_for_ticker = []

@@ -43,11 +43,10 @@ from structured_reports import (
 from twse_market_evidence import TWSECloseEvidence, fetch_twse_close_evidence
 from validate_report import validate_rendered_report_structure
 
-TEST_PORTFOLIO_TICKERS = [
-    "0050", "006208", "1519", "2327", "2330", "2383",
-    "AMZN", "DRAM", "GOOG", "IBKR", "MU", "NVDA", "QQQ", "TSLA", "VOO", "VST", "VTI",
-    "BTC", "ETH", "USDC", "USDT", "BONK", "SXT",
-]
+TEST_TW_TICKERS = ["2317", "2454", "2308", "2382", "2303", "3711"]
+TEST_US_TICKERS = ["AAPL", "MSFT", "META", "TSM", "AVGO", "AMD", "MRVL", "ARM", "ASML", "SMCI", "DELL"]
+TEST_CRYPTO_TICKERS = ["BTC", "ETH", "USDC", "USDT", "BONK", "SXT"]
+TEST_PORTFOLIO_TICKERS = TEST_TW_TICKERS + TEST_US_TICKERS + TEST_CRYPTO_TICKERS
 
 
 def _deterministic_test_portfolio() -> PortfolioContext:
@@ -427,7 +426,7 @@ class Reproduction20260929Test(unittest.TestCase):
         quotes: dict[str, QuoteObservation] = {}
         named_quotes: dict[str, NamedQuote] = {}
 
-        tw_syms = ["0050", "006208", "1519", "2327", "2330", "2383", "TAIEX", "2317", "2454", "2308", "3711", "2303", "2382", "4958", "2356", "3231"]
+        tw_syms = TEST_TW_TICKERS + ["TAIEX", "2330", "4958", "2356", "3231"]
         tw_prices = {
             "0050": (195.0, 196.0, -0.51), "006208": (115.0, 115.5, -0.43),
             "1519": (560.0, 565.0, -0.88), "2327": (620.0, 625.0, -0.80),
@@ -451,7 +450,7 @@ class Reproduction20260929Test(unittest.TestCase):
             quotes[s] = obs
             named_quotes[s] = NamedQuote(name=spec.display_name, currency=spec.currency, symbol=s, price=p, prev_close=prev, change_pct=chg, data_date="2026-09-29")
 
-        us_syms = ["AMZN", "DRAM", "GOOG", "IBKR", "MU", "NVDA", "QQQ", "TSLA", "VOO", "VST", "VTI"]
+        us_syms = TEST_US_TICKERS
         for s in us_syms:
             spec = resolve_instrument(s)
             obs = QuoteObservation(
@@ -464,7 +463,7 @@ class Reproduction20260929Test(unittest.TestCase):
             quotes[s] = obs
             named_quotes[s] = NamedQuote(name=spec.display_name, currency="USD", symbol=s, price=150.0, prev_close=148.0, change_pct=1.35, data_date="2026-09-28")
 
-        crypto_syms = ["BTC", "ETH", "USDC", "USDT", "BONK", "SXT"]
+        crypto_syms = TEST_CRYPTO_TICKERS
         for s in crypto_syms:
             spec = resolve_instrument(s)
             provider = "coinbase_exchange" if s == "BONK" else "coingecko"
@@ -557,7 +556,7 @@ class PortfolioAnalyticsContractSuiteTest(unittest.TestCase):
     def _build_valid_23_quotes(self):
         quotes = {}
         # TW quotes (6)
-        tw_syms = ["0050", "006208", "1519", "2327", "2330", "2383"]
+        tw_syms = TEST_TW_TICKERS
         for s in tw_syms:
             quotes[s] = QuoteObservation(
                 quote_id=f"{s}:2026-09-29:REGULAR:twse", instrument_id=s, canonical_symbol=s,
@@ -567,7 +566,7 @@ class PortfolioAnalyticsContractSuiteTest(unittest.TestCase):
                 previous_regular_close=99.0, change_pct=1.01, market="TW",
             )
         # US quotes (11)
-        us_syms = ["AMZN", "DRAM", "GOOG", "IBKR", "MU", "NVDA", "QQQ", "TSLA", "VOO", "VST", "VTI"]
+        us_syms = TEST_US_TICKERS
         for s in us_syms:
             quotes[s] = QuoteObservation(
                 quote_id=f"{s}:2026-09-28:REGULAR:yfinance", instrument_id=s, canonical_symbol=s,
@@ -577,7 +576,7 @@ class PortfolioAnalyticsContractSuiteTest(unittest.TestCase):
                 previous_regular_close=196.0, change_pct=2.04, market="US",
             )
         # Crypto quotes (6)
-        crypto_syms = ["BTC", "ETH", "USDC", "USDT", "BONK", "SXT"]
+        crypto_syms = TEST_CRYPTO_TICKERS
         for s in crypto_syms:
             price = 60000.0 if s == "BTC" else (2600.0 if s == "ETH" else (0.000012 if s == "BONK" else (0.15 if s == "SXT" else 1.0)))
             quotes[s] = QuoteObservation(
@@ -637,7 +636,7 @@ class PortfolioAnalyticsContractSuiteTest(unittest.TestCase):
         from portfolio_analytics import calculate_portfolio_analytics
         quotes = self._build_valid_23_quotes()
         # Remove US quotes
-        for s in ["AMZN", "DRAM", "GOOG"]:
+        for s in TEST_US_TICKERS[:3]:
             del quotes[s]
         expected_dates = {"TW": "2026-09-29", "US": "2026-09-28"}
         res = calculate_portfolio_analytics(self.portfolio, quotes, taiex_change_pct=-0.82, expected_dates=expected_dates)
@@ -646,7 +645,8 @@ class PortfolioAnalyticsContractSuiteTest(unittest.TestCase):
     def test_incomplete_us_session_date_mismatch_fails_closed(self):
         from portfolio_analytics import calculate_portfolio_analytics
         quotes = self._build_valid_23_quotes()
-        quotes["AMZN"] = quotes["AMZN"].model_copy(update={"market_date": "2026-09-27"})
+        us_ticker = TEST_US_TICKERS[0]
+        quotes[us_ticker] = quotes[us_ticker].model_copy(update={"market_date": "2026-09-27"})
         expected_dates = {"TW": "2026-09-29", "US": "2026-09-28"}
         res = calculate_portfolio_analytics(self.portfolio, quotes, taiex_change_pct=-0.82, expected_dates=expected_dates)
         self.assertEqual(res.status, "INCOMPLETE_QUOTES")
@@ -657,8 +657,8 @@ class PortfolioAnalyticsContractSuiteTest(unittest.TestCase):
         from portfolio_analytics import calculate_portfolio_analytics
         quotes = self._build_valid_23_quotes()
         bad_pos = [PositionContext.model_construct(
-            position_id="test-pos", instrument_id="2330", ticker="2330",
-            name="台積電", currency="TWD", quantity=0.0, market="TW", asset_type="EQUITY",
+            position_id="test-pos", instrument_id=TEST_TW_TICKERS[0], ticker=TEST_TW_TICKERS[0],
+            name="Synthetic TW Position", currency="TWD", quantity=0.0, market="TW", asset_type="EQUITY",
         )]
         bad_portfolio = PortfolioContext(source="PIOS_TEST", positions=bad_pos)
         res = calculate_portfolio_analytics(bad_portfolio, quotes)

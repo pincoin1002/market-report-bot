@@ -927,25 +927,80 @@ def build_action_brief(
     raw_events = verified_events if verified_events is not None else getattr(context, "event_facts", [])
     events_by_id: dict[str, list[dict | PortfolioEventFact]] = {}
     for evt in raw_events:
-        sym = evt.ticker if isinstance(evt, PortfolioEventFact) else (evt.get("instrument_id") or evt.get("ticker"))
-        if sym:
-            events_by_id.setdefault(str(sym).upper(), []).append(evt)
+        if isinstance(evt, PortfolioEventFact):
+            keys = {evt.ticker.upper(), evt.instrument_id.upper()}
+        else:
+            keys = {
+                str(evt.get("ticker") or "").upper(),
+                str(evt.get("instrument_id") or "").upper(),
+            }
+        for key in keys:
+            if key:
+                events_by_id.setdefault(key, []).append(evt)
 
     items: list[PortfolioActionItem] = []
     data_issues: list[str] = []
 
     for pos in portfolio.positions:
-        obs = context.quotes.get(pos.instrument_id)
+        pos_events = events_by_id.get(pos.instrument_id.upper(), []) or events_by_id.get(pos.ticker.upper(), [])
+        obs = context.quotes.get(pos.instrument_id) or context.quotes.get(pos.ticker)
         if not obs or obs.quality_status != "VALID":
+            # Price evidence and event evidence are independent. A quote outage
+            # must not erase a verified material company/instrument event.
+            material_events = [
+                e for e in pos_events
+                if (e.event_status if isinstance(e, PortfolioEventFact) else e.get("event_status")) == "EVENT_MATERIAL_FOUND"
+            ]
+            failed_events = [
+                e for e in pos_events
+                if (e.event_status if isinstance(e, PortfolioEventFact) else e.get("event_status")) == "EVENT_CHECK_FAILED"
+            ]
+            clean_events = [
+                e for e in pos_events
+                if (e.event_status if isinstance(e, PortfolioEventFact) else e.get("event_status")) == "EVENT_CHECKED_NO_MATERIAL_CHANGE"
+            ]
+
+            if material_events:
+                evt_data = material_events[0]
+                severity = evt_data.severity if isinstance(evt_data, PortfolioEventFact) else evt_data.get("severity", "LOW")
+                status = "ACTION_REVIEW" if severity in ("HIGH", "CRITICAL") else "WATCH"
+                event_status = "EVENT_MATERIAL_FOUND"
+                summary = evt_data.summary if isinstance(evt_data, PortfolioEventFact) else (evt_data.get("summary") or "已驗證重大事件需要關注。")
+                next_step = "行情資料目前未通過驗證；先依事件本身重新檢視投資邏輯，不做精確交易判斷。"
+                verified_event = evt_data
+                reason_codes = ["QUOTE_UNAVAILABLE_OR_INVALID", "MATERIAL_COMPANY_EVENT"]
+            elif failed_events:
+                status = "DATA_BLOCKED"
+                event_status = "EVENT_CHECK_FAILED"
+                summary = "持股行情未通過驗證，且公司事件資料本次檢查失敗。"
+                next_step = "待行情與事件資料修復後重新檢視。"
+                verified_event = failed_events[0]
+                reason_codes = ["QUOTE_UNAVAILABLE_OR_INVALID", "EVENT_CHECK_FAILED"]
+            elif clean_events:
+                status = "DATA_BLOCKED"
+                event_status = "EVENT_CHECKED_NO_MATERIAL_CHANGE"
+                summary = "公司事件已完成檢查且未發現重大事件；但持股行情未通過驗證。"
+                next_step = "待行情資料修復後重新檢視。"
+                verified_event = clean_events[0]
+                reason_codes = ["QUOTE_UNAVAILABLE_OR_INVALID", "NO_MATERIAL_EVENT"]
+            else:
+                status = "DATA_BLOCKED"
+                event_status = "EVENT_UNCHECKED"
+                summary = "持股行情未通過驗證；公司事件面亦尚未完成驗證。"
+                next_step = "待行情資料修復後重新檢視。"
+                verified_event = None
+                reason_codes = ["QUOTE_UNAVAILABLE_OR_INVALID", "EVENT_UNCHECKED"]
+
             item = PortfolioActionItem(
                 instrument_id=pos.instrument_id,
                 ticker=pos.ticker,
-                status="DATA_BLOCKED",
+                status=status,
                 price_status="DATA_BLOCKED",
-                event_status="EVENT_UNCHECKED",
-                reason_codes=["QUOTE_UNAVAILABLE_OR_INVALID"],
-                summary="持股行情未通過驗證，本次不產生數字監控結論。",
-                next_step="待行情資料修復後重新檢視。",
+                event_status=event_status,
+                reason_codes=reason_codes,
+                summary=summary,
+                next_step=next_step,
+                verified_event=verified_event,
             )
             data_issues.append(f"{pos.ticker}: quote unavailable or invalid")
             items.append(item)
@@ -1120,7 +1175,7 @@ def build_action_brief(
                     upcoming_events_list.append(str(evt))
 
     total_positions = len(portfolio.positions)
-    covered_positions = len([i for i in items if i.status != "DATA_BLOCKED"])
+    covered_positions = len([i for i in items if i.price_status != "DATA_BLOCKED"])
 
     event_total = len(portfolio.positions)
     event_checked = len([i for i in items if i.event_status in ("EVENT_CHECKED_NO_MATERIAL_CHANGE", "EVENT_MATERIAL_FOUND")])
@@ -1171,11 +1226,24 @@ def render_action_brief(brief: PortfolioActionBrief) -> str:
     covered = brief.covered_positions if brief.covered_positions is not None else (total - len(brief.data_issues))
 
     conclusion_lines = []
-    # Line 1: Quote / Price Status
-    if brief.action_queue and not any(i.price_status == "PRICE_WATCH" for i in brief.watchlist):
-        conclusion_lines.append(f"{covered}/{total} 持股行情已驗證；共有 {len(brief.action_queue)} 檔持股建議重新檢視（詳見下方說明）。")
-    elif brief.watchlist:
-        conclusion_lines.append(f"{covered}/{total} 持股行情已驗證；共有 {len(brief.watchlist)} 檔持股觸發價格關注（詳見下方說明）。")
+    # Line 1: keep quote coverage separate from event-driven monitoring.
+    price_watch_count = sum(1 for i in brief.watchlist if i.price_status == "PRICE_WATCH")
+    event_watch_count = sum(
+        1 for i in brief.watchlist
+        if i.event_status == "EVENT_MATERIAL_FOUND" and i.price_status != "PRICE_WATCH"
+    )
+    if brief.action_queue:
+        conclusion_lines.append(
+            f"{covered}/{total} 持股行情已驗證；共有 {len(brief.action_queue)} 檔持股建議重新檢視（詳見下方說明）。"
+        )
+    elif price_watch_count:
+        conclusion_lines.append(
+            f"{covered}/{total} 持股行情已驗證；共有 {price_watch_count} 檔持股觸發價格關注（詳見下方說明）。"
+        )
+    elif event_watch_count:
+        conclusion_lines.append(
+            f"{covered}/{total} 持股行情已驗證；價格面未觸發重大異常，另有 {event_watch_count} 檔公司／資產事件需要關注。"
+        )
     elif brief.data_issues and any("quote unavailable" in d for d in brief.data_issues):
         conclusion_lines.append(f"{covered}/{total} 持股行情已驗證；部分持股行情或資料有缺漏（詳見下方說明）。")
     else:
@@ -1217,8 +1285,12 @@ def render_action_brief(brief: PortfolioActionBrief) -> str:
                 e = evt.get("event") or evt.get("title") or ""
                 d = evt.get("date") or evt.get("event_date") or evt.get("timing") or ""
                 w = evt.get("why") or evt.get("impact") or ""
+                source = evt.get("source") or evt.get("source_name") or ""
                 parts = [p for p in (t, e, d, w) if p]
-                event_lines.append("• " + "｜".join(parts))
+                line = "• " + "｜".join(parts)
+                if source:
+                    line += f"（來源：{source}）"
+                event_lines.append(line)
             else:
                 event_lines.append(f"• {evt}")
     else:
@@ -1306,15 +1378,21 @@ def validate_action_brief(brief: PortfolioActionBrief, context: MarketContext,
         for item in group:
             if item.instrument_id not in held:
                 return False, f"unknown held instrument {item.instrument_id}"
-            obs = context.quotes.get(item.instrument_id)
+            obs = context.quotes.get(item.instrument_id) or context.quotes.get(item.ticker)
             if item.status == "DATA_BLOCKED":
                 continue
-            if not obs or obs.quality_status != "VALID":
-                return False, f"{item.instrument_id} missing valid quote"
-            if item.quote_id != obs.quote_id:
-                return False, f"{item.instrument_id} quote_id mismatch"
-            if item.reference_price != obs.price:
-                return False, f"{item.instrument_id} reference_price mismatch"
+            if item.price_status == "DATA_BLOCKED" and item.event_status == "EVENT_MATERIAL_FOUND":
+                # A verified material event can surface independently of a
+                # quote outage. It must not pretend to have quote evidence.
+                if item.quote_id is not None or item.reference_price is not None:
+                    return False, f"{item.instrument_id} quote-blocked event item carries quote evidence"
+            else:
+                if not obs or obs.quality_status != "VALID":
+                    return False, f"{item.instrument_id} missing valid quote"
+                if item.quote_id != obs.quote_id:
+                    return False, f"{item.instrument_id} quote_id mismatch"
+                if item.reference_price != obs.price:
+                    return False, f"{item.instrument_id} reference_price mismatch"
             if item.trigger and item.trigger.generated_by != "TriggerEngineV1":
                 return False, f"{item.instrument_id} unsupported trigger generator"
             if item.trigger and item.trigger.trigger_type == "TECHNICAL" and not item.trigger.source_ids:

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -11,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import unittest
 from unittest.mock import MagicMock, patch
+from cryptography.fernet import Fernet
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -28,7 +30,6 @@ from models import (
     QuoteObservation,
     Snapshot,
 )
-from portfolio_context import load_authoritative_portfolio
 from portfolio_events import fetch_portfolio_events, is_entry_fresh, load_event_cache, save_event_cache
 from structured_reports import (
     build_action_brief,
@@ -60,10 +61,13 @@ def _obs(symbol: str, price: float = 100.0, prev: float = 99.0, session: str = "
 
 
 def _make_23_portfolio() -> PortfolioContext:
+    # Synthetic 23-position universe. Do not mirror the user's private
+    # production holdings in this public repository test fixture.
     tickers = [
-        "0050", "006208", "1519", "2327", "2330", "2383",
-        "AMZN", "DRAM", "GOOG", "IBKR", "MU", "NVDA", "QQQ", "TSLA", "VOO", "VST", "VTI",
-        "BTC", "ETH", "USDC", "USDT", "BONK", "SXT",
+        "TEST01", "TEST02", "TEST03", "TEST04", "2330", "TEST05",
+        "TEST06", "AMZN", "TEST07", "TEST08", "TEST09", "NVDA",
+        "TEST10", "TSLA", "TEST11", "TEST12", "TEST13", "TEST14",
+        "TEST15", "TEST16", "TEST17", "TEST18", "TEST19",
     ]
     positions = [
         PositionContext(
@@ -272,7 +276,7 @@ class PortfolioEventMonitoringSuiteTest(unittest.TestCase):
         brief = build_action_brief(self.context, self.portfolio, upcoming_events=upcoming)
         rendered = render_action_brief(brief)
         self.assertIn("【近期事件】", rendered)
-        self.assertIn("NVDA｜美股盤後財報｜10/25｜Data Center 成長、毛利率與下一季 guidance", rendered)
+        self.assertIn("NVDA｜美股盤後財報｜10/25｜Data Center 成長、毛利率與下一季 guidance（來源：NVIDIA IR）", rendered)
 
     def test_10_upcoming_event_requires_provenance(self):
         upcoming = [
@@ -405,24 +409,173 @@ class PortfolioEventMonitoringSuiteTest(unittest.TestCase):
         self.assertIn("23/23 持股行情已驗證，價格面沒有重大異常。", rendered)
         self.assertIn("公司事件目前完成 10/23；其餘 13 檔不做事件結論。", rendered)
 
-    def test_15_all_23_actual_pios_holdings_covered_by_event_universe(self):
-        actual_portfolio = load_authoritative_portfolio()
-        self.assertEqual(len(actual_portfolio.positions), 23)
-        actual_tickers = {p.ticker for p in actual_portfolio.positions}
+    def test_15_all_23_synthetic_holdings_covered_by_event_universe(self):
+        # Public CI must never depend on or disclose the private PIOS snapshot.
+        synthetic_portfolio = self.portfolio
+        expected_tickers = {p.ticker for p in synthetic_portfolio.positions}
+        self.assertEqual(len(expected_tickers), 23)
 
-        # Run fetch_portfolio_events with no API key (safe local mode)
         with tempfile.TemporaryDirectory() as td:
             cache_file = Path(td) / "empty_cache.json"
             facts, _ = fetch_portfolio_events(
-                actual_portfolio,
+                synthetic_portfolio,
                 cache_path=cache_file,
                 api_key=None,  # triggers safe EVENT_CHECK_FAILED
             )
             covered_tickers = {f.ticker for f in facts}
-            self.assertEqual(actual_tickers, covered_tickers)
+            self.assertEqual(expected_tickers, covered_tickers)
             self.assertEqual(len(facts), 23)
-            # Without API key, all are honestly marked EVENT_CHECK_FAILED
             self.assertTrue(all(f.event_status == "EVENT_CHECK_FAILED" for f in facts))
+
+
+    def test_16_omitted_ticker_from_search_batch_fails_closed(self):
+        with tempfile.TemporaryDirectory() as td:
+            cache_file = Path(td) / "event_cache.json"
+            small = PortfolioContext(
+                snapshot_id="small",
+                positions=self.portfolio.positions[:2],
+            )
+            grounded_results = [{
+                "ticker": small.positions[0].ticker,
+                "event_status": "EVENT_CHECKED_NO_MATERIAL_CHANGE",
+                "summary": "checked",
+                "is_upcoming": False,
+            }]
+            with patch("portfolio_events._query_gemini_search", return_value=grounded_results):
+                facts, _ = fetch_portfolio_events(
+                    small,
+                    api_key="fake-key",
+                    cache_path=cache_file,
+                    now=datetime(2026, 10, 5, 2, 0, tzinfo=timezone.utc),
+                )
+            by_ticker = {f.ticker: f for f in facts}
+            self.assertEqual(by_ticker[small.positions[0].ticker].event_status, "EVENT_CHECKED_NO_MATERIAL_CHANGE")
+            self.assertEqual(by_ticker[small.positions[1].ticker].event_status, "EVENT_CHECK_FAILED")
+
+    def test_17_material_or_upcoming_event_without_provenance_fails_closed(self):
+        with tempfile.TemporaryDirectory() as td:
+            cache_file = Path(td) / "event_cache.json"
+            single = PortfolioContext(
+                snapshot_id="single",
+                positions=[self.portfolio.positions[11]],  # NVDA
+            )
+            result = [{
+                "ticker": "NVDA",
+                "event_status": "EVENT_MATERIAL_FOUND",
+                "event_type": "GUIDANCE",
+                "title": "Guidance changed",
+                "summary": "Material claim but no source URL",
+                "severity": "HIGH",
+                "source_name": "Some source",
+                "source_url": "",
+                "is_upcoming": False,
+            }]
+            with patch("portfolio_events._query_gemini_search", return_value=result):
+                facts, upcoming = fetch_portfolio_events(
+                    single,
+                    api_key="fake-key",
+                    cache_path=cache_file,
+                    now=datetime(2026, 10, 5, 2, 0, tzinfo=timezone.utc),
+                )
+            self.assertEqual(len(facts), 1)
+            self.assertEqual(facts[0].event_status, "EVENT_CHECK_FAILED")
+            self.assertEqual(upcoming, [])
+
+    def test_18_material_event_surfaces_even_when_quote_is_unavailable(self):
+        quotes = dict(self.quotes)
+        quotes.pop("AMZN")
+        snap = Snapshot(
+            generated_at=datetime(2026, 10, 5, 2, 0, tzinfo=timezone.utc),
+            report_type="tw_close",
+            quote_observations=quotes,
+        )
+        ctx = build_market_context(snap, "tw_close", run_id="event_without_quote")
+        event = PortfolioEventFact(
+            instrument_id="AMZN",
+            ticker="AMZN",
+            checked_at=datetime(2026, 10, 5, 2, 0, tzinfo=timezone.utc),
+            event_status="EVENT_MATERIAL_FOUND",
+            event_type="GUIDANCE",
+            title="AWS guidance cut",
+            summary="Verified guidance change.",
+            severity="HIGH",
+            source_name="Amazon IR",
+            source_url="https://example.com/amazon-ir",
+            source_type="COMPANY_PR",
+        )
+        brief = build_action_brief(ctx, self.portfolio, verified_events=[event])
+        amzn = next(i for i in brief.action_queue if i.ticker == "AMZN")
+        self.assertEqual(amzn.price_status, "DATA_BLOCKED")
+        self.assertEqual(amzn.event_status, "EVENT_MATERIAL_FOUND")
+        self.assertEqual(brief.covered_positions, 22)
+        self.assertEqual(brief.event_checked_positions, 1)
+        ok, reason = validate_action_brief(brief, ctx, self.portfolio)
+        self.assertTrue(ok, reason)
+        rendered = render_action_brief(brief)
+        self.assertIn("AMZN", rendered)
+        self.assertIn("22/23 持股行情已驗證", rendered)
+
+    def test_19_large_price_move_forces_event_refresh_in_production_wiring(self):
+        quotes = dict(self.quotes)
+        quotes["TSLA"] = _obs("TSLA", price=108.0, prev=100.0)
+        snap = Snapshot(
+            generated_at=datetime(2026, 10, 5, 2, 0, tzinfo=timezone.utc),
+            report_type="tw_close",
+            quote_observations=quotes,
+        )
+        with patch("generate_report.fetch_portfolio_events", return_value=([], [])) as mock_fetch, \
+             patch("generate_report.load_authoritative_portfolio", return_value=self.portfolio), \
+             patch("generate_report.validate_portfolio_quotes", return_value=(True, "OK")):
+            run_portfolio_advice("report", "tw_close", snap, "gemini-2.0-flash", deliver=False)
+        _, kwargs = mock_fetch.call_args
+        self.assertIn("TSLA", kwargs.get("force_refresh_tickers", set()))
+
+
+    def test_20_encrypted_cache_round_trip_uses_portfolio_key(self):
+        with tempfile.TemporaryDirectory() as td:
+            cache_file = Path(td) / "portfolio_event_cache.json.enc"
+            payload = {
+                "updated_at": "2026-10-05T02:00:00+00:00",
+                "items": {"TEST01": {"event_status": "EVENT_CHECKED_NO_MATERIAL_CHANGE"}},
+            }
+            key = Fernet.generate_key().decode()
+            with patch.dict(os.environ, {"PORTFOLIO_KEY": key}, clear=False):
+                save_event_cache(payload, cache_path=cache_file)
+                raw = cache_file.read_bytes()
+                self.assertNotIn(b"EVENT_CHECKED_NO_MATERIAL_CHANGE", raw)
+                loaded = load_event_cache(cache_path=cache_file)
+            self.assertEqual(loaded, payload)
+
+    def test_21_all_daily_workflows_persist_only_encrypted_event_cache(self):
+        for workflow in (
+            ".github/workflows/tw-open.yml",
+            ".github/workflows/tw-close.yml",
+            ".github/workflows/us-open.yml",
+            ".github/workflows/us-close.yml",
+        ):
+            text = (ROOT / workflow).read_text(encoding="utf-8")
+            self.assertIn("portfolio_event_cache.json.enc", text)
+            self.assertNotIn("git add data/portfolio_event_cache.json", text)
+
+
+    def test_22_event_only_watch_is_not_mislabeled_as_price_watch(self):
+        event = PortfolioEventFact(
+            instrument_id="AMZN",
+            ticker="AMZN",
+            checked_at=datetime(2026, 10, 5, 2, 0, tzinfo=timezone.utc),
+            event_status="EVENT_MATERIAL_FOUND",
+            event_type="REGULATORY",
+            title="Regulatory development",
+            summary="Verified event requiring monitoring.",
+            severity="MEDIUM",
+            source_name="Regulator",
+            source_url="https://example.com/regulator",
+            source_type="REGULATORY",
+        )
+        brief = build_action_brief(self.context, self.portfolio, verified_events=[event])
+        rendered = render_action_brief(brief)
+        self.assertIn("公司／資產事件需要關注", rendered)
+        self.assertNotIn("觸發價格關注", rendered)
 
 
 if __name__ == "__main__":
