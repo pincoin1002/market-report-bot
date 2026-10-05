@@ -32,6 +32,14 @@ DEFAULT_CACHE_TTL_HOURS = 12
 EVENT_SEARCH_TIMEOUT_MS = 60_000
 
 
+class EventSearchError(RuntimeError):
+    """Safe, non-sensitive event-search contract failure."""
+
+    def __init__(self, code: str):
+        super().__init__(code)
+        self.code = code
+
+
 def _cache_key() -> bytes | None:
     key = os.getenv("PORTFOLIO_KEY", "").strip()
     return key.encode() if key else None
@@ -183,7 +191,7 @@ def _query_gemini_search(
         ),
     )
     if not response or not response.text:
-        raise ValueError("empty response from Gemini search")
+        raise EventSearchError("EMPTY_RESPONSE")
 
     # A response is not considered search-grounded merely because the search
     # tool was requested. Require actual grounding metadata from Gemini.
@@ -193,7 +201,7 @@ def _query_gemini_search(
         grounding_metadata = getattr(candidates[0], "grounding_metadata", None)
         grounding_chunks = getattr(grounding_metadata, "grounding_chunks", None) or []
     if not grounding_chunks:
-        raise ValueError("Gemini response contained no Google Search grounding metadata")
+        raise EventSearchError("NO_GROUNDING_METADATA")
 
     text = response.text.strip()
     # Strip markdown code blocks if wrapped
@@ -201,10 +209,60 @@ def _query_gemini_search(
         text = re.sub(r"^```[a-zA-Z]*\n", "", text)
         text = re.sub(r"\n```$", "", text).strip()
 
-    parsed = json.loads(text)
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        # Search-grounded responses occasionally wrap an otherwise valid JSON
+        # array in a short prose prefix/suffix. Parse only the outermost array;
+        # never attempt to repair or invent missing JSON fields.
+        start = text.find("[")
+        end = text.rfind("]")
+        if start < 0 or end <= start:
+            raise EventSearchError("INVALID_JSON") from None
+        try:
+            parsed = json.loads(text[start:end + 1])
+        except json.JSONDecodeError:
+            raise EventSearchError("INVALID_JSON") from None
     if not isinstance(parsed, list):
-        raise ValueError("expected JSON array from Gemini search")
+        raise EventSearchError("NON_ARRAY_RESPONSE")
     return parsed
+
+
+def _query_batch_with_bounded_fallback(
+    instruments: list[dict[str, str]],
+    *,
+    model: str,
+    api_key: str,
+) -> tuple[list[dict[str, Any]], list[str], list[str]]:
+    """Query one batch, then split once on contract failures.
+
+    Returns (results, failed_tickers, safe_error_codes). The fallback is
+    intentionally bounded: one primary request plus at most two half-batch
+    requests. We never retry indefinitely or weaken evidence validation.
+    """
+    try:
+        return _query_gemini_search(instruments, model=model, api_key=api_key), [], []
+    except EventSearchError as exc:
+        if len(instruments) <= 2:
+            return [], [item["ticker"] for item in instruments], [exc.code]
+        midpoint = (len(instruments) + 1) // 2
+        combined: list[dict[str, Any]] = []
+        failed: list[str] = []
+        codes = [exc.code]
+        for half in (instruments[:midpoint], instruments[midpoint:]):
+            if not half:
+                continue
+            try:
+                combined.extend(_query_gemini_search(half, model=model, api_key=api_key))
+            except EventSearchError as sub_exc:
+                failed.extend(item["ticker"] for item in half)
+                codes.append(sub_exc.code)
+            except Exception as sub_exc:
+                failed.extend(item["ticker"] for item in half)
+                codes.append(type(sub_exc).__name__)
+        return combined, failed, codes
+    except Exception as exc:
+        return [], [item["ticker"] for item in instruments], [type(exc).__name__]
 
 
 def fetch_portfolio_events(
@@ -290,7 +348,19 @@ def fetch_portfolio_events(
                 batch = tickers_to_query[i:i + batch_size]
                 try:
                     batch_instruments = [ticker_metadata[t] for t in batch]
-                    results = _query_gemini_search(batch_instruments, model=model, api_key=key)
+                    results, prefailed_tickers, safe_error_codes = _query_batch_with_bounded_fallback(
+                        batch_instruments,
+                        model=model,
+                        api_key=key,
+                    )
+                    if safe_error_codes:
+                        log.warning(
+                            "event search used bounded fallback: %s (batch_size=%d, failed_count=%d)",
+                            ",".join(safe_error_codes),
+                            len(batch),
+                            len(prefailed_tickers),
+                        )
+
                     # Organize results by ticker
                     results_by_ticker: dict[str, list[dict[str, Any]]] = {}
                     for r in results:
@@ -298,6 +368,18 @@ def fetch_portfolio_events(
                         results_by_ticker.setdefault(t, []).append(r)
 
                     for ticker in batch:
+                        if ticker in prefailed_tickers:
+                            inst_id = ticker_positions.get(ticker, ticker)
+                            all_facts.append(PortfolioEventFact(
+                                instrument_id=inst_id,
+                                ticker=ticker,
+                                checked_at=current_time,
+                                event_status="EVENT_CHECK_FAILED",
+                                summary="事件搜尋經有限重試後仍未完成驗證。",
+                                source_name="GeminiSearch",
+                                source_type="SEARCH_GROUNDED",
+                            ))
+                            continue
                         inst_id = ticker_positions.get(ticker, ticker)
                         t_results = results_by_ticker.get(ticker, [])
                         if not t_results:
@@ -391,7 +473,7 @@ def fetch_portfolio_events(
                         }
                 except Exception as exc:
                     log.warning(
-                        "batch event query failed: %s (batch_size=%d)",
+                        "event batch processing failed after bounded search: %s (batch_size=%d)",
                         type(exc).__name__,
                         len(batch),
                     )
