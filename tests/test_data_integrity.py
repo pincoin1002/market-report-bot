@@ -1137,19 +1137,26 @@ class SafetyAndWorkflowTest(unittest.TestCase):
 
     def test_vercel_scheduler_is_server_side_and_has_no_embedded_token(self):
         config = json.loads((ROOT / "vercel.json").read_text(encoding="utf-8"))
-        self.assertEqual(len(config["crons"]), 2)
-        self.assertEqual({item["schedule"] for item in config["crons"]}, {"0 12 * * 1-5", "0 13 * * 1-5"})
-        source = (ROOT / "scheduler" / "us_open_dispatch.py").read_text(encoding="utf-8")
-        self.assertIn('os.getenv("GITHUB_WORKFLOW_DISPATCH_TOKEN"', source)
-        self.assertIn('os.getenv("CRON_SECRET"', source)
-        self.assertNotIn("ghp_", source)
-        self.assertNotIn("github_pat_", source)
+        self.assertEqual(len(config["crons"]), 3)
+        self.assertEqual(
+            {item["schedule"] for item in config["crons"]},
+            {"0 12 * * 1-5", "0 13 * * 1-5", "0 23 * * 0-4"},
+        )
+        us_source = (ROOT / "scheduler" / "us_open_dispatch.py").read_text(encoding="utf-8")
+        tw_source = (ROOT / "scheduler" / "tw_open_dispatch.py").read_text(encoding="utf-8")
+        for source in (us_source, tw_source):
+            self.assertIn('os.getenv("GITHUB_WORKFLOW_DISPATCH_TOKEN"', source)
+            self.assertIn('os.getenv("CRON_SECRET"', source)
+            self.assertNotIn("ghp_", source)
+            self.assertNotIn("github_pat_", source)
         self.assertEqual(config["functions"]["api/index.py"]["maxDuration"], 10)
-        self.assertEqual(len(config["rewrites"]), 2)
+        self.assertEqual(len(config["rewrites"]), 3)
+        self.assertTrue(any(item["path"] == "/api/tw_open_scheduler" for item in config["crons"]))
 
     def test_pios_snapshot_is_not_mutated_by_scheduler_files(self):
         source_files = [
             ROOT / "scheduler" / "us_open_dispatch.py",
+            ROOT / "scheduler" / "tw_open_dispatch.py",
             ROOT / "scripts" / "us_open_intent.py",
             ROOT / "scripts" / "us_open_run_status.py",
         ]
