@@ -1,6 +1,9 @@
 name: Portfolio Event Refresh
 
 on:
+  push:
+    paths:
+      - ".github/workflows/portfolio-events.yml"
   schedule:
     # Every 6 hours. With a 12-hour TTL, every second successful run refreshes.
     - cron: "17 */6 * * *"
