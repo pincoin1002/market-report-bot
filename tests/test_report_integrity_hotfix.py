@@ -87,7 +87,7 @@ class TWSEEvidenceHotfixTest(unittest.TestCase):
         self.assertAlmostEqual(flows.dealer_buy_sell_ntd_billions, 20.26, places=2)
         self.assertAlmostEqual(flows.total_buy_sell_ntd_billions, 104.17, places=2)
 
-    def test_bfi82u_uses_date_parameter(self):
+    def test_bfi82u_uses_documented_day_date_parameter(self):
         current_market = market_payload("20261002")
         previous_market = market_payload("20261001", 900_000_000_000)
         current_flow = flow_payload("20261002")
@@ -96,9 +96,8 @@ class TWSEEvidenceHotfixTest(unittest.TestCase):
         def fake_get(url, params):
             if "MI_INDEX" in url:
                 return current_market if params["date"] == "20261002" else previous_market
-            self.assertIn("date", params)
-            self.assertNotIn("dayDate", params)
-            return current_flow if params["date"] == "20261002" else previous_flow
+            self.assertIn("dayDate", params)
+            return current_flow if params["dayDate"] == "20261002" else previous_flow
 
         with patch("twse_market_evidence._get_json", side_effect=fake_get):
             evidence = fetch_twse_close_evidence(
