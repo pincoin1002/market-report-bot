@@ -107,7 +107,7 @@ def is_entry_fresh(
     except Exception:
         return False
 
-    if now - checked_at > timedelta(hours=ttl_hours):
+    if now - checked_at >= timedelta(hours=ttl_hours):
         return False
 
     # If there's an upcoming event within 48 hours, refresh to check if it concluded
