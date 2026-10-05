@@ -1361,15 +1361,21 @@ def validate_action_brief(brief: PortfolioActionBrief, context: MarketContext,
         for item in group:
             if item.instrument_id not in held:
                 return False, f"unknown held instrument {item.instrument_id}"
-            obs = context.quotes.get(item.instrument_id)
+            obs = context.quotes.get(item.instrument_id) or context.quotes.get(item.ticker)
             if item.status == "DATA_BLOCKED":
                 continue
-            if not obs or obs.quality_status != "VALID":
-                return False, f"{item.instrument_id} missing valid quote"
-            if item.quote_id != obs.quote_id:
-                return False, f"{item.instrument_id} quote_id mismatch"
-            if item.reference_price != obs.price:
-                return False, f"{item.instrument_id} reference_price mismatch"
+            if item.price_status == "DATA_BLOCKED" and item.event_status == "EVENT_MATERIAL_FOUND":
+                # A verified material event can surface independently of a
+                # quote outage. It must not pretend to have quote evidence.
+                if item.quote_id is not None or item.reference_price is not None:
+                    return False, f"{item.instrument_id} quote-blocked event item carries quote evidence"
+            else:
+                if not obs or obs.quality_status != "VALID":
+                    return False, f"{item.instrument_id} missing valid quote"
+                if item.quote_id != obs.quote_id:
+                    return False, f"{item.instrument_id} quote_id mismatch"
+                if item.reference_price != obs.price:
+                    return False, f"{item.instrument_id} reference_price mismatch"
             if item.trigger and item.trigger.generated_by != "TriggerEngineV1":
                 return False, f"{item.instrument_id} unsupported trigger generator"
             if item.trigger and item.trigger.trigger_type == "TECHNICAL" and not item.trigger.source_ids:
