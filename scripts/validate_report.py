@@ -186,8 +186,18 @@ def validate_numeric_provenance(report_text: str, context: MarketContext) -> tup
             if "1485" in report_text or "1,485" in report_text:
                 errors.append(f"CRITICAL: 2454 corrupted as 1485 instead of structured price {obs.price}")
 
-        # Check line where symbol is displayed
-        matching_lines = [l for l in report_text.splitlines() if any(n in l for n in names) and "|" in l]
+        # Check only lines that identify this exact instrument. Raw substring
+        # matching makes GOOG falsely match GOOGL.
+        symbol_pattern = re.compile(rf"(?<![A-Z0-9]){re.escape(symbol.upper())}(?![A-Z0-9])")
+        matching_lines = []
+        for line in report_text.splitlines():
+            if "|" not in line:
+                continue
+            upper_line = line.upper()
+            has_exact_symbol = bool(symbol_pattern.search(upper_line))
+            has_exact_display_name = bool(spec.display_name and spec.display_name in line)
+            if has_exact_symbol or has_exact_display_name:
+                matching_lines.append(line)
         for line in matching_lines:
             # Expected price representations
             price_variants = [
@@ -281,10 +291,17 @@ def validate_numeric_provenance(report_text: str, context: MarketContext) -> tup
 
     if context.taiex_summary and context.taiex_summary.advancing is not None and context.taiex_summary.declining is not None:
         net = context.taiex_summary.advancing - context.taiex_summary.declining
-        allowed_numbers.add(float(net))
+        # Narrative number extraction ignores a leading minus sign, so allow
+        # both signed and absolute representations for deterministic breadth math.
+        for val in (net, abs(net)):
+            allowed_numbers.add(float(val))
+            allowed_numbers.add(float(int(abs(val))))
         if context.taiex_summary.advancing_prev is not None and context.taiex_summary.declining_prev is not None:
             previous_net = context.taiex_summary.advancing_prev - context.taiex_summary.declining_prev
-            allowed_numbers.add(float(net - previous_net))
+            net_delta = net - previous_net
+            for val in (net_delta, abs(net_delta)):
+                allowed_numbers.add(float(val))
+                allowed_numbers.add(float(int(abs(val))))
 
     # Methodology thresholds are not price targets; dynamic report levels must
     # still originate from the current deterministic context above.

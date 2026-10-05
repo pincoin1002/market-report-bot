@@ -50,6 +50,31 @@ class TaiwanOpenIntentContractTest(unittest.TestCase):
         self.assertIn("steps.fetch.outputs.intent_unavailable != 'true'", text)
         self.assertNotIn('cron: "50 23 * * 0-4"', text)
 
+    def test_external_scheduler_dispatches_in_taipei_staging_window(self):
+        from scheduler.tw_open_dispatch import dispatch_payload, scheduler_decision
+
+        ready = datetime(2026, 10, 6, 7, 15, tzinfo=TPE)
+        late = datetime(2026, 10, 6, 8, 50, tzinfo=TPE)
+        holiday = datetime(2026, 10, 9, 7, 15, tzinfo=TPE)
+
+        self.assertEqual(scheduler_decision(ready), "DISPATCH")
+        self.assertEqual(scheduler_decision(late), "OUTSIDE_STAGING_WINDOW")
+        self.assertEqual(scheduler_decision(holiday), "MARKET_CLOSED")
+
+        payload = dispatch_payload()
+        self.assertEqual(payload["ref"], "main")
+        self.assertEqual(payload["inputs"]["send_telegram"], "true")
+        self.assertEqual(payload["inputs"]["trigger_source"], "vercel_cron")
+
+    def test_workflow_serializes_external_and_native_delivery(self):
+        text = (ROOT / ".github/workflows/tw-open.yml").read_text(encoding="utf-8")
+        self.assertIn("group: tw-open-canonical-delivery", text)
+        self.assertIn("Wait for canonical Taiwan-open snapshot time", text)
+        self.assertIn("trigger_source == 'vercel_cron'", text)
+        self.assertIn("Check whether today's Taiwan-open report already completed", text)
+        self.assertIn("already_reported != 'true'", text)
+        self.assertIn("timeout-minutes: 90", text)
+
     def test_fetch_has_hard_expiry_exit(self):
         text = (ROOT / "scripts/fetch_market_data.py").read_text(encoding="utf-8")
         self.assertIn("tw_open_snapshot_contract_status", text)
