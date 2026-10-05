@@ -12,6 +12,10 @@
     {
       "source": "/api/us_open_scheduler_est",
       "destination": "/api?slot=est"
+    },
+    {
+      "source": "/api/tw_open_scheduler",
+      "destination": "/api?slot=tw_open"
     }
   ],
   "crons": [
@@ -22,6 +26,10 @@
     {
       "path": "/api/us_open_scheduler_est",
       "schedule": "0 13 * * 1-5"
+    },
+    {
+      "path": "/api/tw_open_scheduler",
+      "schedule": "0 22 * * 0-4"
     }
   ]
 }
