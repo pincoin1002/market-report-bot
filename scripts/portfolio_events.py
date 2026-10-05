@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import re
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -29,7 +30,10 @@ ROOT = Path(__file__).resolve().parent.parent
 CACHE_PATH = ROOT / "portfolio_event_cache.json.enc"
 FACTS_AUDIT_PATH = ROOT / "data" / "portfolio_event_facts.json"
 DEFAULT_CACHE_TTL_HOURS = 12
-EVENT_SEARCH_TIMEOUT_MS = 60_000
+EVENT_SEARCH_TIMEOUT_MS = 45_000
+EVENT_BATCH_SIZE = 4
+EVENT_TRANSIENT_RETRIES = 2
+EVENT_RETRY_BACKOFF_SECONDS = 2
 
 
 class EventSearchError(RuntimeError):
@@ -264,42 +268,79 @@ def _query_gemini_search(
     return parsed
 
 
+def _safe_query_once(
+    instruments: list[dict[str, str]],
+    *,
+    model: str,
+    api_key: str,
+) -> tuple[list[dict[str, Any]] | None, str | None]:
+    """Run one grounded query and return a safe error code on failure."""
+    try:
+        return _query_gemini_search(instruments, model=model, api_key=api_key), None
+    except EventSearchError as exc:
+        return None, exc.code
+    except Exception as exc:
+        return None, type(exc).__name__
+
+
+def _query_with_transient_retry(
+    instruments: list[dict[str, str]],
+    *,
+    model: str,
+    api_key: str,
+) -> tuple[list[dict[str, Any]] | None, list[str]]:
+    """Retry only transient transport/server failures; never semantic failures."""
+    safe_codes: list[str] = []
+    for attempt in range(EVENT_TRANSIENT_RETRIES + 1):
+        results, code = _safe_query_once(instruments, model=model, api_key=api_key)
+        if results is not None:
+            return results, safe_codes
+        safe_codes.append(code or "UNKNOWN")
+        # JSON/grounding/schema failures are deterministic contract failures.
+        if code in {"INVALID_JSON", "NON_ARRAY_RESPONSE", "NO_GROUNDING_METADATA", "EMPTY_RESPONSE"}:
+            break
+        if attempt < EVENT_TRANSIENT_RETRIES:
+            time.sleep(EVENT_RETRY_BACKOFF_SECONDS * (attempt + 1))
+    return None, safe_codes
+
+
 def _query_batch_with_bounded_fallback(
     instruments: list[dict[str, str]],
     *,
     model: str,
     api_key: str,
 ) -> tuple[list[dict[str, Any]], list[str], list[str]]:
-    """Query one batch, then split once on contract failures.
+    """Small-batch grounded search with bounded retry and one split fallback.
 
-    Returns (results, failed_tickers, safe_error_codes). The fallback is
-    intentionally bounded: one primary request plus at most two half-batch
-    requests. We never retry indefinitely or weaken evidence validation.
+    Primary batches are deliberately small. Transient transport/server failures
+    get at most two retries. Contract failures get one split into smaller groups.
+    No recursive retry is allowed.
     """
-    try:
-        return _query_gemini_search(instruments, model=model, api_key=api_key), [], []
-    except EventSearchError as exc:
-        if len(instruments) <= 2:
-            return [], [item["ticker"] for item in instruments], [exc.code]
-        midpoint = (len(instruments) + 1) // 2
-        combined: list[dict[str, Any]] = []
-        failed: list[str] = []
-        codes = [exc.code]
-        for half in (instruments[:midpoint], instruments[midpoint:]):
-            if not half:
-                continue
-            try:
-                combined.extend(_query_gemini_search(half, model=model, api_key=api_key))
-            except EventSearchError as sub_exc:
-                failed.extend(item["ticker"] for item in half)
-                codes.append(sub_exc.code)
-            except Exception as sub_exc:
-                failed.extend(item["ticker"] for item in half)
-                codes.append(type(sub_exc).__name__)
-        return combined, failed, codes
-    except Exception as exc:
-        return [], [item["ticker"] for item in instruments], [type(exc).__name__]
+    results, codes = _query_with_transient_retry(
+        instruments, model=model, api_key=api_key
+    )
+    if results is not None:
+        return results, [], codes
 
+    if len(instruments) <= 1:
+        return [], [item["ticker"] for item in instruments], codes
+
+    midpoint = (len(instruments) + 1) // 2
+    combined: list[dict[str, Any]] = []
+    failed: list[str] = []
+    all_codes = list(codes)
+    for half in (instruments[:midpoint], instruments[midpoint:]):
+        if not half:
+            continue
+        half_results, half_codes = _query_with_transient_retry(
+            half, model=model, api_key=api_key
+        )
+        all_codes.extend(half_codes)
+        if half_results is None:
+            failed.extend(item["ticker"] for item in half)
+        else:
+            combined.extend(half_results)
+    return combined, failed, all_codes
 
 def fetch_portfolio_events(
     portfolio: PortfolioContext,
@@ -378,8 +419,8 @@ def fetch_portfolio_events(
                 )
                 all_facts.append(fact_obj)
         else:
-            # Batch query in chunks of 8
-            batch_size = 8
+            # Small batches reduce blast radius of transient grounding failures.
+            batch_size = EVENT_BATCH_SIZE
             for i in range(0, len(tickers_to_query), batch_size):
                 batch = tickers_to_query[i:i + batch_size]
                 try:
