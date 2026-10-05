@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 from market_session import TPE, get_previous_completed_session_date, get_target_market_date, human_session_label
 from models import (
     MarketContext, MarketReportDraft, OptionalModule, PortfolioActionBrief,
-    PortfolioActionItem, PortfolioContext, PriceReference, Trigger,
+    PortfolioActionItem, PortfolioContext, PortfolioEventFact, PriceReference, Trigger,
 )
 from portfolio_analytics import calculate_portfolio_analytics, format_portfolio_section
 from trigger_engine import technical_trigger
@@ -921,13 +921,13 @@ def validate_public_draft(draft: MarketReportDraft, context: MarketContext) -> t
 def build_action_brief(
     context: MarketContext,
     portfolio: PortfolioContext,
-    verified_events: list[dict] | None = None,
+    verified_events: list[dict | PortfolioEventFact] | None = None,
     upcoming_events: list[dict | str] | None = None,
 ) -> PortfolioActionBrief:
     raw_events = verified_events if verified_events is not None else getattr(context, "event_facts", [])
-    events_by_id: dict[str, list[dict]] = {}
+    events_by_id: dict[str, list[dict | PortfolioEventFact]] = {}
     for evt in raw_events:
-        sym = evt.get("instrument_id") or evt.get("ticker")
+        sym = evt.ticker if isinstance(evt, PortfolioEventFact) else (evt.get("instrument_id") or evt.get("ticker"))
         if sym:
             events_by_id.setdefault(str(sym).upper(), []).append(evt)
 
@@ -970,36 +970,66 @@ def build_action_brief(
             trigger = None
 
         pos_events = events_by_id.get(pos.instrument_id.upper(), []) or events_by_id.get(pos.ticker.upper(), [])
-        evt_data: dict | None = None
+        evt_data: dict | PortfolioEventFact | None = None
+
         if pos_events:
-            action_evts = [
+            failed_evts = [
                 e for e in pos_events
-                if e.get("status") == "ACTION_REVIEW" or e.get("action_review") or e.get("severity") == "HIGH" or e.get("material")
+                if (e.event_status if isinstance(e, PortfolioEventFact) else e.get("event_status")) == "EVENT_CHECK_FAILED"
             ]
-            watch_evts = [e for e in pos_events if e.get("status") == "WATCH" or e.get("watch")]
-            checked_no_change_evts = [
+
+            def _is_material(e):
+                st = e.event_status if isinstance(e, PortfolioEventFact) else e.get("event_status")
+                if st == "EVENT_MATERIAL_FOUND":
+                    return True
+                if isinstance(e, dict) and (e.get("status") in ("ACTION_REVIEW", "WATCH") or e.get("material")):
+                    return True
+                return False
+
+            def _is_action(e):
+                if not _is_material(e):
+                    return False
+                if getattr(e, "severity", "") == "HIGH":
+                    return True
+                if isinstance(e, dict) and (e.get("status") == "ACTION_REVIEW" or e.get("severity") == "HIGH" or e.get("action_review")):
+                    return True
+                return False
+
+            action_evts = [e for e in pos_events if _is_action(e)]
+            watch_evts = [e for e in pos_events if _is_material(e)]
+            clean_evts = [
                 e for e in pos_events
-                if e.get("status") == "NO_MATERIAL_CHANGE" or (e.get("checked") and not e.get("material"))
+                if (e.event_status if isinstance(e, PortfolioEventFact) else e.get("event_status")) == "EVENT_CHECKED_NO_MATERIAL_CHANGE"
+                or (isinstance(e, dict) and e.get("status") == "NO_MATERIAL_CHANGE")
             ]
 
             if action_evts:
                 evt_data = action_evts[0]
                 event_status = "EVENT_MATERIAL_FOUND"
                 event_decision = "ACTION_REVIEW"
-                event_reasons = [evt_data.get("reason_code", "MATERIAL_COMPANY_EVENT")]
-                event_summary = evt_data.get("summary") or evt_data.get("description") or "公司出現重大已驗證事件，建議重新檢視。"
+                code = (getattr(evt_data, "reason_code", None) or (evt_data.get("reason_code") if isinstance(evt_data, dict) else None)) or "MATERIAL_COMPANY_EVENT"
+                event_reasons = [code]
+                event_summary = evt_data.summary if isinstance(evt_data, PortfolioEventFact) else (evt_data.get("summary") or "公司出現重大已驗證事件，建議重新檢視。")
             elif watch_evts:
                 evt_data = watch_evts[0]
                 event_status = "EVENT_MATERIAL_FOUND"
                 event_decision = "WATCH"
-                event_reasons = [evt_data.get("reason_code", "COMPANY_EVENT_WATCH")]
-                event_summary = evt_data.get("summary") or evt_data.get("description") or "公司出現已驗證事件，需持續關注後續影響。"
-            elif checked_no_change_evts:
-                evt_data = checked_no_change_evts[0]
+                code = (getattr(evt_data, "reason_code", None) or (evt_data.get("reason_code") if isinstance(evt_data, dict) else None)) or "COMPANY_EVENT_WATCH"
+                event_reasons = [code]
+                event_summary = evt_data.summary if isinstance(evt_data, PortfolioEventFact) else (evt_data.get("summary") or "公司出現已驗證事件，需持續關注後續影響。")
+            elif clean_evts:
+                evt_data = clean_evts[0]
                 event_status = "EVENT_CHECKED_NO_MATERIAL_CHANGE"
                 event_decision = "NO_MATERIAL_CHANGE"
                 event_reasons = ["NO_MATERIAL_EVENT"]
-                event_summary = evt_data.get("summary") or "行情與公司事件均已驗證，未發現重大異常。"
+                event_summary = evt_data.summary if isinstance(evt_data, PortfolioEventFact) else (evt_data.get("summary") or "行情與公司事件均已驗證，未發現重大異常。")
+            elif failed_evts:
+                evt_data = failed_evts[0]
+                event_status = "EVENT_CHECK_FAILED"
+                event_decision = None
+                event_reasons = ["EVENT_CHECK_FAILED"]
+                event_summary = "事件資料本次未完成驗證。"
+                data_issues.append(f"{pos.ticker}：事件資料本次未完成驗證。")
             else:
                 event_status = "EVENT_UNCHECKED"
                 event_decision = None
@@ -1021,10 +1051,11 @@ def build_action_brief(
             if event_decision == "WATCH":
                 reasons = ["LARGE_DAILY_MOVE"] + event_reasons
                 summary = f"{price_summary} 且伴隨已驗證事件：{event_summary}"
+                next_step = "確認是否有財報、營運展望、產品或監管事件支持此次波動；目前不直接產生交易結論。"
             else:
                 reasons = ["LARGE_DAILY_MOVE"]
                 summary = price_summary
-            next_step = "確認是否有財報、營運展望、產品或監管事件支持此次波動；目前不直接產生交易結論。"
+                next_step = "確認是否有財報、營運展望、產品或監管事件支持此次波動；目前事件面尚未完成驗證，不直接產生交易結論。"
         elif event_decision == "WATCH":
             status = "WATCH"
             reasons = event_reasons
@@ -1035,6 +1066,9 @@ def build_action_brief(
             if event_status == "EVENT_CHECKED_NO_MATERIAL_CHANGE":
                 reasons = ["PRICE_NORMAL", "NO_MATERIAL_EVENT"]
                 summary = event_summary or "行情與公司事件均已驗證，未發現重大異常。"
+            elif event_status == "EVENT_CHECK_FAILED":
+                reasons = ["PRICE_NORMAL", "EVENT_CHECK_FAILED"]
+                summary = "今日價格未觸發監控門檻；公司事件面檢查失敗，尚未完成驗證。"
             else:
                 reasons = ["PRICE_NORMAL", "EVENT_UNCHECKED"]
                 summary = "今日價格未觸發監控門檻；公司事件面尚未完成驗證。"
@@ -1065,18 +1099,21 @@ def build_action_brief(
         upcoming_events_list = []
         portfolio_tickers = {p.ticker.upper() for p in portfolio.positions} | {p.instrument_id.upper() for p in portfolio.positions}
         for evt in raw_events:
-            sym = (evt.get("instrument_id") or evt.get("ticker") or "").upper()
-            is_upcoming = (
+            sym = (evt.ticker if isinstance(evt, PortfolioEventFact) else (evt.get("instrument_id") or evt.get("ticker") or "")).upper()
+            is_upcoming = getattr(evt, "is_upcoming", False) if isinstance(evt, PortfolioEventFact) else (
                 evt.get("is_upcoming", False)
                 or evt.get("event_type") in ("EARNINGS", "CALL", "CONFERENCE", "UPCOMING")
                 or "upcoming" in evt.get("category", "").lower()
             )
             if is_upcoming and (not sym or sym in portfolio_tickers):
-                if isinstance(evt, dict):
+                if isinstance(evt, PortfolioEventFact):
+                    parts = [evt.ticker, evt.title or evt.event_type or "事件", evt.event_date or "", evt.summary or evt.impact or ""]
+                    upcoming_events_list.append("｜".join([p for p in parts if p]))
+                elif isinstance(evt, dict):
                     t = evt.get("ticker") or sym
                     e = evt.get("event") or evt.get("title") or evt.get("summary")
-                    d = evt.get("date") or evt.get("timing") or ""
-                    imp = evt.get("impact") or evt.get("why") or ""
+                    d = evt.get("date") or evt.get("event_date") or evt.get("timing") or ""
+                    imp = evt.get("why") or evt.get("impact") or ""
                     parts = [p for p in (t, e, d, imp) if p]
                     upcoming_events_list.append("｜".join(parts) if parts else str(evt))
                 else:
@@ -1084,7 +1121,12 @@ def build_action_brief(
 
     total_positions = len(portfolio.positions)
     covered_positions = len([i for i in items if i.status != "DATA_BLOCKED"])
-    events_verified = any(i.event_status in ("EVENT_CHECKED_NO_MATERIAL_CHANGE", "EVENT_MATERIAL_FOUND") for i in items)
+
+    event_total = len(portfolio.positions)
+    event_checked = len([i for i in items if i.event_status in ("EVENT_CHECKED_NO_MATERIAL_CHANGE", "EVENT_MATERIAL_FOUND")])
+    event_failed = len([i for i in items if i.event_status == "EVENT_CHECK_FAILED"])
+    event_cov_ratio = round(event_checked / event_total, 4) if event_total > 0 else 0.0
+    is_fully_verified = (event_checked == event_total and event_total > 0)
 
     return PortfolioActionBrief(
         run_id=context.run_id,
@@ -1096,9 +1138,14 @@ def build_action_brief(
         no_material_change=[i for i in items if i.status == "NO_MATERIAL_CHANGE"],
         upcoming_events=upcoming_events_list,
         data_issues=data_issues,
-        events_verified=events_verified,
+        events_verified=is_fully_verified,
         covered_positions=covered_positions,
         total_positions=total_positions,
+        event_checked_positions=event_checked,
+        event_total_positions=event_total,
+        event_check_failed_positions=event_failed,
+        event_coverage_ratio=event_cov_ratio,
+        event_facts=[e for e in raw_events if isinstance(e, PortfolioEventFact)],
     )
 
 
@@ -1122,34 +1169,35 @@ def render_action_brief(brief: PortfolioActionBrief) -> str:
         len(brief.action_queue) + len(brief.watchlist) + len(brief.no_material_change) + len(brief.data_issues)
     )
     covered = brief.covered_positions if brief.covered_positions is not None else (total - len(brief.data_issues))
-    coverage_str = f"{covered}/{total} 持股行情已驗證"
 
-    if brief.action_queue:
-        conclusion_lines = [
-            f"共有 {len(brief.action_queue)} 檔持股建議重新檢視（詳見下方說明）。",
-            f"{coverage_str}。",
-        ]
+    conclusion_lines = []
+    # Line 1: Quote / Price Status
+    if brief.action_queue and not any(i.price_status == "PRICE_WATCH" for i in brief.watchlist):
+        conclusion_lines.append(f"{covered}/{total} 持股行情已驗證；共有 {len(brief.action_queue)} 檔持股建議重新檢視（詳見下方說明）。")
     elif brief.watchlist:
-        conclusion_lines = [
-            f"共有 {len(brief.watchlist)} 檔持股觸發價格關注（詳見下方說明）。",
-            f"{coverage_str}。",
-        ]
-    elif brief.data_issues:
-        conclusion_lines = [
-            "部分持股行情或資料有缺漏，請見下方資料說明。",
-            f"{coverage_str}。",
-        ]
+        conclusion_lines.append(f"{covered}/{total} 持股行情已驗證；共有 {len(brief.watchlist)} 檔持股觸發價格關注（詳見下方說明）。")
+    elif brief.data_issues and any("quote unavailable" in d for d in brief.data_issues):
+        conclusion_lines.append(f"{covered}/{total} 持股行情已驗證；部分持股行情或資料有缺漏（詳見下方說明）。")
     else:
-        if brief.events_verified:
-            conclusion_lines = [
-                "目前沒有持股需要調整。",
-                f"{coverage_str}；未發現重大異常。",
-            ]
+        conclusion_lines.append(f"{covered}/{total} 持股行情已驗證，價格面沒有重大異常。")
+
+    # Line 2: Event Monitoring Status (explicit coverage rules)
+    ev_total = brief.event_total_positions or total
+    ev_checked = brief.event_checked_positions
+    if ev_total > 0 and ev_checked == ev_total:
+        has_material_events = any(
+            i.event_status == "EVENT_MATERIAL_FOUND"
+            for i in brief.action_queue + brief.watchlist
+        )
+        if has_material_events:
+            conclusion_lines.append(f"公司事件 {ev_checked}/{ev_total} 已完成檢查，已識別出重大事件（詳見下方）。")
         else:
-            conclusion_lines = [
-                "價格面未觸發監控條件；公司事件面尚未完成驗證。",
-                f"{coverage_str}；價格面沒有觸發重大異常。",
-            ]
+            conclusion_lines.append(f"公司事件 {ev_checked}/{ev_total} 已完成檢查，今天沒有需要升級檢視的事件。")
+    elif ev_checked > 0:
+        remaining = ev_total - ev_checked
+        conclusion_lines.append(f"公司事件目前完成 {ev_checked}/{ev_total}；其餘 {remaining} 檔不做事件結論。")
+    else:
+        conclusion_lines.append("公司事件面本次尚未完成驗證。")
 
     if brief.watchlist:
         watch_lines = _render_watchlist_items(brief.watchlist)
@@ -1165,13 +1213,12 @@ def render_action_brief(brief: PortfolioActionBrief) -> str:
         event_lines = []
         for evt in brief.upcoming_events:
             if isinstance(evt, dict):
-                parts = [
-                    evt.get("ticker", ""),
-                    evt.get("event", ""),
-                    evt.get("date") or evt.get("timing") or "",
-                    evt.get("why") or evt.get("impact") or "",
-                ]
-                event_lines.append("• " + "｜".join([p for p in parts if p]))
+                t = evt.get("ticker", "")
+                e = evt.get("event") or evt.get("title") or ""
+                d = evt.get("date") or evt.get("event_date") or evt.get("timing") or ""
+                w = evt.get("why") or evt.get("impact") or ""
+                parts = [p for p in (t, e, d, w) if p]
+                event_lines.append("• " + "｜".join(parts))
             else:
                 event_lines.append(f"• {evt}")
     else:
@@ -1224,14 +1271,21 @@ def _render_action_items(items: list[PortfolioActionItem]) -> list[str]:
     for item in items:
         event_title = ""
         if item.verified_event:
-            event_title = item.verified_event.get("event") or item.verified_event.get("title") or ""
+            if isinstance(item.verified_event, PortfolioEventFact):
+                event_title = item.verified_event.title or item.verified_event.event_type or ""
+            else:
+                event_title = item.verified_event.get("event") or item.verified_event.get("title") or ""
         title = f"{item.ticker}｜{event_title}" if event_title else f"{item.ticker}｜觸發操作審查"
         lines.append(f"• {title}")
         if item.verified_event:
-            details = item.verified_event.get("details") or item.verified_event.get("summary") or ""
+            if isinstance(item.verified_event, PortfolioEventFact):
+                details = item.verified_event.summary or ""
+                impact = item.verified_event.impact or ""
+            else:
+                details = item.verified_event.get("details") or item.verified_event.get("summary") or ""
+                impact = item.verified_event.get("impact") or ""
             if details:
                 lines.append(f"  已驗證事件：{details}")
-            impact = item.verified_event.get("impact") or ""
             if impact:
                 lines.append(f"  對原投資邏輯影響：{impact}")
         lines.append(f"  原因：{item.summary}")
@@ -1279,6 +1333,10 @@ def validate_action_brief(brief: PortfolioActionBrief, context: MarketContext,
     rendered = render_action_brief(brief)
 
     forbidden_tokens = [
+        "EVENT_CHECKED_NO_MATERIAL_CHANGE",
+        "EVENT_MATERIAL_FOUND",
+        "EVENT_CHECK_FAILED",
+        "EVENT_UNCHECKED",
         "NO_MATERIAL_CHANGE",
         "SIZE_NOT_COMPUTED",
         "PREVIOUS_CLOSE",
@@ -1304,7 +1362,12 @@ def validate_action_brief(brief: PortfolioActionBrief, context: MarketContext,
     if re.search(r"(減碼|賣出)\s*[0-9,.]+\s*(股|shares?)", rendered, flags=re.I):
         return False, "exact sell sizing is not allowed in daily bot"
 
-    if ("沒有重大事件" in rendered or "未偵測到足以升級的新資訊" in rendered or "沒有新資訊" in rendered) and not brief.events_verified:
-        return False, "rendered text claims no material events without event verification"
+    # Strict event coverage check:
+    # If event coverage is incomplete (< 100%), cannot claim full clearance
+    ev_total = brief.event_total_positions
+    ev_checked = brief.event_checked_positions
+    if ev_total > 0 and ev_checked < ev_total:
+        if "今天沒有需要升級檢視的事件" in rendered or "未發現需要升級的重大事件" in rendered or f"{ev_total}/{ev_total} 已完成檢查" in rendered:
+            return False, f"incomplete event coverage ({ev_checked}/{ev_total}) claimed full portfolio clearance"
 
     return True, "OK"

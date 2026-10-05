@@ -34,6 +34,7 @@ from adr_engine import calculate_tsm_adr_premium
 from models import MarketContext, Portfolio, Snapshot
 import portfolio_store
 from portfolio_context import EncryptedPortfolioProvider, load_authoritative_portfolio
+from portfolio_events import fetch_portfolio_events
 from structured_reports import (
     build_action_brief, build_public_draft, render_action_brief,
     validate_action_brief, validate_public_draft,
@@ -852,9 +853,17 @@ def run_portfolio_advice(report: str, report_type: str,
         if deliver and (portfolio_context.positions or portfolio_store.ENC_PATH.exists() or portfolio_store.has_positions(raw)):
             send_operational_notice(f"{reason}\n\n已停止產生持股建議，避免用錯誤或缺漏價格下判斷。", report_type)
         return
-    del model
     context = load_market_context(report_type, snapshot)
-    brief = build_action_brief(context, portfolio_context)
+    event_facts, upcoming_events = fetch_portfolio_events(
+        portfolio=portfolio_context,
+        model=model,
+    )
+    brief = build_action_brief(
+        context,
+        portfolio_context,
+        verified_events=event_facts,
+        upcoming_events=upcoming_events,
+    )
     ok, reason = validate_action_brief(brief, context, portfolio_context)
     if not ok:
         log.warning("private advice validation failed", extra={"reason": reason})

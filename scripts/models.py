@@ -372,6 +372,34 @@ class Trigger(BaseModel):
     valid_until: str | None = None
 
 
+PortfolioEventStatus = Literal[
+    "EVENT_CHECKED_NO_MATERIAL_CHANGE",
+    "EVENT_MATERIAL_FOUND",
+    "EVENT_CHECK_FAILED",
+    "EVENT_UNCHECKED",
+]
+
+
+class PortfolioEventFact(BaseModel):
+    instrument_id: str
+    ticker: str
+    checked_at: datetime
+    event_status: PortfolioEventStatus
+    event_type: str | None = None
+    title: str | None = None
+    event_date: str | None = None
+    published_at: datetime | None = None
+    summary: str = ""
+    impact: str = ""
+    severity: str = "LOW"
+    source_name: str = ""
+    source_url: str = ""
+    source_type: str = ""
+    is_upcoming: bool = False
+    checked_window_start: datetime | None = None
+    checked_window_end: datetime | None = None
+
+
 class PortfolioActionItem(BaseModel):
     instrument_id: str
     ticker: str
@@ -387,7 +415,7 @@ class PortfolioActionItem(BaseModel):
     trigger: Trigger | None = None
     price_status: str = "PRICE_NORMAL"
     event_status: str = "EVENT_UNCHECKED"
-    verified_event: dict | None = None
+    verified_event: dict | PortfolioEventFact | None = None
 
 
 class PortfolioActionBrief(BaseModel):
@@ -403,6 +431,11 @@ class PortfolioActionBrief(BaseModel):
     events_verified: bool = False
     covered_positions: int | None = None
     total_positions: int | None = None
+    event_checked_positions: int = 0
+    event_total_positions: int = 0
+    event_check_failed_positions: int = 0
+    event_coverage_ratio: float = 0.0
+    event_facts: list[PortfolioEventFact] = Field(default_factory=list)
 
 
 class StructureCheck(BaseModel):
