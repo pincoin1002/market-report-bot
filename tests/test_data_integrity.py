@@ -1075,14 +1075,27 @@ class SafetyAndWorkflowTest(unittest.TestCase):
             block = text[text.index("Validate report prices"):text.index("Deliver validated")]
             self.assertNotIn("continue-on-error: true", block)
 
-    def test_us_open_uses_one_timezone_aware_schedule_without_runtime_duplicate_guard(self):
+    def test_us_open_uses_early_timezone_aware_native_backup_without_runtime_duplicate_guard(self):
         text = (ROOT / ".github/workflows/us-open.yml").read_text(encoding="utf-8")
-        self.assertIn('cron: "5 9 * * 1-5"', text)
+        self.assertIn('cron: "17 0 * * 1-5"', text)
         self.assertIn('timezone: "America/New_York"', text)
+        self.assertIn("name: Stage native US Open backup", text)
+        self.assertIn("Hold native backup until 04:30 New York", text)
+        self.assertIn("needs: [native-stage]", text)
+        self.assertIn("timeout-minutes: 330", text)
+        self.assertNotIn('cron: "5 9 * * 1-5"', text)
         self.assertNotIn('cron: "0 13 * * 1-5"', text)
         self.assertNotIn('cron: "0 14 * * 1-5"', text)
         self.assertNotIn("duplicate_skipped", text)
         self.assertNotIn("_should_skip_us_open_duplicate", inspect.getsource(fetch_market_data))
+
+    def test_us_open_wait_allows_native_stage_but_stays_bounded_below_hosted_runner_limit(self):
+        source = (ROOT / "scripts/us_open_wait.py").read_text(encoding="utf-8")
+        self.assertIn("300 * 60", source)
+        self.assertIn("more than 300 minutes", source)
+        workflow = (ROOT / ".github/workflows/us-open.yml").read_text(encoding="utf-8")
+        self.assertIn("timeout-minutes: 270", workflow)
+        self.assertIn("timeout-minutes: 330", workflow)
 
     def test_us_open_external_dispatch_inputs_and_serialization_are_present(self):
         text = (ROOT / ".github/workflows/us-open.yml").read_text(encoding="utf-8")
