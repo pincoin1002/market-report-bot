@@ -7,7 +7,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime
 
-from market_session import get_previous_completed_session_date, get_target_market_date, human_session_label
+from market_session import TPE, get_previous_completed_session_date, get_target_market_date, human_session_label
 from models import (
     MarketContext, MarketReportDraft, OptionalModule, PortfolioActionBrief,
     PortfolioActionItem, PortfolioContext, PriceReference, Trigger,
@@ -484,6 +484,13 @@ def build_public_draft(context: MarketContext, narrative: str | None = None) -> 
         "tw_close": "台股收盤日報",
     }[context.report_type]
     session_label = human_session_label(context.report_type, context.market_session)
+    headline_date = context.market_date
+    if context.report_type == "tw_open":
+        # The report is for today's pre-open decision window even though the
+        # Taiwan quotes inside it intentionally reference the prior completed
+        # TWSE session. Keep those concepts distinct in the user-facing title.
+        headline_date = context.generated_at.astimezone(TPE).strftime("%Y-%m-%d")
+        session_label = "開盤前參考"
     if context.report_type == "tw_close":
         material = context.material_changes or derive_tw_session_deltas(context)
         watch = derive_tomorrow_watch_signals(context)
@@ -499,7 +506,7 @@ def build_public_draft(context: MarketContext, narrative: str | None = None) -> 
     draft = MarketReportDraft(
         run_id=context.run_id,
         report_type=context.report_type,
-        headline=f"{title} {context.market_date}｜{session_label}",
+        headline=f"{title} {headline_date}｜{session_label}",
         market_state=[f"{r.canonical_symbol}: {r.value:g} ({r.session})" for r in refs[:8]],
         material_changes=material,
         drivers=derive_evidence_supported_drivers(context),
