@@ -3,9 +3,11 @@
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from market_session import TPE, get_previous_completed_session_date, get_target_market_date, human_session_label
 from models import (
@@ -916,9 +918,22 @@ def validate_public_draft(draft: MarketReportDraft, context: MarketContext) -> t
     return True, "OK"
 
 
-def build_action_brief(context: MarketContext, portfolio: PortfolioContext) -> PortfolioActionBrief:
+def build_action_brief(
+    context: MarketContext,
+    portfolio: PortfolioContext,
+    verified_events: list[dict] | None = None,
+    upcoming_events: list[dict | str] | None = None,
+) -> PortfolioActionBrief:
+    raw_events = verified_events if verified_events is not None else getattr(context, "event_facts", [])
+    events_by_id: dict[str, list[dict]] = {}
+    for evt in raw_events:
+        sym = evt.get("instrument_id") or evt.get("ticker")
+        if sym:
+            events_by_id.setdefault(str(sym).upper(), []).append(evt)
+
     items: list[PortfolioActionItem] = []
-    data_issues = []
+    data_issues: list[str] = []
+
     for pos in portfolio.positions:
         obs = context.quotes.get(pos.instrument_id)
         if not obs or obs.quality_status != "VALID":
@@ -926,36 +941,151 @@ def build_action_brief(context: MarketContext, portfolio: PortfolioContext) -> P
                 instrument_id=pos.instrument_id,
                 ticker=pos.ticker,
                 status="DATA_BLOCKED",
+                price_status="DATA_BLOCKED",
+                event_status="EVENT_UNCHECKED",
                 reason_codes=["QUOTE_UNAVAILABLE_OR_INVALID"],
                 summary="持股行情未通過驗證，本次不產生數字監控結論。",
+                next_step="待行情資料修復後重新檢視。",
             )
             data_issues.append(f"{pos.ticker}: quote unavailable or invalid")
             items.append(item)
             continue
-        status = "NO_MATERIAL_CHANGE"
-        reasons = ["NO_MATERIAL_EVENT"]
-        summary = "未偵測到足以升級為操作審查的新資訊。"
-        trigger: Trigger | None = None
-        if abs(obs.change_pct) >= 7:
+
+        change_pct = obs.change_pct
+        if abs(change_pct) >= 7.0:
+            price_status = "PRICE_WATCH"
+            price_reasons = ["LARGE_DAILY_MOVE"]
+            price_summary = "單日波動達監控門檻，需追蹤是否伴隨基本面事件。"
+            trigger = technical_trigger(
+                pos.ticker,
+                "previous regular close move",
+                obs.previous_regular_close,
+                obs.market_date,
+                obs.quote_id,
+            )
+        else:
+            price_status = "PRICE_NORMAL"
+            price_reasons = ["PRICE_NORMAL"]
+            price_summary = "今日價格未觸發監控門檻；公司事件面尚未完成驗證。"
+            trigger = None
+
+        pos_events = events_by_id.get(pos.instrument_id.upper(), []) or events_by_id.get(pos.ticker.upper(), [])
+        evt_data: dict | None = None
+        if pos_events:
+            action_evts = [
+                e for e in pos_events
+                if e.get("status") == "ACTION_REVIEW" or e.get("action_review") or e.get("severity") == "HIGH" or e.get("material")
+            ]
+            watch_evts = [e for e in pos_events if e.get("status") == "WATCH" or e.get("watch")]
+            checked_no_change_evts = [
+                e for e in pos_events
+                if e.get("status") == "NO_MATERIAL_CHANGE" or (e.get("checked") and not e.get("material"))
+            ]
+
+            if action_evts:
+                evt_data = action_evts[0]
+                event_status = "EVENT_MATERIAL_FOUND"
+                event_decision = "ACTION_REVIEW"
+                event_reasons = [evt_data.get("reason_code", "MATERIAL_COMPANY_EVENT")]
+                event_summary = evt_data.get("summary") or evt_data.get("description") or "公司出現重大已驗證事件，建議重新檢視。"
+            elif watch_evts:
+                evt_data = watch_evts[0]
+                event_status = "EVENT_MATERIAL_FOUND"
+                event_decision = "WATCH"
+                event_reasons = [evt_data.get("reason_code", "COMPANY_EVENT_WATCH")]
+                event_summary = evt_data.get("summary") or evt_data.get("description") or "公司出現已驗證事件，需持續關注後續影響。"
+            elif checked_no_change_evts:
+                evt_data = checked_no_change_evts[0]
+                event_status = "EVENT_CHECKED_NO_MATERIAL_CHANGE"
+                event_decision = "NO_MATERIAL_CHANGE"
+                event_reasons = ["NO_MATERIAL_EVENT"]
+                event_summary = evt_data.get("summary") or "行情與公司事件均已驗證，未發現重大異常。"
+            else:
+                event_status = "EVENT_UNCHECKED"
+                event_decision = None
+                event_reasons = []
+                event_summary = ""
+        else:
+            event_status = "EVENT_UNCHECKED"
+            event_decision = None
+            event_reasons = []
+            event_summary = ""
+
+        if event_decision == "ACTION_REVIEW":
+            status = "ACTION_REVIEW"
+            reasons = event_reasons
+            summary = event_summary
+            next_step = "重新檢視投資邏輯；目前可用現金與配置上限尚未完成驗證，不直接提供精確買賣股數。"
+        elif price_status == "PRICE_WATCH":
             status = "WATCH"
-            reasons = ["LARGE_DAILY_MOVE"]
-            summary = "單日波動達監控門檻，需追蹤是否伴隨基本面事件。"
-            trigger = technical_trigger(pos.ticker, "previous regular close move",
-                                        obs.previous_regular_close, obs.market_date, obs.quote_id)
+            if event_decision == "WATCH":
+                reasons = ["LARGE_DAILY_MOVE"] + event_reasons
+                summary = f"{price_summary} 且伴隨已驗證事件：{event_summary}"
+            else:
+                reasons = ["LARGE_DAILY_MOVE"]
+                summary = price_summary
+            next_step = "確認是否有財報、營運展望、產品或監管事件支持此次波動；目前不直接產生交易結論。"
+        elif event_decision == "WATCH":
+            status = "WATCH"
+            reasons = event_reasons
+            summary = event_summary
+            next_step = "持續關注後續影響與市場定價。"
+        else:
+            status = "NO_MATERIAL_CHANGE"
+            if event_status == "EVENT_CHECKED_NO_MATERIAL_CHANGE":
+                reasons = ["PRICE_NORMAL", "NO_MATERIAL_EVENT"]
+                summary = event_summary or "行情與公司事件均已驗證，未發現重大異常。"
+            else:
+                reasons = ["PRICE_NORMAL", "EVENT_UNCHECKED"]
+                summary = "今日價格未觸發監控門檻；公司事件面尚未完成驗證。"
+            next_step = ""
+
         item = PortfolioActionItem(
             instrument_id=pos.instrument_id,
             ticker=pos.ticker,
             status=status,
             quote_id=obs.quote_id,
             reference_price=obs.price,
+            change_pct=change_pct,
             session=obs.session,
             as_of=obs.provider_timestamp or obs.retrieved_at,
             reason_codes=reasons,
             summary=summary,
-            next_step="SIZE_NOT_COMPUTED",
+            next_step=next_step,
             trigger=trigger,
+            price_status=price_status,
+            event_status=event_status,
+            verified_event=evt_data,
         )
         items.append(item)
+
+    if upcoming_events is not None:
+        upcoming_events_list = list(upcoming_events)
+    else:
+        upcoming_events_list = []
+        portfolio_tickers = {p.ticker.upper() for p in portfolio.positions} | {p.instrument_id.upper() for p in portfolio.positions}
+        for evt in raw_events:
+            sym = (evt.get("instrument_id") or evt.get("ticker") or "").upper()
+            is_upcoming = (
+                evt.get("is_upcoming", False)
+                or evt.get("event_type") in ("EARNINGS", "CALL", "CONFERENCE", "UPCOMING")
+                or "upcoming" in evt.get("category", "").lower()
+            )
+            if is_upcoming and (not sym or sym in portfolio_tickers):
+                if isinstance(evt, dict):
+                    t = evt.get("ticker") or sym
+                    e = evt.get("event") or evt.get("title") or evt.get("summary")
+                    d = evt.get("date") or evt.get("timing") or ""
+                    imp = evt.get("impact") or evt.get("why") or ""
+                    parts = [p for p in (t, e, d, imp) if p]
+                    upcoming_events_list.append("｜".join(parts) if parts else str(evt))
+                else:
+                    upcoming_events_list.append(str(evt))
+
+    total_positions = len(portfolio.positions)
+    covered_positions = len([i for i in items if i.status != "DATA_BLOCKED"])
+    events_verified = any(i.event_status in ("EVENT_CHECKED_NO_MATERIAL_CHANGE", "EVENT_MATERIAL_FOUND") for i in items)
+
     return PortfolioActionBrief(
         run_id=context.run_id,
         as_of=context.generated_at,
@@ -964,37 +1094,155 @@ def build_action_brief(context: MarketContext, portfolio: PortfolioContext) -> P
         action_queue=[i for i in items if i.status == "ACTION_REVIEW"],
         watchlist=[i for i in items if i.status == "WATCH"],
         no_material_change=[i for i in items if i.status == "NO_MATERIAL_CHANGE"],
+        upcoming_events=upcoming_events_list,
         data_issues=data_issues,
+        events_verified=events_verified,
+        covered_positions=covered_positions,
+        total_positions=total_positions,
     )
 
 
 def render_action_brief(brief: PortfolioActionBrief) -> str:
+    tpe = ZoneInfo("Asia/Taipei")
+    as_of_dt = brief.as_of.astimezone(tpe) if brief.as_of.tzinfo else brief.as_of
+    as_of_str = as_of_dt.strftime("%Y-%m-%d %H:%M")
+
+    session_map = {
+        "PREVIOUS_CLOSE": "前一交易日收盤資料",
+        "REGULAR": "常規交易時段",
+        "PRE_MARKET": "盤前交易時段",
+        "POST_MARKET": "盤後交易時段",
+        "AFTER_HOURS": "盤後交易時段",
+        "CLOSED_REFERENCE": "前一交易日收盤資料",
+    }
+    session_label = session_map.get(str(brief.market_session), "市場資料")
+    header = f"💼 持股監控｜{as_of_str}（{session_label}）"
+
+    total = brief.total_positions if brief.total_positions is not None else (
+        len(brief.action_queue) + len(brief.watchlist) + len(brief.no_material_change) + len(brief.data_issues)
+    )
+    covered = brief.covered_positions if brief.covered_positions is not None else (total - len(brief.data_issues))
+    coverage_str = f"{covered}/{total} 持股行情已驗證"
+
+    if brief.action_queue:
+        conclusion_lines = [
+            f"共有 {len(brief.action_queue)} 檔持股建議重新檢視（詳見下方說明）。",
+            f"{coverage_str}。",
+        ]
+    elif brief.watchlist:
+        conclusion_lines = [
+            f"共有 {len(brief.watchlist)} 檔持股觸發價格關注（詳見下方說明）。",
+            f"{coverage_str}。",
+        ]
+    elif brief.data_issues:
+        conclusion_lines = [
+            "部分持股行情或資料有缺漏，請見下方資料說明。",
+            f"{coverage_str}。",
+        ]
+    else:
+        if brief.events_verified:
+            conclusion_lines = [
+                "目前沒有持股需要調整。",
+                f"{coverage_str}；未發現重大異常。",
+            ]
+        else:
+            conclusion_lines = [
+                "價格面未觸發監控條件；公司事件面尚未完成驗證。",
+                f"{coverage_str}；價格面沒有觸發重大異常。",
+            ]
+
+    if brief.watchlist:
+        watch_lines = _render_watchlist_items(brief.watchlist)
+    else:
+        watch_lines = ["無"]
+
+    if brief.action_queue:
+        action_lines = _render_action_items(brief.action_queue)
+    else:
+        action_lines = ["無"]
+
+    if brief.upcoming_events:
+        event_lines = []
+        for evt in brief.upcoming_events:
+            if isinstance(evt, dict):
+                parts = [
+                    evt.get("ticker", ""),
+                    evt.get("event", ""),
+                    evt.get("date") or evt.get("timing") or "",
+                    evt.get("why") or evt.get("impact") or "",
+                ]
+                event_lines.append("• " + "｜".join([p for p in parts if p]))
+            else:
+                event_lines.append(f"• {evt}")
+    else:
+        event_lines = ["• 目前沒有已驗證、需要特別準備的事件。"]
+
     lines = [
-        "💼 持股 Action Brief",
-        f"As of: {brief.as_of.strftime('%Y-%m-%d %H:%M %Z')}",
-        f"Market session: {brief.market_session}",
-        f"Data quality: {'OK' if not brief.data_quality and not brief.data_issues else 'LIMITED'}",
+        header,
         "",
-        "1. ACTION QUEUE",
+        "【今天結論】",
+        *conclusion_lines,
+        "",
+        "【需要關注】",
+        *watch_lines,
+        "",
+        "【值得重新檢視】",
+        *action_lines,
+        "",
+        "【近期事件】",
+        *event_lines,
     ]
-    lines += _render_items(brief.action_queue) or ["- 無"]
-    lines += ["", "2. WATCHLIST"]
-    lines += _render_items(brief.watchlist) or ["- 無"]
-    lines += ["", "3. NO MATERIAL CHANGE"]
-    lines += [", ".join(f"{i.ticker} — NO_MATERIAL_CHANGE" for i in brief.no_material_change) or "- 無"]
-    lines += ["", "4. UPCOMING PORTFOLIO EVENTS", "- SIZE_NOT_COMPUTED；事件需 search-grounded 後才列入"]
+
     if brief.data_issues:
-        lines += ["", "5. DATA QUALITY"]
-        lines += [f"- {issue}" for issue in brief.data_issues]
+        lines += [
+            "",
+            "【資料說明】",
+            *[f"• {issue.replace('quote unavailable or invalid', '行情資料未取得或驗證未通過')}" for issue in brief.data_issues],
+        ]
+
     return "\n".join(lines).strip()
 
 
-def _render_items(items: list[PortfolioActionItem]) -> list[str]:
-    out = []
+def _render_watchlist_items(items: list[PortfolioActionItem]) -> list[str]:
+    lines = []
     for item in items:
-        price = f"{item.reference_price:g} {item.session}" if item.reference_price else "DATA_BLOCKED"
-        out.append(f"- {item.ticker} — {item.status} | Reference: {price} | {item.summary} | Next: {item.next_step}")
-    return out
+        parts = [item.ticker]
+        if item.change_pct is not None:
+            parts.append(f"單日 {item.change_pct:+.1f}%")
+        if item.reference_price is not None:
+            parts.append(f"參考價 {item.reference_price:g}")
+        title = "｜".join(parts)
+        lines.append(f"• {title}")
+        lines.append(f"  原因：{item.summary}")
+        next_step = item.next_step or "確認是否有財報、營運展望、產品或監管事件支持此次波動；目前不直接產生交易結論。"
+        lines.append(f"  下一步：{next_step}")
+    return lines
+
+
+def _render_action_items(items: list[PortfolioActionItem]) -> list[str]:
+    lines = []
+    for item in items:
+        event_title = ""
+        if item.verified_event:
+            event_title = item.verified_event.get("event") or item.verified_event.get("title") or ""
+        title = f"{item.ticker}｜{event_title}" if event_title else f"{item.ticker}｜觸發操作審查"
+        lines.append(f"• {title}")
+        if item.verified_event:
+            details = item.verified_event.get("details") or item.verified_event.get("summary") or ""
+            if details:
+                lines.append(f"  已驗證事件：{details}")
+            impact = item.verified_event.get("impact") or ""
+            if impact:
+                lines.append(f"  對原投資邏輯影響：{impact}")
+        lines.append(f"  原因：{item.summary}")
+        next_step = item.next_step or "重新檢視投資邏輯，而不是自動賣出。"
+        lines.append(f"  建議：{next_step}")
+        lines.append("  說明：目前只建議重新檢視，不提供精確買賣股數，因可用現金／配置上限尚未完成驗證。")
+    return lines
+
+
+def _render_items(items: list[PortfolioActionItem]) -> list[str]:
+    return _render_watchlist_items(items)
 
 
 def validate_action_brief(brief: PortfolioActionBrief, context: MarketContext,
@@ -1017,9 +1265,46 @@ def validate_action_brief(brief: PortfolioActionBrief, context: MarketContext,
                 return False, f"{item.instrument_id} unsupported trigger generator"
             if item.trigger and item.trigger.trigger_type == "TECHNICAL" and not item.trigger.source_ids:
                 return False, f"{item.instrument_id} technical trigger lacks provenance"
+            if item.event_status == "EVENT_UNCHECKED":
+                if any(phrase in item.summary for phrase in ("未偵測到足以升級的新資訊", "沒有重大事件", "無重大事件")):
+                    return False, f"{item.instrument_id} ungrounded claim of no material events when event_status is EVENT_UNCHECKED"
+
+    for evt in brief.upcoming_events:
+        evt_str = json.dumps(evt, ensure_ascii=False) if isinstance(evt, dict) else str(evt)
+        if "SIZE_NOT_COMPUTED" in evt_str:
+            return False, "upcoming_events contains sizing state"
+        if "search-grounded" in evt_str:
+            return False, "upcoming_events contains internal jargon"
+
     rendered = render_action_brief(brief)
+
+    forbidden_tokens = [
+        "NO_MATERIAL_CHANGE",
+        "SIZE_NOT_COMPUTED",
+        "PREVIOUS_CLOSE",
+        "DATA_BLOCKED",
+        "ACTION_REVIEW",
+        "NO_MATERIAL_EVENT",
+        "LARGE_DAILY_MOVE",
+        "QUOTE_UNAVAILABLE_OR_INVALID",
+        "ACTION QUEUE",
+        "WATCHLIST",
+        "NO MATERIAL CHANGE",
+    ]
+    for token in forbidden_tokens:
+        if token in rendered:
+            return False, f"raw engineering token leaked into rendered text: {token}"
+
+    if not brief.action_queue:
+        if "不提供精確買賣股數" in rendered or "SIZE_NOT_COMPUTED" in rendered:
+            return False, "sizing explanation present when action queue is empty"
+
     if re.search(r"(加碼|買進)\s*[0-9,.]+\s*(股|shares?)", rendered, flags=re.I):
         return False, "exact buy sizing is not allowed in daily bot"
     if re.search(r"(減碼|賣出)\s*[0-9,.]+\s*(股|shares?)", rendered, flags=re.I):
         return False, "exact sell sizing is not allowed in daily bot"
+
+    if ("沒有重大事件" in rendered or "未偵測到足以升級的新資訊" in rendered or "沒有新資訊" in rendered) and not brief.events_verified:
+        return False, "rendered text claims no material events without event verification"
+
     return True, "OK"

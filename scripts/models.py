@@ -378,12 +378,16 @@ class PortfolioActionItem(BaseModel):
     status: PortfolioMonitoringStatus
     quote_id: str | None = None
     reference_price: float | None = None
+    change_pct: float | None = None
     session: Session | None = None
     as_of: datetime | None = None
     reason_codes: list[str] = Field(default_factory=list)
     summary: str = ""
-    next_step: str = "SIZE_NOT_COMPUTED"
+    next_step: str = ""
     trigger: Trigger | None = None
+    price_status: str = "PRICE_NORMAL"
+    event_status: str = "EVENT_UNCHECKED"
+    verified_event: dict | None = None
 
 
 class PortfolioActionBrief(BaseModel):
@@ -394,8 +398,11 @@ class PortfolioActionBrief(BaseModel):
     action_queue: list[PortfolioActionItem] = Field(default_factory=list)
     watchlist: list[PortfolioActionItem] = Field(default_factory=list)
     no_material_change: list[PortfolioActionItem] = Field(default_factory=list)
-    upcoming_events: list[str] = Field(default_factory=list)
+    upcoming_events: list[dict | str] = Field(default_factory=list)
     data_issues: list[str] = Field(default_factory=list)
+    events_verified: bool = False
+    covered_positions: int | None = None
+    total_positions: int | None = None
 
 
 class StructureCheck(BaseModel):

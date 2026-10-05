@@ -614,6 +614,7 @@ ADVICE_MARKET_FOCUS = {
     "us_close": "美股持股為主（檢討昨夜表現並給出後續計畫），台股持股一句話帶過",
 }
 ADVICE_STATUSES = ("NO_MATERIAL_CHANGE", "WATCH", "ACTION_REVIEW", "DATA_BLOCKED")
+ZH_ADVICE_SECTIONS = ("持股監控", "需要關注", "值得重新檢視", "建議重新檢視", "【今天結論】")
 
 
 def _build_advice_prompt(report: str, portfolio: Portfolio,
@@ -789,8 +790,9 @@ def _position_quantities(raw: dict | None) -> dict[str, float]:
 
 def validate_private_advice_text(advice: str, raw: dict | None,
                                  snapshot: "Snapshot | None") -> tuple[bool, str]:
-    if not any(status in advice for status in ADVICE_STATUSES):
-        return False, "private advice 未包含 PortfolioMonitoringStatus，可能仍是舊式任意交易建議。"
+    valid_markers = ADVICE_STATUSES + ZH_ADVICE_SECTIONS
+    if not any(status in advice for status in valid_markers):
+        return False, "private advice 未包含監控狀態標記，可能仍是舊式任意交易建議。"
 
     cash_missing = not raw or raw.get("available_cash") in (None, "", "未設定")
     if cash_missing and re.search(r"(加碼|買進)\s*[0-9,.]+(?:\s*)(股|shares?)", advice, flags=re.I):

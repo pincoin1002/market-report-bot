@@ -902,7 +902,10 @@ class StructuredBriefTest(unittest.TestCase):
             portfolio = EncryptedPortfolioProvider().load()
         brief = build_action_brief(context, portfolio)
         rendered = render_action_brief(brief)
-        self.assertIn("NO MATERIAL CHANGE", rendered)
+        self.assertEqual(brief.no_material_change[0].status, "NO_MATERIAL_CHANGE")
+        self.assertIn("持股監控", rendered)
+        self.assertNotIn("NO_MATERIAL_CHANGE", rendered)
+        self.assertNotIn("SIZE_NOT_COMPUTED", rendered)
         self.assertNotRegex(rendered, r"(買進|加碼|賣出|減碼)\s*\d+")
 
     def test_unknown_instrument_requires_data_blocked(self):
