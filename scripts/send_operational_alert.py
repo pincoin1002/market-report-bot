@@ -17,6 +17,11 @@ NY = ZoneInfo("America/New_York")
 TPE = ZoneInfo("Asia/Taipei")
 
 MESSAGES = {
+    "TW_OPEN_INTENT_EXPIRED": (
+        "⚠️ 台股開盤戰報未送出\n"
+        "原因：排程在 09:00 後才進入執行，已超過開盤前有效時間。\n"
+        "未使用前一交易日收盤資料冒充今日開盤。"
+    ),
     "SCHEDULER_WINDOW_EXPIRED": (
         "⚠️ 美股開盤日報未送出\n"
         "原因：排程觸發過晚，已超過有效盤前時間。\n"
