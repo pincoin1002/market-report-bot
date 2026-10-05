@@ -365,6 +365,7 @@ def fetch_portfolio_events(
     force_set = force_refresh_tickers or set()
     cache_data = load_event_cache(cache_path)
     cached_items = cache_data.get("items", {})
+    cache_changed = False
 
     all_facts: list[PortfolioEventFact] = []
     upcoming_events: list[dict[str, Any] | str] = []
@@ -592,6 +593,7 @@ def fetch_portfolio_events(
                             "facts": cached_facts_for_ticker,
                             "upcoming": cached_upcoming_for_ticker,
                         }
+                        cache_changed = True
                 except Exception as exc:
                     log.warning(
                         "event batch processing failed after bounded search: %s (batch_size=%d)",
@@ -611,10 +613,12 @@ def fetch_portfolio_events(
                         )
                         all_facts.append(fact_obj)
 
-            # Persist updated cache
-            cache_data["updated_at"] = current_time.isoformat()
-            cache_data["items"] = cached_items
-            save_event_cache(cache_data, cache_path)
+            # Persist only when verified evidence actually changed.
+            # Provider failures must not create random ciphertext churn.
+            if cache_changed:
+                cache_data["updated_at"] = current_time.isoformat()
+                cache_data["items"] = cached_items
+                save_event_cache(cache_data, cache_path)
 
     # Persist runtime audit file
     try:
