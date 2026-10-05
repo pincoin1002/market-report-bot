@@ -126,7 +126,7 @@ class PortfolioPerformanceSafetyTest(unittest.TestCase):
             headline="test",
             portfolio_section=OptionalModule(
                 name="portfolio",
-                state="FULL",
+                state="AVAILABLE",
                 summary="行情覆蓋：23/23 FULL",
             ),
         )
