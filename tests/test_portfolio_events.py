@@ -30,7 +30,14 @@ from models import (
     QuoteObservation,
     Snapshot,
 )
-from portfolio_events import fetch_portfolio_events, is_entry_fresh, load_event_cache, save_event_cache
+from portfolio_events import (
+    EventSearchError,
+    _query_batch_with_bounded_fallback,
+    fetch_portfolio_events,
+    is_entry_fresh,
+    load_event_cache,
+    save_event_cache,
+)
 from structured_reports import (
     build_action_brief,
     render_action_brief,
@@ -576,6 +583,54 @@ class PortfolioEventMonitoringSuiteTest(unittest.TestCase):
         rendered = render_action_brief(brief)
         self.assertIn("公司／資產事件需要關注", rendered)
         self.assertNotIn("觸發價格關注", rendered)
+
+
+    def test_23_contract_failure_uses_one_bounded_split_fallback(self):
+        instruments = [
+            {"ticker": f"T{i}", "name": f"Test {i}", "asset_type": "EQUITY"}
+            for i in range(8)
+        ]
+        first_half = [{"ticker": f"T{i}", "event_status": "EVENT_CHECKED_NO_MATERIAL_CHANGE"} for i in range(4)]
+        second_half = [{"ticker": f"T{i}", "event_status": "EVENT_CHECKED_NO_MATERIAL_CHANGE"} for i in range(4, 8)]
+        with patch(
+            "portfolio_events._query_gemini_search",
+            side_effect=[EventSearchError("INVALID_JSON"), first_half, second_half],
+        ) as query:
+            results, failed, codes = _query_batch_with_bounded_fallback(
+                instruments,
+                model="gemini-2.5-flash",
+                api_key="fake",
+            )
+        self.assertEqual(query.call_count, 3)
+        self.assertEqual(len(results), 8)
+        self.assertEqual(failed, [])
+        self.assertEqual(codes, ["INVALID_JSON"])
+
+    def test_24_bounded_fallback_fails_closed_without_recursive_retry(self):
+        instruments = [
+            {"ticker": f"T{i}", "name": f"Test {i}", "asset_type": "EQUITY"}
+            for i in range(8)
+        ]
+        with patch(
+            "portfolio_events._query_gemini_search",
+            side_effect=[
+                EventSearchError("INVALID_JSON"),
+                EventSearchError("NO_GROUNDING_METADATA"),
+                EventSearchError("INVALID_JSON"),
+            ],
+        ) as query:
+            results, failed, codes = _query_batch_with_bounded_fallback(
+                instruments,
+                model="gemini-2.5-flash",
+                api_key="fake",
+            )
+        self.assertEqual(query.call_count, 3)
+        self.assertEqual(results, [])
+        self.assertEqual(len(failed), 8)
+        self.assertEqual(
+            codes,
+            ["INVALID_JSON", "NO_GROUNDING_METADATA", "INVALID_JSON"],
+        )
 
 
 if __name__ == "__main__":
