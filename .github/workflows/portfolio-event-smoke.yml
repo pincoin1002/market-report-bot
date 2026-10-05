@@ -58,28 +58,28 @@ jobs:
 
           statuses = Counter(f.event_status for f in facts)
           instrument_ids = {f.instrument_id for f in facts}
-          checked = sum(
-              1 for f in facts
+          checked_ids = {
+              f.instrument_id for f in facts
               if f.event_status in ("EVENT_CHECKED_NO_MATERIAL_CHANGE", "EVENT_MATERIAL_FOUND")
-          )
-          failed = sum(1 for f in facts if f.event_status == "EVENT_CHECK_FAILED")
-          material = sum(1 for f in facts if f.event_status == "EVENT_MATERIAL_FOUND")
+          }
+          failed_ids = {f.instrument_id for f in facts if f.event_status == "EVENT_CHECK_FAILED"}
+          material_ids = {f.instrument_id for f in facts if f.event_status == "EVENT_MATERIAL_FOUND"}
 
           # Aggregate-only output: never print tickers, names, quantities, URLs, or event text.
           print(json.dumps({
               "portfolio_positions": total,
               "event_fact_instruments": len(instrument_ids),
-              "event_checked": checked,
-              "event_failed": failed,
-              "material_event_facts": material,
+              "event_checked_instruments": len(checked_ids),
+              "event_failed_instruments": len(failed_ids),
+              "material_event_instruments": len(material_ids),
               "upcoming_event_count": len(upcoming),
               "status_counts": dict(statuses),
           }, sort_keys=True))
 
           if len(instrument_ids) != total:
               raise SystemExit("Event fact coverage does not match portfolio position count")
-          if failed:
+          if failed_ids:
               raise SystemExit("One or more production event checks failed closed")
-          if checked != total:
+          if len(checked_ids) != total:
               raise SystemExit("Production event coverage is incomplete")
           PY
