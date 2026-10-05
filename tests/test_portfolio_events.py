@@ -276,7 +276,7 @@ class PortfolioEventMonitoringSuiteTest(unittest.TestCase):
         brief = build_action_brief(self.context, self.portfolio, upcoming_events=upcoming)
         rendered = render_action_brief(brief)
         self.assertIn("【近期事件】", rendered)
-        self.assertIn("NVDA｜美股盤後財報｜10/25｜Data Center 成長、毛利率與下一季 guidance", rendered)
+        self.assertIn("NVDA｜美股盤後財報｜10/25｜Data Center 成長、毛利率與下一季 guidance（來源：NVIDIA IR）", rendered)
 
     def test_10_upcoming_event_requires_provenance(self):
         upcoming = [
@@ -556,6 +556,26 @@ class PortfolioEventMonitoringSuiteTest(unittest.TestCase):
             text = (ROOT / workflow).read_text(encoding="utf-8")
             self.assertIn("portfolio_event_cache.json.enc", text)
             self.assertNotIn("git add data/portfolio_event_cache.json", text)
+
+
+    def test_22_event_only_watch_is_not_mislabeled_as_price_watch(self):
+        event = PortfolioEventFact(
+            instrument_id="AMZN",
+            ticker="AMZN",
+            checked_at=datetime(2026, 10, 5, 2, 0, tzinfo=timezone.utc),
+            event_status="EVENT_MATERIAL_FOUND",
+            event_type="REGULATORY",
+            title="Regulatory development",
+            summary="Verified event requiring monitoring.",
+            severity="MEDIUM",
+            source_name="Regulator",
+            source_url="https://example.com/regulator",
+            source_type="REGULATORY",
+        )
+        brief = build_action_brief(self.context, self.portfolio, verified_events=[event])
+        rendered = render_action_brief(brief)
+        self.assertIn("公司／資產事件需要關注", rendered)
+        self.assertNotIn("觸發價格關注", rendered)
 
 
 if __name__ == "__main__":
