@@ -43,6 +43,30 @@ from structured_reports import (
 from twse_market_evidence import TWSECloseEvidence, fetch_twse_close_evidence
 from validate_report import validate_rendered_report_structure
 
+TEST_PORTFOLIO_TICKERS = [
+    "0050", "006208", "1519", "2327", "2330", "2383",
+    "AMZN", "DRAM", "GOOG", "IBKR", "MU", "NVDA", "QQQ", "TSLA", "VOO", "VST", "VTI",
+    "BTC", "ETH", "USDC", "USDT", "BONK", "SXT",
+]
+
+
+def _deterministic_test_portfolio() -> PortfolioContext:
+    """Privacy-safe 23-position fixture for CI; never depends on the private PIOS snapshot."""
+    positions = []
+    for idx, ticker in enumerate(TEST_PORTFOLIO_TICKERS, start=1):
+        spec = resolve_instrument(ticker)
+        positions.append(PositionContext(
+            position_id=f"test-{idx:02d}-{ticker}",
+            instrument_id=ticker,
+            ticker=ticker,
+            name=spec.display_name,
+            quantity=float(idx),
+            currency=spec.currency,
+            asset_type=spec.asset_type,
+        ))
+    return PortfolioContext(source="CI_SYNTHETIC_FIXTURE", positions=positions)
+
+
 
 class USOpenSchedulerContractSuiteTest(unittest.TestCase):
     """Tests 1-11: US Scheduler contracts, timing semantics, and operational failure alerts."""
@@ -284,7 +308,7 @@ class PortfolioCrossMarketExhaustiveTest(unittest.TestCase):
 
     def test_19_23_position_diagnostic_accounting_sums_correctly(self):
         # 19. 23-position diagnostic accounting sums correctly
-        context = load_authoritative_portfolio()
+        context = _deterministic_test_portfolio()
         positions = context.positions
         self.assertEqual(len(positions), 23)
 
@@ -368,7 +392,7 @@ class ReportUXExhaustiveTest(unittest.TestCase):
         # 27 & 28: turnover/breadth and institutional-flow provenance validation
         summary = TaiexMarketSummary(
             close=47631.96, point_change=-392.64, change_pct=-0.82,
-            turnover_ntd_billions=836.14, advancing=374, declining=586, unchanged=112,
+            turnover_ntd_billions=8361.45, advancing=374, declining=586, unchanged=112,
             session_date="2026-09-29", previous_session_date="2026-09-24",
             source="https://www.twse.com.tw/exchangeReport/MI_INDEX",
         )
@@ -391,7 +415,7 @@ class Reproduction20260929Test(unittest.TestCase):
 
     def test_reproduce_20260929_taiwan_close(self):
         # 1. 23 positions from canonical PIOS snapshot
-        context_portfolio = load_authoritative_portfolio()
+        context_portfolio = _deterministic_test_portfolio()
         positions = context_portfolio.positions
         self.assertEqual(len(positions), 23)
 
@@ -503,17 +527,16 @@ class Reproduction20260929Test(unittest.TestCase):
 
         # Verification of reproduction
         self.assertIn("47,631.96", report_text)
-        self.assertIn("836.14", report_text)
+        self.assertIn("8,361.45", report_text)
         self.assertIn("374/586", report_text)
         self.assertIn("31.800", report_text)
         self.assertIn("台積電 (2330) 單日持平（+0.00%）。", report_text)
         self.assertIn("【相較前一交易日 2026-09-24】", report_text)
         self.assertIn("行情覆蓋：23/23 FULL", report_text)
-        self.assertIn("總資產：NT$", report_text)
-        self.assertIn("本次組合變動：", report_text)
-        self.assertIn("台股部位：", report_text)
-        self.assertIn("美股部位：", report_text)
-        self.assertIn("Crypto：", report_text)
+        self.assertIn("跨市場部位目前沒有統一的起訖估值時間", report_text)
+        self.assertNotIn("總資產：NT$", report_text)
+        self.assertNotIn("本次組合變動：", report_text)
+        self.assertNotIn("相對台股大盤", report_text)
         self.assertNotIn("OBSERVED", report_text)
         self.assertNotIn("SUPPORTED_ASSOCIATION", report_text)
         self.assertNotIn("UNRESOLVED", report_text)
@@ -528,7 +551,7 @@ class Reproduction20260929Test(unittest.TestCase):
 class PortfolioAnalyticsContractSuiteTest(unittest.TestCase):
     def setUp(self):
         from portfolio_context import load_authoritative_portfolio
-        self.portfolio = load_authoritative_portfolio()
+        self.portfolio = _deterministic_test_portfolio()
         self.retrieved_at = datetime(2026, 9, 29, 13, 30, tzinfo=timezone.utc)
 
     def _build_valid_23_quotes(self):
