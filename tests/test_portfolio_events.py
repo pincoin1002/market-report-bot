@@ -43,6 +43,7 @@ from structured_reports import (
     render_action_brief,
     validate_action_brief,
 )
+import refresh_portfolio_events
 
 
 def _obs(symbol: str, price: float = 100.0, prev: float = 99.0, session: str = "REGULAR") -> QuoteObservation:
@@ -705,6 +706,45 @@ class PortfolioEventMonitoringSuiteTest(unittest.TestCase):
         self.assertIn("portfolio_event_cache.json.enc", workflow)
         source = (ROOT / "scripts/generate_report.py").read_text(encoding="utf-8")
         self.assertIn('network_scope="forced_only"', source)
+
+
+    def test_29_all_failed_search_does_not_create_event_cache(self):
+        with tempfile.TemporaryDirectory() as td:
+            cache_file = Path(td) / "portfolio_event_cache.json.enc"
+            failed = [p.ticker for p in self.portfolio.positions]
+            with patch(
+                "portfolio_events._query_batch_with_bounded_fallback",
+                return_value=([], failed, ["ServerError"]),
+            ):
+                facts, upcoming = fetch_portfolio_events(
+                    self.portfolio,
+                    api_key="fake",
+                    cache_path=cache_file,
+                    network_scope="all",
+                )
+            self.assertEqual(len({f.instrument_id for f in facts}), 23)
+            self.assertTrue(all(f.event_status == "EVENT_CHECK_FAILED" for f in facts))
+            self.assertEqual(upcoming, [])
+            self.assertFalse(cache_file.exists())
+
+    def test_30_background_refresh_degrades_without_nonzero_exit(self):
+        failed_facts = [
+            PortfolioEventFact(
+                instrument_id=p.instrument_id,
+                ticker=p.ticker,
+                checked_at=datetime(2026, 10, 5, tzinfo=timezone.utc),
+                event_status="EVENT_CHECK_FAILED",
+            )
+            for p in self.portfolio.positions
+        ]
+        with patch(
+            "refresh_portfolio_events.load_authoritative_portfolio",
+            return_value=self.portfolio,
+        ), patch(
+            "refresh_portfolio_events.fetch_portfolio_events",
+            return_value=(failed_facts, []),
+        ):
+            self.assertEqual(refresh_portfolio_events.main(), 0)
 
 
 if __name__ == "__main__":
