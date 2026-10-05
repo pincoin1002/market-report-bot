@@ -1,0 +1,88 @@
+name: Taiwan Open Dry Run Smoke
+
+on:
+  push:
+    paths:
+      - ".github/workflows/tw-open-dry-run-smoke.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      PIOS_PORTFOLIO_SNAPSHOT_JSON: ${{ secrets.PIOS_PORTFOLIO_SNAPSHOT_JSON }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      PORTFOLIO_KEY: ${{ secrets.PORTFOLIO_KEY }}
+      REPORT_MODEL: ${{ vars.REPORT_MODEL }}
+      PYTHONPATH: scripts
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Fetch current Taiwan-open snapshot
+        run: |
+          set +e
+          python scripts/fetch_market_data.py tw_open
+          code=$?
+          set -e
+          if [ "$code" -ne 0 ]; then
+            echo "TW-open fetch exited with code $code"
+            exit "$code"
+          fi
+
+      - name: Generate without delivery
+        run: python scripts/generate_report.py tw_open --generate-only
+
+      - name: Validate generated report
+        run: python scripts/validate_report.py tw_open
+
+      - name: Print aggregate acceptance
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          from models import Snapshot
+
+          snap = Snapshot.model_validate_json(Path("data/market_snapshot.json").read_text())
+          validation = json.loads(Path("data/validation_results.json").read_text())
+          print(json.dumps({
+              "report_type": "tw_open",
+              "report_market_date": getattr(snap, "report_market_date", None),
+              "requested_universe_coverage": snap.requested_universe_coverage,
+              "validated_universe_coverage": snap.validated_universe_coverage,
+              "portfolio_quote_coverage": (
+                  snap.portfolio_quote_coverage.coverage_ratio
+                  if snap.portfolio_quote_coverage else None
+              ),
+              "structural_validation": validation["structural_validation"]["passed"],
+              "numeric_provenance": validation["numeric_provenance"]["passed"],
+              "structured_validation": validation["structured"]["passed"],
+              "render_validation": validation["render"]["passed"],
+              "telegram_sent": False,
+          }, ensure_ascii=False, sort_keys=True))
+          PY
+
+      - name: Upload dry-run artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tw-open-dry-run-${{ github.run_id }}
+          path: |
+            reports/tw_open_*.md
+            data/market_snapshot.json
+            data/market_context.json
+            data/market_report_draft.json
+            data/validation_results.json
+            data/portfolio_action_brief.json
+          retention-days: 3
+          if-no-files-found: warn
