@@ -18,8 +18,11 @@ from models import InstitutionalFlows, TaiexMarketSummary
 
 
 log = logging.getLogger("twse_market_evidence")
-MI_INDEX_URL = "https://www.twse.com.tw/exchangeReport/MI_INDEX"
-INSTITUTIONAL_URL = "https://www.twse.com.tw/fund/BFI82U"
+MI_INDEX_URL = "https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX"
+INSTITUTIONAL_URL = "https://www.twse.com.tw/rwd/zh/fund/BFI82U"
+# User-facing Taiwanese market reports render monetary statistics in 億元.
+# Keep the conversion explicit: 1 億 = NT$100,000,000.
+NTD_PER_YI = 100_000_000
 
 
 def _compact_number(value: str) -> float:
@@ -151,8 +154,8 @@ def fetch_twse_close_evidence(session_date: str, previous_session_date: str,
     try:
         current_market = _get_json(MI_INDEX_URL, {"response": "json", "date": _twse_date(session_date), "type": "ALL"})
         previous_market = _get_json(MI_INDEX_URL, {"response": "json", "date": _twse_date(previous_session_date), "type": "ALL"})
-        current_flows = _get_json(INSTITUTIONAL_URL, {"response": "json", "dayDate": _twse_date(session_date), "type": "day"})
-        previous_flows = _get_json(INSTITUTIONAL_URL, {"response": "json", "dayDate": _twse_date(previous_session_date), "type": "day"})
+        current_flows = _get_json(INSTITUTIONAL_URL, {"response": "json", "date": _twse_date(session_date), "type": "day"})
+        previous_flows = _get_json(INSTITUTIONAL_URL, {"response": "json", "date": _twse_date(previous_session_date), "type": "day"})
         if current_market.get("date") != _twse_date(session_date):
             raise ValueError("TWSE current market response date mismatch")
         if previous_market.get("date") != _twse_date(previous_session_date):
