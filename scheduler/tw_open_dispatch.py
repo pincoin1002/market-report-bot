@@ -17,7 +17,7 @@ from market_session import is_tw_trading_day
 TPE = ZoneInfo("Asia/Taipei")
 REPOSITORY = "pincoin1002/market-report-bot"
 WORKFLOW = "tw-open.yml"
-STAGING_START = clock_time(6, 0)
+STAGING_START = clock_time(7, 0)
 STAGING_END = clock_time(8, 45)
 
 
