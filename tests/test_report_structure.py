@@ -411,5 +411,86 @@ class ReportStructuralValidationTest(unittest.TestCase):
         self.assertEqual(" ".join(telegram_output.split()), " ".join(recombined.split()))
 
 
+    def test_numeric_provenance_does_not_confuse_goog_with_googl(self):
+        from datetime import datetime, timezone
+        from types import SimpleNamespace
+        from models import QuoteObservation
+        from validate_report import validate_numeric_provenance
+
+        now = datetime(2026, 10, 5, 13, 5, tzinfo=timezone.utc)
+        def obs(symbol, price, prev, change):
+            return QuoteObservation(
+                quote_id=f"{symbol}:2026-10-05:PREMARKET:test",
+                instrument_id=symbol,
+                canonical_symbol=symbol,
+                price=price,
+                currency="USD",
+                session="PREMARKET",
+                market_date="2026-10-05",
+                observed_at=now,
+                provider_timestamp=now,
+                retrieved_at=now,
+                provider="test",
+                quote_type="INDICATIVE",
+                is_delayed=False,
+                quality_status="VALID",
+                previous_regular_close=prev,
+                change_pct=change,
+                market="US",
+            )
+
+        context = SimpleNamespace(
+            market_date="2026-10-05",
+            quotes={
+                "GOOG": obs("GOOG", 339.20, 338.00, 0.35),
+                "GOOGL": obs("GOOGL", 342.59, 342.76, -0.05),
+            },
+            taiex_summary=None,
+            institutional_flows=None,
+        )
+        report = (
+            "# 美股開盤日報 2026-10-05\n\n"
+            "| 標的 | 報價 | 漲跌 |\n"
+            "|---|---:|---:|\n"
+            "| Alphabet Class A (GOOGL) | 342.59 | -0.05% |\n"
+        )
+        ok, errors = validate_numeric_provenance(report, context)
+        self.assertTrue(ok, errors)
+
+    def test_numeric_provenance_accepts_signed_derived_breadth_values(self):
+        from types import SimpleNamespace
+        from validate_report import validate_numeric_provenance
+
+        taiex = SimpleNamespace(
+            previous_session_date="2026-10-02",
+            open=None,
+            high=None,
+            low=None,
+            close=48300.0,
+            point_change=None,
+            change_pct=None,
+            turnover_ntd_billions=None,
+            advancing=364,
+            declining=631,
+            unchanged=0,
+            advancing_prev=500,
+            declining_prev=523,
+            unchanged_prev=0,
+        )
+        context = SimpleNamespace(
+            market_date="2026-10-05",
+            quotes={},
+            taiex_summary=taiex,
+            institutional_flows=None,
+        )
+        report = (
+            "# 台股收盤日報 2026-10-05\n\n"
+            "## 今日走勢\n"
+            "- 市場廣度：上漲 364 家、下跌 631 家；淨廣度 -267 家，較前一交易日 -244 家。\n"
+        )
+        ok, errors = validate_numeric_provenance(report, context)
+        self.assertTrue(ok, errors)
+
+
 if __name__ == "__main__":
     unittest.main()
