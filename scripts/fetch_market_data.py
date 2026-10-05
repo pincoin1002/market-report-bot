@@ -10,6 +10,7 @@ Exit codes:
   2 = TW market closed today (holiday / weekend) → skip TW report
   3 = US market closed today (holiday / weekend) → send notice instead
   5 = US-open intended premarket snapshot no longer observable → fail closed
+  6 = TW-open pre-open briefing window expired → fail closed
 """
 
 import logging
@@ -29,7 +30,7 @@ from instrument_registry import build_universe, quote_symbol
 from market_context import build_market_context
 from market_session import (
     classify_tw_session, classify_us_session, get_previous_completed_session_date, get_target_market_date,
-    us_open_snapshot_contract_status,
+    tw_open_snapshot_contract_status, us_open_snapshot_contract_status,
 )
 from models import NamedQuote, PortfolioQuoteCoverage, PortfolioQuoteCoverageItem, QuoteObservation, Snapshot
 from portfolio_context import load_authoritative_portfolio
@@ -406,6 +407,17 @@ def main() -> None:
         _set_github_output("market_closed", "true")
         log.info("EXIT 3 — US market closed, sending notice")
         sys.exit(3)
+
+    if report_type == "tw_open":
+        contract_status = tw_open_snapshot_contract_status()
+        if contract_status != "READY":
+            log.error("TW open briefing window expired — refusing to publish previous-close data after market open", extra={
+                "status": contract_status,
+                "tpe_time": datetime.now(tz=TPE).strftime("%Y-%m-%d %H:%M:%S %z"),
+            })
+            _set_github_output("market_closed", "false")
+            _set_github_output("intent_unavailable", "true")
+            sys.exit(6)
 
     if report_type == "us_open":
         intended_market_date = os.getenv("US_OPEN_INTENDED_MARKET_DATE", "").strip() or None
