@@ -151,6 +151,7 @@ Rules:
     "event_type": "EARNINGS" or "GUIDANCE" or "M&A" or "MANAGEMENT" or "REGULATORY" or "PRODUCT" or "NONE",
     "title": "Short title in Traditional Chinese or English",
     "event_date": "YYYY-MM-DD",
+    "published_at": "ISO-8601 publication/filing timestamp for recent events, or null for upcoming-only calendar events",
     "summary": "Concise factual summary (1-2 sentences)",
     "impact": "Brief impact on investment thesis",
     "severity": "LOW" or "MEDIUM" or "HIGH",
@@ -160,6 +161,41 @@ Rules:
     "is_upcoming": false
   }}
 ]"""
+
+
+def _parse_event_datetime(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        text = str(value).strip().replace("Z", "+00:00")
+        parsed = datetime.fromisoformat(text)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _claim_within_requested_window(result: dict[str, Any], now: datetime) -> bool:
+    """Deterministically enforce the 48h recent / 7d upcoming contract."""
+    is_upcoming = bool(result.get("is_upcoming", False))
+    event_date = _parse_event_datetime(result.get("event_date"))
+    published_at = _parse_event_datetime(result.get("published_at"))
+
+    if is_upcoming:
+        if event_date is None:
+            return False
+        delta = event_date.date() - now.astimezone(timezone.utc).date()
+        return 0 <= delta.days <= 7
+
+    if result.get("event_status") != "EVENT_MATERIAL_FOUND":
+        return True
+
+    evidence_time = published_at or event_date
+    if evidence_time is None:
+        return False
+    age = now.astimezone(timezone.utc) - evidence_time
+    return timedelta(0) <= age <= timedelta(hours=48)
 
 
 def _query_gemini_search(
@@ -399,20 +435,30 @@ def fetch_portfolio_events(
 
                         # Material/upcoming claims require explicit provenance
                         # in addition to batch-level grounding metadata.
-                        missing_provenance = any(
+                        invalid_provenance = any(
                             (
                                 (r.get("event_status") == "EVENT_MATERIAL_FOUND" or r.get("is_upcoming"))
                                 and (not r.get("source_name") or not r.get("source_url"))
                             )
                             for r in t_results
                         )
-                        if missing_provenance:
+                        invalid_window = any(
+                            not _claim_within_requested_window(r, current_time)
+                            for r in t_results
+                            if r.get("event_status") == "EVENT_MATERIAL_FOUND" or r.get("is_upcoming")
+                        )
+                        if invalid_provenance or invalid_window:
+                            reason = (
+                                "搜尋結果缺少可驗證來源，本次事件未完成驗證。"
+                                if invalid_provenance
+                                else "搜尋結果超出事件監控時間窗或缺少日期證據，本次事件未完成驗證。"
+                            )
                             fact_obj = PortfolioEventFact(
                                 instrument_id=inst_id,
                                 ticker=ticker,
                                 checked_at=current_time,
                                 event_status="EVENT_CHECK_FAILED",
-                                summary="搜尋結果缺少可驗證來源，本次事件未完成驗證。",
+                                summary=reason,
                                 source_name="GeminiSearch",
                                 source_type="SEARCH_GROUNDED",
                             )
@@ -423,8 +469,17 @@ def fetch_portfolio_events(
                         cached_upcoming_for_ticker = []
                         for res in t_results:
                             is_up = bool(res.get("is_upcoming", False))
-                            ev_status: PortfolioEventStatus = res.get("event_status") or (
-                                "EVENT_MATERIAL_FOUND" if res.get("severity") in ("MEDIUM", "HIGH") else "EVENT_CHECKED_NO_MATERIAL_CHANGE"
+                            severity = str(res.get("severity", "LOW")).upper()
+                            raw_status = res.get("event_status") or (
+                                "EVENT_MATERIAL_FOUND" if severity in ("MEDIUM", "HIGH", "CRITICAL") else "EVENT_CHECKED_NO_MATERIAL_CHANGE"
+                            )
+                            # Upcoming-only calendar items are not current
+                            # material changes. LOW-severity observations also
+                            # cannot trigger a portfolio WATCH by definition.
+                            ev_status: PortfolioEventStatus = (
+                                "EVENT_CHECKED_NO_MATERIAL_CHANGE"
+                                if is_up or (raw_status == "EVENT_MATERIAL_FOUND" and severity == "LOW")
+                                else raw_status
                             )
                             fact_obj = PortfolioEventFact(
                                 instrument_id=inst_id,
@@ -434,6 +489,7 @@ def fetch_portfolio_events(
                                 event_type=res.get("event_type"),
                                 title=res.get("title"),
                                 event_date=res.get("event_date"),
+                                published_at=_parse_event_datetime(res.get("published_at")),
                                 summary=res.get("summary", ""),
                                 impact=res.get("impact", ""),
                                 severity=res.get("severity", "LOW"),
