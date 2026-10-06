@@ -38,7 +38,7 @@ from send_operational_alert import already_alerted, record_alert, send_telegram_
 from structured_reports import (
     _reader_evidence_line, _render_tw_close_report, build_public_draft,
     derive_evidence_supported_drivers, derive_tomorrow_watch_signals,
-    derive_tw_session_deltas, portfolio_report_section, return_direction,
+    derive_tw_session_deltas, return_direction,
 )
 from twse_market_evidence import TWSECloseEvidence, fetch_twse_close_evidence
 from validate_report import validate_rendered_report_structure
@@ -533,8 +533,8 @@ class Reproduction20260929Test(unittest.TestCase):
         self.assertIn("31.800", report_text)
         self.assertIn("台積電 (2330) 單日持平（+0.00%）。", report_text)
         self.assertIn("【相較前一交易日 2026-09-24】", report_text)
-        self.assertIn("行情覆蓋：23/23 FULL", report_text)
-        self.assertIn("跨市場部位目前沒有統一的起訖估值時間", report_text)
+        self.assertNotIn("行情覆蓋：23/23 FULL", report_text)
+        self.assertNotIn("跨市場部位目前沒有統一的起訖估值時間", report_text)
         self.assertNotIn("總資產：NT$", report_text)
         self.assertNotIn("本次組合變動：", report_text)
         self.assertNotIn("相對台股大盤", report_text)

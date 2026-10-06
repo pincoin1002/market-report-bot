@@ -252,6 +252,7 @@ class CoinGeckoCryptoProvider:
                 previous_regular_close=round(previous, spec.price_precision),
                 change_pct=round(change_pct, 2),
                 quality_notes=["24-hour change supplied by CoinGecko"],
+                change_interval="ROLLING_24H",
                 market=spec.market,
             )
             observations[spec.canonical_symbol] = validate_observation(observation, spec)
@@ -314,6 +315,7 @@ class CoinbaseCryptoProvider:
                 previous_regular_close=round(previous, spec.price_precision),
                 change_pct=round(change_pct, 2),
                 quality_notes=["24-hour open supplied by Coinbase Exchange"],
+                change_interval="ROLLING_24H",
                 market=spec.market,
             )
             observations[spec.canonical_symbol] = validate_observation(obs, spec)

@@ -25,14 +25,17 @@ def main() -> int:
     )
 
     instrument_ids = {f.instrument_id for f in facts}
+    from datetime import datetime, timezone
+    from event_contract import event_eligibility
+    consumed_at = datetime.now(tz=timezone.utc)
     checked_ids = {
         f.instrument_id
         for f in facts
-        if f.event_status in ("EVENT_CHECKED_NO_MATERIAL_CHANGE", "EVENT_MATERIAL_FOUND")
+        if event_eligibility(f, consumed_at) in {"CURRENT_CHECK", "RECENT_MATERIAL", "UPCOMING"}
     }
     failed_ids = {f.instrument_id for f in facts if f.event_status == "EVENT_CHECK_FAILED"}
-    unchecked_ids = {f.instrument_id for f in facts if f.event_status == "EVENT_UNCHECKED"}
-    material_ids = {f.instrument_id for f in facts if f.event_status == "EVENT_MATERIAL_FOUND"}
+    unchecked_ids = instrument_ids - checked_ids - failed_ids
+    material_ids = {f.instrument_id for f in facts if event_eligibility(f, consumed_at) == "RECENT_MATERIAL"}
     status_counts = Counter(f.event_status for f in facts)
 
     # Aggregate-only log output. Never emit private tickers or event text.

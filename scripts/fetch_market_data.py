@@ -312,7 +312,8 @@ def build_snapshot(report_type: str, retrieved_at: datetime | None = None) -> Sn
             snapshot.taiex_summary = evidence.taiex_summary
             snapshot.institutional_flows = evidence.institutional_flows.model_copy(update={
                 "turnover_prev_ntd_billions": evidence.previous_turnover_ntd_billions,
-            })
+            }) if evidence.institutional_flows else None
+        if evidence is not None and evidence.taiex_summary is not None:
             # The official MI_INDEX record is the Taiwan-close authority for
             # TAIEX.  Keep the same observation contract as all other quote
             # rows so selection, deltas, and renderer provenance cannot lose

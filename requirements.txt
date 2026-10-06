@@ -6,3 +6,4 @@ markdown>=3.6
 holidays>=0.47
 pydantic>=2.7
 cryptography>=42.0
+opencc-python-reimplemented==0.1.7

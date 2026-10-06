@@ -107,7 +107,7 @@ class ActionBriefSemanticsSuiteTest(unittest.TestCase):
         self.portfolio_23 = _make_23_portfolio()
         self.quotes_23 = {p.ticker: _obs(p.ticker, price=100.0, prev=99.0) for p in self.portfolio_23.positions}
         self.snapshot_23 = _snapshot(self.quotes_23)
-        self.context_23 = build_market_context(self.snapshot_23, "tw_close", run_id="test_run")
+        self.context_23 = build_market_context(self.snapshot_23, "tw_close", run_id="test_run", now=self.snapshot_23.generated_at)
 
     def test_01_user_facing_contains_no_no_material_change(self):
         brief = build_action_brief(self.context_23, self.portfolio_23)
@@ -192,6 +192,12 @@ class ActionBriefSemanticsSuiteTest(unittest.TestCase):
         events = [
             {
                 "ticker": "AMZN",
+                "event_status": "EVENT_MATERIAL_FOUND",
+                "checked_at": self.context_23.generated_at,
+                "source_published_at": self.context_23.generated_at,
+                "publication_date_verified": True,
+                "source_name": "Amazon 投資人關係網站",
+                "source_url": "https://example.com/amazon-guidance",
                 "status": "ACTION_REVIEW",
                 "severity": "HIGH",
                 "material": True,
@@ -214,7 +220,11 @@ class ActionBriefSemanticsSuiteTest(unittest.TestCase):
 
     def test_11_upcoming_events_does_not_use_sizing_state(self):
         upcoming = [
-            {"ticker": "NVDA", "event": "財報發表會", "date": "10/25 美股盤後", "why": "重點看 Data Center 營收"},
+            {"ticker": "NVDA", "title": "財報發表會", "event_date": "2026-10-03", "is_upcoming": True,
+             "event_status": "EVENT_CHECKED_NO_MATERIAL_CHANGE", "checked_at": self.context_23.generated_at,
+             "source_published_at": self.context_23.generated_at, "publication_date_verified": True,
+             "source_url": "https://investor.nvidia.com/calendar", "source_name": "NVIDIA 投資人關係網站",
+             "summary": "重點看資料中心營收"},
         ]
         brief = build_action_brief(self.context_23, self.portfolio_23, upcoming_events=upcoming)
         for ev in brief.upcoming_events:
@@ -222,7 +232,7 @@ class ActionBriefSemanticsSuiteTest(unittest.TestCase):
             self.assertNotIn("SIZE_NOT_COMPUTED", ev_str)
         rendered = render_action_brief(brief)
         self.assertNotIn("SIZE_NOT_COMPUTED", rendered)
-        self.assertIn("NVDA｜財報發表會｜10/25 美股盤後｜重點看 Data Center 營收", rendered)
+        self.assertIn("NVDA｜財報發表會｜2026-10-03｜重點看資料中心營收", rendered)
 
     def test_12_no_verified_upcoming_events_natural_language_empty_state(self):
         brief = build_action_brief(self.context_23, self.portfolio_23)
@@ -239,7 +249,10 @@ class ActionBriefSemanticsSuiteTest(unittest.TestCase):
         self.assertNotIn("SIZE_NOT_COMPUTED", rendered_no_action)
 
         # Case B: action queue has an item
-        events = [{"ticker": "NVDA", "status": "ACTION_REVIEW", "summary": "重大事件", "material": True}]
+        events = [{"ticker": "NVDA", "status": "ACTION_REVIEW", "severity": "HIGH", "summary": "重大事件", "material": True,
+                   "checked_at": self.context_23.generated_at, "publication_date_verified": True,
+                   "source_published_at": self.context_23.generated_at, "source_url": "https://investor.nvidia.com/article",
+                   "source_name": "NVIDIA 投資人關係網站"}]
         brief_with_action = build_action_brief(self.context_23, self.portfolio_23, verified_events=events)
         rendered_with_action = render_action_brief(brief_with_action)
         self.assertIn("不提供精確買賣股數", rendered_with_action)

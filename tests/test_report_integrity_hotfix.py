@@ -130,8 +130,8 @@ class PortfolioPerformanceSafetyTest(unittest.TestCase):
             ),
         )
         rendered = _render_tw_close_report(draft, context)
-        self.assertIn("行情覆蓋：23/23 FULL", rendered)
-        self.assertIn("跨市場部位目前沒有統一的起訖估值時間", rendered)
+        self.assertNotIn("行情覆蓋：23/23 FULL", rendered)
+        self.assertNotIn("跨市場部位", rendered)
         self.assertNotIn("本次組合變動", rendered)
         self.assertNotIn("相對台股大盤", rendered)
         self.assertNotIn("總資產：", rendered)

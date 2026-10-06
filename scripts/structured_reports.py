@@ -14,8 +14,9 @@ from models import (
     MarketContext, MarketReportDraft, OptionalModule, PortfolioActionBrief,
     PortfolioActionItem, PortfolioContext, PortfolioEventFact, PriceReference, Trigger,
 )
-from portfolio_analytics import calculate_portfolio_analytics, format_portfolio_section
 from trigger_engine import technical_trigger
+from event_contract import event_data, event_eligibility
+from investment_language import asset_next_step, chinese_text, event_display, format_price, interval_label
 
 ROUNDING_TOLERANCE = 0.005
 QUOTE_KINDS = {"CURRENT_QUOTE", "PREMARKET_QUOTE", "REGULAR_QUOTE", "AFTER_HOURS_QUOTE", "PREVIOUS_CLOSE"}
@@ -45,7 +46,7 @@ def quote_price_reference(symbol: str, context: MarketContext) -> PriceReference
     )
 
 
-from instrument_registry import resolve_instrument
+from instrument_registry import REGISTRY, resolve_instrument
 
 
 @dataclass(frozen=True)
@@ -255,6 +256,15 @@ def derive_tomorrow_watch_signals(context: MarketContext) -> list[str]:
     taiex = context.taiex_summary
     inst = context.institutional_flows
 
+    importance = {symbol: i for i, symbol in enumerate(("2330", "2454", "2317", "2308", "2303", "2383", "2382", "3711"))}
+    movers = [(symbol, obs) for symbol in select_report_symbols(context)
+              if (obs := _valid_quote(context, symbol)) and resolve_instrument(symbol).market == "TW"
+              and symbol != "TAIEX" and abs(obs.change_pct) >= 2.0]
+    movers.sort(key=lambda pair: (-abs(pair[1].change_pct), importance.get(pair[0], 99), pair[0]))
+    for symbol, obs in movers[:4]:
+        next_signal = "觀察強勢是否延續，並核對後續量價資料" if obs.change_pct > 0 else "觀察弱勢是否延續或出現止跌"
+        signals.append(f"{resolve_instrument(symbol).display_name} ({symbol})：今日 {obs.change_pct:+.2f}%，{next_signal}。")
+
     if taiex and taiex.high and taiex.high > taiex.close + 30:
         signals.append(
             f"加權指數：今日高點 {taiex.high:,.2f} 點至收盤回落 {taiex.high - taiex.close:,.2f} 點；"
@@ -270,11 +280,6 @@ def derive_tomorrow_watch_signals(context: MarketContext) -> list[str]:
         signals.append(
             f"USD/TWD：現值 {usd_obs.price:.3f}、單日新台幣{direction}；觀察下一交易日是否延續。"
         )
-
-    for event in context.event_facts:
-        summary = event.get("summary") or event.get("event")
-        if summary:
-            signals.append(f"重要事件：關注「{summary}」之後續市場反應與定價。")
 
     return signals
 
@@ -320,12 +325,15 @@ def derive_evidence_supported_drivers(context: MarketContext) -> list[str]:
         reverse=True,
     )
     if len(laggards) >= 2:
+        association = ("；這些權值股跌勢與加權指數上漲方向不同，盤面呈現分歧。" if taiex and taiex.change_pct > 0
+                       else "；多個大型權值同步走弱，與加權指數下跌方向一致。" if taiex and taiex.change_pct < 0
+                       else "；大型權值跌勢尚未形成大盤同向變化。")
         candidates.append(EvidenceCandidate(
             "SUPPORTED_ASSOCIATION",
             sum(abs(observation.change_pct) for _, observation in laggards[:3]),
             tuple(observation.quote_id for _, observation in laggards[:3]),
             "權值壓力：" + "、".join(_weight_return_text(symbol, observation) for symbol, observation in laggards[:3])
-            + "；多個大型權值同步走弱，與加權指數表現一致；此為關聯性觀察，未推定單一因果。",
+            + association,
         ))
     if len(leaders) >= 2:
         if taiex and taiex.change_pct < 0:
@@ -369,111 +377,34 @@ def derive_evidence_supported_drivers(context: MarketContext) -> list[str]:
 
 
 def derive_tw_session_deltas(context: MarketContext) -> list[str]:
-    """Compare only the current and previous completed TWSE sessions."""
+    """Compare validated market structure across completed TWSE sessions."""
     if context.report_type != "tw_close":
         return []
     deltas: list[str] = []
-    taiex = _valid_quote(context, "TAIEX")
-
-    if taiex:
-        point_delta = taiex.price - taiex.previous_regular_close
-        deltas.append(
-            f"[OBSERVED] TAIEX session-over-session：收在 {taiex.price:,.2f} 點，較前一已完成 TWSE session "
-            f"{point_delta:+,.2f} 點（{taiex.change_pct:+.2f}%）；比較基準為前一正式收盤。"
-        )
-    else:
-        deltas.append("[UNRESOLVED] TAIEX session-over-session：UNRESOLVED（缺少已驗證 current TWSE close）。")
-
-    weighted = []
-    for symbol in ("2330", "2317", "2454", "2308", "2382", "2303", "3711"):
-        if observation := _valid_quote(context, symbol):
-            weighted.append((symbol, observation))
-    if weighted:
-        weighted.sort(key=lambda item: abs(item[1].change_pct), reverse=True)
-        deltas.append(
-            "[OBSERVED] 權值單日變化："
-            + "、".join(_weight_return_text(symbol, observation) for symbol, observation in weighted[:3])
-            + "；皆以各自前一正式收盤為基準。"
-        )
-    else:
-        deltas.append("[UNRESOLVED] 權值單日變化：UNRESOLVED（缺少已驗證權值正式收盤）。")
-
-    if usd_twd := _valid_quote(context, "USDTWD"):
-        deltas.append(
-            f"[OBSERVED] USD/TWD session-over-session：收在 {usd_twd.price:.3f}，變動 {usd_twd.change_pct:+.2f}%；"
-            f"新台幣{usd_twd_direction_label(usd_twd.change_pct)}。"
-        )
-    else:
-        deltas.append("[UNRESOLVED] USD/TWD session-over-session：UNRESOLVED（缺少已驗證匯率收盤）。")
-
-    taiex_summary = context.taiex_summary
+    ts = context.taiex_summary
     inst = context.institutional_flows
-    if taiex_summary and taiex_summary.turnover_ntd_billions is not None and inst and inst.turnover_prev_ntd_billions is not None:
-        turnover_delta = taiex_summary.turnover_ntd_billions - inst.turnover_prev_ntd_billions
-        deltas.append(
-            f"[OBSERVED] 成交金額：{taiex_summary.turnover_ntd_billions:,.2f} 億台幣，較前一 session {turnover_delta:+,.2f} 億。"
-        )
-    else:
-        deltas.append("[UNRESOLVED] 成交金額：UNRESOLVED（缺少 current 與前一已完成 TWSE session 的已驗證統計）。")
-
-    if (taiex_summary and taiex_summary.advancing is not None and taiex_summary.declining is not None
-            and taiex_summary.advancing_prev is not None and taiex_summary.declining_prev is not None):
-        net = taiex_summary.advancing - taiex_summary.declining
-        previous_net = taiex_summary.advancing_prev - taiex_summary.declining_prev
-        deltas.append(
-            f"[OBSERVED] 市場廣度：上漲 {taiex_summary.advancing} 家、下跌 {taiex_summary.declining} 家；"
-            f"淨廣度 {net:+d} 家，較前一 session {net - previous_net:+d} 家。"
-        )
-    else:
-        deltas.append("[UNRESOLVED] 市場廣度：UNRESOLVED（缺少 current 與前一已完成 TWSE session 的已驗證統計）。")
-
-    if (inst and inst.foreign_buy_sell_ntd_billions is not None and inst.foreign_buy_sell_prev_ntd_billions is not None
-            and inst.investment_trust_buy_sell_ntd_billions is not None and inst.investment_trust_buy_sell_prev_ntd_billions is not None
-            and inst.dealer_buy_sell_ntd_billions is not None and inst.dealer_buy_sell_prev_ntd_billions is not None):
-        foreign_delta = inst.foreign_buy_sell_ntd_billions - inst.foreign_buy_sell_prev_ntd_billions
-        trust_delta = inst.investment_trust_buy_sell_ntd_billions - inst.investment_trust_buy_sell_prev_ntd_billions
-        dealer_delta = inst.dealer_buy_sell_ntd_billions - inst.dealer_buy_sell_prev_ntd_billions
-        deltas.append(
-            f"[OBSERVED] 三大法人：外資 {inst.foreign_buy_sell_ntd_billions:+.2f} 億（較前一 session {foreign_delta:+.2f} 億）、"
-            f"投信 {inst.investment_trust_buy_sell_ntd_billions:+.2f} 億（{trust_delta:+.2f} 億）、"
-            f"自營商 {inst.dealer_buy_sell_ntd_billions:+.2f} 億（{dealer_delta:+.2f} 億）。"
-        )
-    else:
-        deltas.append("[UNRESOLVED] 三大法人：UNRESOLVED（缺少外資、投信、自營商 current 與前一 session 的完整已驗證統計）。")
-
-    deltas.append("[UNRESOLVED] Portfolio coverage change：UNRESOLVED（沒有前一已完成 TWSE session 的 portfolio coverage artifact）。")
-    deltas.append("[UNRESOLVED] Portfolio relative performance：UNRESOLVED（尚無滿足既有信心合約的跨幣別 canonical portfolio valuation evidence）。")
+    if ts and ts.previous_change_pct is not None:
+        movement = "改善" if ts.change_pct > ts.previous_change_pct else "放緩" if ts.change_pct < ts.previous_change_pct else "持平"
+        deltas.append(f"[OBSERVED] 指數報酬{movement}：前日 {ts.previous_change_pct:+.2f}% → 今日 {ts.change_pct:+.2f}%。")
+    previous_turnover = ts.turnover_prev_ntd_billions if ts else None
+    if previous_turnover is None and inst:
+        previous_turnover = inst.turnover_prev_ntd_billions
+    if ts and ts.turnover_ntd_billions is not None and previous_turnover is not None:
+        delta = ts.turnover_ntd_billions - previous_turnover
+        deltas.append(f"[OBSERVED] 成交金額：前日 {previous_turnover:,.2f} 億元 → 今日 {ts.turnover_ntd_billions:,.2f} 億元，較前一交易日 {delta:+,.2f} 億元。")
+    if ts and ts.net_breadth is not None and ts.previous_net_breadth is not None:
+        direction = "改善" if ts.net_breadth_change > 0 else "惡化" if ts.net_breadth_change < 0 else "持平"
+        deltas.append(f"[OBSERVED] 市場廣度{direction}：前日淨廣度 {ts.previous_net_breadth:+d} 家 → 今日淨廣度 {ts.net_breadth:+d} 家，較前一交易日 {ts.net_breadth_change:+d} 家。")
+    if inst:
+        for label, key in (("外資", "foreign"), ("投信", "investment_trust"), ("自營商", "dealer")):
+            current = getattr(inst, f"{key}_buy_sell_ntd_billions")
+            previous = getattr(inst, f"{key}_buy_sell_prev_ntd_billions")
+            if current is None or previous is None:
+                continue
+            previous_word = "買超" if previous >= 0 else "賣超"
+            current_word = "買超" if current >= 0 else "賣超"
+            deltas.append(f"[OBSERVED] {label}現貨：前日{previous_word} {abs(previous):.2f} 億元 → 今日{current_word} {abs(current):.2f} 億元。")
     return deltas
-
-
-def portfolio_report_section(context: MarketContext) -> OptionalModule | None:
-    """A privacy-safe portfolio section in the same report render pass."""
-    coverage = context.portfolio_quote_coverage
-    if coverage is None:
-        return None
-    if coverage.status == "FULL":
-        return OptionalModule(
-            name="Portfolio Status", state="AVAILABLE",
-            summary=f"行情覆蓋：{coverage.covered_positions}/{coverage.expected_positions} FULL",
-        )
-    if coverage.status == "NOT_APPLICABLE":
-        return OptionalModule(name="Portfolio Status", state="UNAVAILABLE", summary="未取得可分析的有效持股；未產生持股結論。")
-    unresolved = [*coverage.stale, *coverage.missing, *coverage.unsupported]
-    reasons = []
-    for item in unresolved:
-        reason = item.reason
-        if "differs from expected" in reason or "session" in reason:
-            r_short = "session mismatch"
-        elif item.state == "UNSUPPORTED":
-            r_short = "unsupported provider"
-        else:
-            r_short = "provider failure"
-        reasons.append(f"{item.canonical_symbol}（{r_short}）")
-    detail = f"\n- 未取得行情：{'、'.join(reasons)}" if reasons else ""
-    return OptionalModule(
-        name="Portfolio Status", state="PARTIAL",
-        summary=f"行情覆蓋：{coverage.covered_positions}/{coverage.expected_positions} — 操作建議暫停{detail}",
-    )
 
 
 def build_public_draft(context: MarketContext, narrative: str | None = None) -> MarketReportDraft:
@@ -494,7 +425,7 @@ def build_public_draft(context: MarketContext, narrative: str | None = None) -> 
         headline_date = context.generated_at.astimezone(TPE).strftime("%Y-%m-%d")
         session_label = "開盤前參考"
     if context.report_type == "tw_close":
-        material = context.material_changes or derive_tw_session_deltas(context)
+        material = derive_tw_session_deltas(context)
         watch = derive_tomorrow_watch_signals(context)
     else:
         material = context.material_changes or build_material_changes(context)
@@ -520,7 +451,7 @@ def build_public_draft(context: MarketContext, narrative: str | None = None) -> 
         price_references=refs,
         taiex_summary=context.taiex_summary,
         institutional_flows=context.institutional_flows,
-        portfolio_section=portfolio_report_section(context),
+        portfolio_section=None,
     )
     draft.rendered_markdown = render_public_report(draft, context, narrative)
     return draft
@@ -636,7 +567,7 @@ def render_public_report(draft: MarketReportDraft, context: MarketContext,
     sec_num = 1
 
     # Section 1: Executive Market State
-    lines.append(f"## {sec_num}. 市場核心概況 (Executive Market State)")
+    lines.append(f"## {sec_num}. 市場核心概況")
     sec_num += 1
 
     has_meaningful_ts = any(
@@ -657,12 +588,7 @@ def render_public_report(draft: MarketReportDraft, context: MarketContext,
             continue
         spec = resolve_instrument(ref.canonical_symbol)
         display = f"{spec.display_name} ({ref.canonical_symbol})" if spec.display_name != ref.canonical_symbol else ref.canonical_symbol
-        if spec.currency == "USD" or ref.value >= 1000:
-            price_str = f"{ref.value:,.2f}"
-        elif ref.value >= 100:
-            price_str = f"{ref.value:,.1f}"
-        else:
-            price_str = f"{ref.value:g}"
+        price_str = format_price(ref.value)
         session_label = human_session_label(context.report_type, obs.session)
         if has_meaningful_ts:
             if obs.provider_timestamp:
@@ -676,7 +602,7 @@ def render_public_report(draft: MarketReportDraft, context: MarketContext,
 
     # Section 2: What Changed Since Last Report
     if draft.material_changes:
-        lines.append(f"## {sec_num}. 相較上一交易日變化 (What Changed Since Last Report)")
+        lines.append(f"## {sec_num}. 相較上一交易日變化")
         sec_num += 1
         for item in draft.material_changes:
             if rendered := _reader_evidence_line(item):
@@ -685,7 +611,7 @@ def render_public_report(draft: MarketReportDraft, context: MarketContext,
 
     # Section 3: Top Market Drivers
     if draft.drivers:
-        lines.append(f"## {sec_num}. 今日走勢與市場驅動 (Top Market Drivers)")
+        lines.append(f"## {sec_num}. 今日走勢與市場驅動")
         sec_num += 1
         for item in draft.drivers:
             if rendered := _reader_evidence_line(item):
@@ -694,7 +620,7 @@ def render_public_report(draft: MarketReportDraft, context: MarketContext,
 
     # Section 4: Rotation & Sectors (omit placeholders!)
     if draft.rotation and not any(ph in draft.rotation for ph in ("僅列 verified quote", "弱資料模組不硬填")):
-        lines.append(f"## {sec_num}. 產業與資金輪動 (Rotation & Sectors)")
+        lines.append(f"## {sec_num}. 產業與資金輪動")
         sec_num += 1
         lines.append(draft.rotation)
         lines.append("")
@@ -702,7 +628,7 @@ def render_public_report(draft: MarketReportDraft, context: MarketContext,
     # Section 5: High-Impact Event Calendar (omit placeholders!)
     clean_events = [e for e in draft.event_calendar if not any(ph in e for ph in ("僅在可靠搜尋", "本段不以模型記憶"))]
     if clean_events:
-        lines.append(f"## {sec_num}. 重要事件與日程 (High-Impact Events)")
+        lines.append(f"## {sec_num}. 重要事件與日程")
         sec_num += 1
         for item in clean_events:
             lines.append(f"- {item}")
@@ -711,7 +637,7 @@ def render_public_report(draft: MarketReportDraft, context: MarketContext,
     # Section 6: Watch Into Close / Next Report (omit placeholders!)
     clean_watch = [w for w in draft.watch_signals if "等待下一份" not in w]
     if clean_watch:
-        lines.append(f"## {sec_num}. 後續觀察重點 (Watch Signals)")
+        lines.append(f"## {sec_num}. 後續觀察重點")
         sec_num += 1
         for item in clean_watch:
             lines.append(f"- {item}")
@@ -719,14 +645,9 @@ def render_public_report(draft: MarketReportDraft, context: MarketContext,
 
     # Section 7: Data Notes (reader-facing note if degraded, NEVER ticker dumps)
     if context.degraded_mode:
-        lines.append(f"## {sec_num}. 資料說明 (Data Notes)")
+        lines.append(f"## {sec_num}. 資料說明")
         sec_num += 1
         lines.append("- 部分外部即時新聞檢索受限，本報告行情數據均以交易所已驗證收盤價為準。")
-        lines.append("")
-
-    if draft.portfolio_section:
-        lines.append(f"## {sec_num}. 持股資料狀態")
-        lines.append(f"- {draft.portfolio_section.summary}")
         lines.append("")
 
     return "\n".join(lines).strip()
@@ -766,12 +687,7 @@ def _render_tw_close_report(draft: MarketReportDraft, context: MarketContext) ->
             continue
         spec = resolve_instrument(ref.canonical_symbol)
         display = f"{spec.display_name} ({ref.canonical_symbol})" if spec.display_name != ref.canonical_symbol else ref.canonical_symbol
-        if spec.currency == "USD" or ref.value >= 1000:
-            price_str = f"{ref.value:,.2f}"
-        elif ref.value >= 100:
-            price_str = f"{ref.value:,.1f}"
-        else:
-            price_str = f"{ref.value:g}"
+        price_str = format_price(ref.value)
         session_label = human_session_label(context.report_type, obs.session)
         lines.append(f"| {display} | {price_str} | {obs.change_pct:+.2f}% | {session_label} |")
     lines.append("")
@@ -873,22 +789,10 @@ def _render_tw_close_report(draft: MarketReportDraft, context: MarketContext) ->
                 lines.append(f"- {rendered}")
         lines.append("")
 
-    if draft.portfolio_section:
-        # Quote coverage and portfolio performance are different contracts.
-        # The current snapshot mixes TW completed-session closes, the latest
-        # completed US session, and continuous crypto observations.  Until a
-        # common cutoff-to-cutoff valuation series exists, aggregating each
-        # instrument's own previous close into one portfolio return is not an
-        # economically comparable measurement interval.
-        lines.append("## 【我的持股】")
-        lines.append(f"- {draft.portfolio_section.summary}")
-        lines.append("- 跨市場部位目前沒有統一的起訖估值時間，因此暫不顯示整體損益、貢獻度或相對大盤績效。")
-        lines.append("")
-
     clean_watch = [w for w in draft.watch_signals if "等待下一份" not in w]
     if clean_watch:
         lines.append("## 【明日觀察】")
-        for item in clean_watch[:3]:
+        for item in clean_watch[:5]:
             lines.append(f"- {item}")
         lines.append("")
 
@@ -901,6 +805,8 @@ def _render_tw_close_report(draft: MarketReportDraft, context: MarketContext) ->
 
 
 def validate_public_draft(draft: MarketReportDraft, context: MarketContext) -> tuple[bool, str]:
+    if draft.portfolio_section is not None:
+        return False, "public draft contains private portfolio metadata"
     for ref in draft.price_references:
         if ref.kind not in QUOTE_KINDS:
             continue
@@ -911,7 +817,7 @@ def validate_public_draft(draft: MarketReportDraft, context: MarketContext) -> t
             return False, f"{ref.canonical_symbol} quote_id mismatch"
         if ref.session != obs.session:
             return False, f"{ref.canonical_symbol} session mismatch"
-        if abs(ref.value - obs.price) > ROUNDING_TOLERANCE:
+        if abs(ref.value - obs.price) > min(ROUNDING_TOLERANCE, obs.price * 0.000001):
             return False, f"{ref.canonical_symbol} quote value mismatch"
         if obs.quality_status != "VALID":
             return False, f"{ref.canonical_symbol} quote quality {obs.quality_status}"
@@ -923,10 +829,22 @@ def build_action_brief(
     portfolio: PortfolioContext,
     verified_events: list[dict | PortfolioEventFact] | None = None,
     upcoming_events: list[dict | str] | None = None,
+    as_of: datetime | None = None,
 ) -> PortfolioActionBrief:
+    event_as_of = as_of or context.generated_at
     raw_events = verified_events if verified_events is not None else getattr(context, "event_facts", [])
+    suppressed_events = []
     events_by_id: dict[str, list[dict | PortfolioEventFact]] = {}
     for evt in raw_events:
+        eligibility = event_eligibility(evt, event_as_of)
+        if eligibility not in {"RECENT_MATERIAL", "CURRENT_CHECK", "UPCOMING", "FAILED", "UNCHECKED"}:
+            data = event_data(evt)
+            suppressed_events.append({"ticker": data.get("ticker"), "title": data.get("title"),
+                                      "published_at": data.get("source_published_at") or data.get("published_at"),
+                                      "reason": eligibility})
+            continue
+        if eligibility == "UPCOMING":
+            evt = evt.model_copy(update={"event_status": "EVENT_CHECKED_NO_MATERIAL_CHANGE"}) if isinstance(evt, PortfolioEventFact) else {**evt, "event_status": "EVENT_CHECKED_NO_MATERIAL_CHANGE", "material": False, "status": "NO_MATERIAL_CHANGE"}
         if isinstance(evt, PortfolioEventFact):
             keys = {evt.ticker.upper(), evt.instrument_id.upper()}
         else:
@@ -1001,6 +919,7 @@ def build_action_brief(
                 summary=summary,
                 next_step=next_step,
                 verified_event=verified_event,
+                asset_type=pos.asset_type,
             )
             data_issues.append(f"{pos.ticker}: quote unavailable or invalid")
             items.append(item)
@@ -1010,10 +929,10 @@ def build_action_brief(
         if abs(change_pct) >= 7.0:
             price_status = "PRICE_WATCH"
             price_reasons = ["LARGE_DAILY_MOVE"]
-            price_summary = "單日波動達監控門檻，需追蹤是否伴隨基本面事件。"
+            price_summary = f"{interval_label(obs.change_interval)}波動達監控門檻，需追蹤是否伴隨已驗證事件。"
             trigger = technical_trigger(
                 pos.ticker,
-                "previous regular close move",
+                interval_label(obs.change_interval) + "報價變化",
                 obs.previous_regular_close,
                 obs.market_date,
                 obs.quote_id,
@@ -1106,11 +1025,11 @@ def build_action_brief(
             if event_decision == "WATCH":
                 reasons = ["LARGE_DAILY_MOVE"] + event_reasons
                 summary = f"{price_summary} 且伴隨已驗證事件：{event_summary}"
-                next_step = "確認是否有財報、營運展望、產品或監管事件支持此次波動；目前不直接產生交易結論。"
+                next_step = asset_next_step(pos.asset_type)
             else:
                 reasons = ["LARGE_DAILY_MOVE"]
                 summary = price_summary
-                next_step = "確認是否有財報、營運展望、產品或監管事件支持此次波動；目前事件面尚未完成驗證，不直接產生交易結論。"
+                next_step = asset_next_step(pos.asset_type)
         elif event_decision == "WATCH":
             status = "WATCH"
             reasons = event_reasons
@@ -1145,34 +1064,19 @@ def build_action_brief(
             price_status=price_status,
             event_status=event_status,
             verified_event=evt_data,
+            asset_type=pos.asset_type,
+            change_interval=obs.change_interval,
         )
         items.append(item)
 
-    if upcoming_events is not None:
-        upcoming_events_list = list(upcoming_events)
-    else:
-        upcoming_events_list = []
-        portfolio_tickers = {p.ticker.upper() for p in portfolio.positions} | {p.instrument_id.upper() for p in portfolio.positions}
-        for evt in raw_events:
-            sym = (evt.ticker if isinstance(evt, PortfolioEventFact) else (evt.get("instrument_id") or evt.get("ticker") or "")).upper()
-            is_upcoming = getattr(evt, "is_upcoming", False) if isinstance(evt, PortfolioEventFact) else (
-                evt.get("is_upcoming", False)
-                or evt.get("event_type") in ("EARNINGS", "CALL", "CONFERENCE", "UPCOMING")
-                or "upcoming" in evt.get("category", "").lower()
-            )
-            if is_upcoming and (not sym or sym in portfolio_tickers):
-                if isinstance(evt, PortfolioEventFact):
-                    parts = [evt.ticker, evt.title or evt.event_type or "事件", evt.event_date or "", evt.summary or evt.impact or ""]
-                    upcoming_events_list.append("｜".join([p for p in parts if p]))
-                elif isinstance(evt, dict):
-                    t = evt.get("ticker") or sym
-                    e = evt.get("event") or evt.get("title") or evt.get("summary")
-                    d = evt.get("date") or evt.get("event_date") or evt.get("timing") or ""
-                    imp = evt.get("why") or evt.get("impact") or ""
-                    parts = [p for p in (t, e, d, imp) if p]
-                    upcoming_events_list.append("｜".join(parts) if parts else str(evt))
-                else:
-                    upcoming_events_list.append(str(evt))
+    upcoming_events_list = []
+    held_symbols = {p.ticker.upper() for p in portfolio.positions} | {p.instrument_id.upper() for p in portfolio.positions}
+    for evt in (upcoming_events if upcoming_events is not None else raw_events):
+        if isinstance(evt, str):
+            continue  # Unstructured calendar text cannot establish freshness/provenance.
+        data = event_data(evt)
+        if str(data.get("ticker") or data.get("instrument_id") or "").upper() in held_symbols and event_eligibility(data, event_as_of) == "UPCOMING":
+            upcoming_events_list.append(data)
 
     total_positions = len(portfolio.positions)
     covered_positions = len([i for i in items if i.price_status != "DATA_BLOCKED"])
@@ -1185,7 +1089,7 @@ def build_action_brief(
 
     return PortfolioActionBrief(
         run_id=context.run_id,
-        as_of=context.generated_at,
+        as_of=event_as_of,
         market_session=context.market_session,
         data_quality=[f"{k}: {v}" for k, v in context.data_quality.items()],
         action_queue=[i for i in items if i.status == "ACTION_REVIEW"],
@@ -1201,10 +1105,42 @@ def build_action_brief(
         event_check_failed_positions=event_failed,
         event_coverage_ratio=event_cov_ratio,
         event_facts=[e for e in raw_events if isinstance(e, PortfolioEventFact)],
+        suppressed_events=suppressed_events,
     )
 
 
+def consume_action_brief(brief: PortfolioActionBrief) -> PortfolioActionBrief:
+    """Apply the same date contract even to an older serialized Action Brief."""
+    actions, watches, normal = [], [], []
+    all_items = brief.action_queue + brief.watchlist + brief.no_material_change
+    for item in all_items:
+        spec = resolve_instrument(item.ticker)
+        asset = spec.asset_type if item.ticker.upper() in REGISTRY else item.asset_type
+        interval = "ROLLING_24H" if any(p in (item.quote_id or "") for p in ("coingecko_simple_price", "coinbase_exchange")) else item.change_interval
+        item = item.model_copy(update={"asset_type": asset, "change_interval": interval})
+        valid_event = item.verified_event and event_eligibility(item.verified_event, brief.as_of) == "RECENT_MATERIAL"
+        if item.event_status == "EVENT_MATERIAL_FOUND" and not valid_event:
+            if item.price_status != "PRICE_WATCH":
+                continue
+            item = item.model_copy(update={"status": "WATCH", "event_status": "EVENT_UNCHECKED", "verified_event": None,
+                                          "summary": f"{interval_label(interval)}波動達監控門檻。",
+                                          "next_step": asset_next_step(asset)})
+        if item.status == "ACTION_REVIEW":
+            actions.append(item)
+        elif item.status == "WATCH":
+            watches.append(item)
+        else:
+            normal.append(item)
+    facts = brief.event_facts or [i.verified_event for i in all_items if i.verified_event]
+    checked = {event_data(e).get("ticker") for e in facts if event_eligibility(e, brief.as_of) in {"RECENT_MATERIAL", "CURRENT_CHECK", "UPCOMING"}}
+    upcoming = [e for e in brief.upcoming_events if isinstance(e, dict) and event_eligibility(e, brief.as_of) == "UPCOMING"]
+    return brief.model_copy(update={"action_queue": actions, "watchlist": watches, "no_material_change": normal,
+                                    "upcoming_events": upcoming, "event_checked_positions": len(checked),
+                                    "events_verified": bool(brief.event_total_positions) and len(checked) == brief.event_total_positions})
+
+
 def render_action_brief(brief: PortfolioActionBrief) -> str:
+    brief = consume_action_brief(brief)
     tpe = ZoneInfo("Asia/Taipei")
     as_of_dt = brief.as_of.astimezone(tpe) if brief.as_of.tzinfo else brief.as_of
     as_of_str = as_of_dt.strftime("%Y-%m-%d %H:%M")
@@ -1212,6 +1148,7 @@ def render_action_brief(brief: PortfolioActionBrief) -> str:
     session_map = {
         "PREVIOUS_CLOSE": "前一交易日收盤資料",
         "REGULAR": "常規交易時段",
+        "PREMARKET": "盤前交易時段",
         "PRE_MARKET": "盤前交易時段",
         "POST_MARKET": "盤後交易時段",
         "AFTER_HOURS": "盤後交易時段",
@@ -1282,10 +1219,11 @@ def render_action_brief(brief: PortfolioActionBrief) -> str:
         for evt in brief.upcoming_events:
             if isinstance(evt, dict):
                 t = evt.get("ticker", "")
-                e = evt.get("event") or evt.get("title") or ""
+                display = event_display(evt, resolve_instrument(t).asset_type)
+                e = display["title"]
                 d = evt.get("date") or evt.get("event_date") or evt.get("timing") or ""
-                w = evt.get("why") or evt.get("impact") or ""
-                source = evt.get("source") or evt.get("source_name") or ""
+                w = display["fact"]
+                source = display["source"]
                 parts = [p for p in (t, e, d, w) if p]
                 line = "• " + "｜".join(parts)
                 if source:
@@ -1316,7 +1254,7 @@ def render_action_brief(brief: PortfolioActionBrief) -> str:
         lines += [
             "",
             "【資料說明】",
-            *[f"• {issue.replace('quote unavailable or invalid', '行情資料未取得或驗證未通過')}" for issue in brief.data_issues],
+            *[f"• {chinese_text(issue.replace('quote unavailable or invalid', '行情資料未取得或驗證未通過'), '部分事件資料未完成驗證。')}" for issue in brief.data_issues],
         ]
 
     return "\n".join(lines).strip()
@@ -1327,13 +1265,17 @@ def _render_watchlist_items(items: list[PortfolioActionItem]) -> list[str]:
     for item in items:
         parts = [item.ticker]
         if item.change_pct is not None:
-            parts.append(f"單日 {item.change_pct:+.1f}%")
+            parts.append(f"{interval_label(item.change_interval)} {item.change_pct:+.1f}%")
         if item.reference_price is not None:
-            parts.append(f"參考價 {item.reference_price:g}")
+            parts.append(f"參考價 {format_price(item.reference_price)}")
         title = "｜".join(parts)
         lines.append(f"• {title}")
-        lines.append(f"  原因：{item.summary}")
-        next_step = item.next_step or "確認是否有財報、營運展望、產品或監管事件支持此次波動；目前不直接產生交易結論。"
+        lines.append(f"  原因：{chinese_text(item.summary, '價格波動達監控門檻，需進一步核對事件。')}")
+        if item.verified_event and item.event_status == "EVENT_MATERIAL_FOUND":
+            display = event_display(item.verified_event, item.asset_type)
+            lines += [f"  事件：{display['date']}｜{display['title']}", f"  已驗證事件：{display['fact']}",
+                      f"  投資含義：{display['interpretation']}", f"  不確定性：{display['uncertainty']}", f"  來源：{display['source']}"]
+        next_step = asset_next_step(item.asset_type) if item.price_status == "PRICE_WATCH" else chinese_text(item.next_step, "持續核對公告後續發展，不直接推論價格方向。")
         lines.append(f"  下一步：{next_step}")
     return lines
 
@@ -1341,27 +1283,12 @@ def _render_watchlist_items(items: list[PortfolioActionItem]) -> list[str]:
 def _render_action_items(items: list[PortfolioActionItem]) -> list[str]:
     lines = []
     for item in items:
-        event_title = ""
+        display = event_display(item.verified_event, item.asset_type) if item.verified_event else None
+        lines.append(f"• {item.ticker}｜{display['date']}｜{display['title']}" if display else f"• {item.ticker}｜需要重新檢視")
         if item.verified_event:
-            if isinstance(item.verified_event, PortfolioEventFact):
-                event_title = item.verified_event.title or item.verified_event.event_type or ""
-            else:
-                event_title = item.verified_event.get("event") or item.verified_event.get("title") or ""
-        title = f"{item.ticker}｜{event_title}" if event_title else f"{item.ticker}｜觸發操作審查"
-        lines.append(f"• {title}")
-        if item.verified_event:
-            if isinstance(item.verified_event, PortfolioEventFact):
-                details = item.verified_event.summary or ""
-                impact = item.verified_event.impact or ""
-            else:
-                details = item.verified_event.get("details") or item.verified_event.get("summary") or ""
-                impact = item.verified_event.get("impact") or ""
-            if details:
-                lines.append(f"  已驗證事件：{details}")
-            if impact:
-                lines.append(f"  對原投資邏輯影響：{impact}")
-        lines.append(f"  原因：{item.summary}")
-        next_step = item.next_step or "重新檢視投資邏輯，而不是自動賣出。"
+            lines += [f"  已驗證事件：{display['fact']}", f"  投資含義：{display['interpretation']}",
+                      f"  不確定性：{display['uncertainty']}", f"  來源：{display['source']}"]
+        next_step = chinese_text(item.next_step, "重新檢視公告是否改變原本假設；目前不直接產生交易結論。")
         lines.append(f"  建議：{next_step}")
         lines.append("  說明：目前只建議重新檢視，不提供精確買賣股數，因可用現金／配置上限尚未完成驗證。")
     return lines
@@ -1376,6 +1303,8 @@ def validate_action_brief(brief: PortfolioActionBrief, context: MarketContext,
     held = {p.instrument_id: p.quantity for p in portfolio.positions}
     for group in (brief.action_queue, brief.watchlist, brief.no_material_change):
         for item in group:
+            if item.event_status == "EVENT_MATERIAL_FOUND" and (not item.verified_event or event_eligibility(item.verified_event, brief.as_of) != "RECENT_MATERIAL"):
+                return False, f"{item.instrument_id} actionable event lacks current publication evidence"
             if item.instrument_id not in held:
                 return False, f"unknown held instrument {item.instrument_id}"
             obs = context.quotes.get(item.instrument_id) or context.quotes.get(item.ticker)
@@ -1425,6 +1354,8 @@ def validate_action_brief(brief: PortfolioActionBrief, context: MarketContext,
         "QUOTE_UNAVAILABLE_OR_INVALID",
         "ACTION QUEUE",
         "WATCHLIST",
+        "ROLLING_24H",
+        "FULL",
         "NO MATERIAL CHANGE",
     ]
     for token in forbidden_tokens:

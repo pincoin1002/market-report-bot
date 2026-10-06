@@ -48,7 +48,7 @@ def _get_json(url: str, params: dict[str, str]) -> dict:
     response.raise_for_status()
     payload = response.json()
     if not isinstance(payload, dict) or payload.get("stat") != "OK":
-        raise ValueError("TWSE response is not an OK market session")
+        raise ValueError(f"TWSE {url.rsplit('/', 1)[-1]} response unavailable: {payload.get('stat') if isinstance(payload, dict) else 'invalid JSON'}")
     return payload
 
 
@@ -108,10 +108,18 @@ def _flow_rows(payload: dict) -> dict[str, float]:
     return rows
 
 
-def _institutional_flows(current: dict, previous: dict, session_date: str,
+def _institutional_flows(current: dict, previous: dict | None, session_date: str,
                          previous_date: str, retrieved_at: datetime) -> InstitutionalFlows:
     current_rows = _flow_rows(current)
-    previous_rows = _flow_rows(previous)
+    try:
+        previous_rows = _flow_rows(previous) if previous else {}
+        required = {"外資及陸資(不含外資自營商)", "投信", "自營商(自行買賣)", "自營商(避險)", "合計"}
+        if previous and not required.issubset(previous_rows):
+            raise ValueError("previous institutional fields incomplete")
+    except (ValueError, TypeError, KeyError):
+        previous = None
+        previous_rows = {}
+        log.warning("TWSE previous institutional comparison unavailable")
 
     def value(rows: dict[str, float], label: str) -> float:
         if label not in rows:
@@ -121,7 +129,7 @@ def _institutional_flows(current: dict, previous: dict, session_date: str,
     # BFI82U splits dealer proprietary and hedge trades.  The reported dealer
     # figure is their deterministic sum, consistent with TWSE's total row.
     def dealer(rows: dict[str, float]) -> float:
-        return round(value(rows, "自營商(自行買賣)") + value(rows, "自營商(避險)"), 2)
+        return round(rows["自營商(自行買賣)"] + rows["自營商(避險)"], 2)
 
     foreign_label = "外資及陸資(不含外資自營商)"
     return InstitutionalFlows(
@@ -129,10 +137,10 @@ def _institutional_flows(current: dict, previous: dict, session_date: str,
         investment_trust_buy_sell_ntd_billions=value(current_rows, "投信"),
         dealer_buy_sell_ntd_billions=dealer(current_rows),
         total_buy_sell_ntd_billions=value(current_rows, "合計"),
-        foreign_buy_sell_prev_ntd_billions=value(previous_rows, foreign_label),
-        investment_trust_buy_sell_prev_ntd_billions=value(previous_rows, "投信"),
-        dealer_buy_sell_prev_ntd_billions=dealer(previous_rows),
-        total_buy_sell_prev_ntd_billions=value(previous_rows, "合計"),
+        foreign_buy_sell_prev_ntd_billions=value(previous_rows, foreign_label) if previous else None,
+        investment_trust_buy_sell_prev_ntd_billions=value(previous_rows, "投信") if previous else None,
+        dealer_buy_sell_prev_ntd_billions=dealer(previous_rows) if previous else None,
+        total_buy_sell_prev_ntd_billions=value(previous_rows, "合計") if previous else None,
         session_date=session_date,
         previous_session_date=previous_date,
         source=INSTITUTIONAL_URL,
@@ -142,39 +150,47 @@ def _institutional_flows(current: dict, previous: dict, session_date: str,
 
 @dataclass(frozen=True)
 class TWSECloseEvidence:
-    taiex_summary: TaiexMarketSummary
-    institutional_flows: InstitutionalFlows
-    previous_turnover_ntd_billions: float
+    taiex_summary: TaiexMarketSummary | None
+    institutional_flows: InstitutionalFlows | None
+    previous_turnover_ntd_billions: float | None
 
 
 def fetch_twse_close_evidence(session_date: str, previous_session_date: str,
                               retrieved_at: datetime | None = None) -> TWSECloseEvidence | None:
     """Fetch and validate both current and prior completed TWSE sessions."""
     retrieved = retrieved_at or datetime.now(tz=timezone.utc)
+    def load(url, date, date_key, kind):
+        try:
+            payload = _get_json(url, {"response": "json", date_key: _twse_date(date), "type": kind})
+            if payload.get("date") != _twse_date(date):
+                raise ValueError("response date mismatch")
+            return payload
+        except Exception as exc:
+            log.warning("TWSE close module unavailable", extra={"endpoint": url.rsplit('/', 1)[-1],
+                        "session_date": date, "retrieved_at": retrieved.isoformat(), "reason": str(exc)})
+            return None
+    current_market = load(MI_INDEX_URL, session_date, "date", "ALL")
+    previous_market = load(MI_INDEX_URL, previous_session_date, "date", "ALL")
+    current_flows = load(INSTITUTIONAL_URL, session_date, "dayDate", "day")
+    previous_flows = load(INSTITUTIONAL_URL, previous_session_date, "dayDate", "day")
+    summary = previous_summary = flows = None
     try:
-        current_market = _get_json(MI_INDEX_URL, {"response": "json", "date": _twse_date(session_date), "type": "ALL"})
-        previous_market = _get_json(MI_INDEX_URL, {"response": "json", "date": _twse_date(previous_session_date), "type": "ALL"})
-        current_flows = _get_json(INSTITUTIONAL_URL, {"response": "json", "dayDate": _twse_date(session_date), "type": "day"})
-        previous_flows = _get_json(INSTITUTIONAL_URL, {"response": "json", "dayDate": _twse_date(previous_session_date), "type": "day"})
-        if current_market.get("date") != _twse_date(session_date):
-            raise ValueError("TWSE current market response date mismatch")
-        if previous_market.get("date") != _twse_date(previous_session_date):
-            raise ValueError("TWSE previous market response date mismatch")
-        if current_flows.get("date") != _twse_date(session_date):
-            raise ValueError("TWSE current flow response date mismatch")
-        if previous_flows.get("date") != _twse_date(previous_session_date):
-            raise ValueError("TWSE previous flow response date mismatch")
-        current_summary = _market_summary(current_market, session_date, previous_session_date, retrieved)
-        previous_summary = _market_summary(previous_market, previous_session_date, "", retrieved)
-        summary = current_summary.model_copy(update={
-            "advancing_prev": previous_summary.advancing,
-            "declining_prev": previous_summary.declining,
-            "unchanged_prev": previous_summary.unchanged,
-        })
-        flows = _institutional_flows(current_flows, previous_flows, session_date, previous_session_date, retrieved)
-        return TWSECloseEvidence(summary, flows, previous_summary.turnover_ntd_billions or 0.0)
-    except Exception as exc:
-        # Never emit raw provider payloads; they are unnecessary for operators
-        # and can be large.  The report remains explicit that the module is absent.
-        log.warning("TWSE close evidence unavailable", extra={"reason": str(exc)})
-        return None
+        previous_summary = _market_summary(previous_market, previous_session_date, "", retrieved) if previous_market else None
+    except (ValueError, KeyError, TypeError) as exc:
+        log.warning("TWSE previous summary parser rejected", extra={"reason": str(exc)})
+    try:
+        if current_market:
+            summary = _market_summary(current_market, session_date, previous_session_date, retrieved)
+            if previous_summary:
+                summary = summary.model_copy(update={"advancing_prev": previous_summary.advancing,
+                    "declining_prev": previous_summary.declining, "unchanged_prev": previous_summary.unchanged,
+                    "previous_change_pct": previous_summary.change_pct,
+                    "turnover_prev_ntd_billions": previous_summary.turnover_ntd_billions})
+    except (ValueError, KeyError, TypeError) as exc:
+        log.warning("TWSE current summary parser rejected", extra={"reason": str(exc)})
+    try:
+        if current_flows:
+            flows = _institutional_flows(current_flows, previous_flows, session_date, previous_session_date, retrieved)
+    except (ValueError, KeyError, TypeError) as exc:
+        log.warning("TWSE institutional parser rejected", extra={"reason": str(exc)})
+    return TWSECloseEvidence(summary, flows, previous_summary.turnover_ntd_billions if previous_summary else None) if summary or flows else None

@@ -205,7 +205,7 @@ class ReportStructuralValidationTest(unittest.TestCase):
         self.assertNotIn("1,485", rendered)
 
         # 3. Test that injecting 1485 fails closed
-        corrupted_report = rendered.replace("4,500.00", "1,485.00")
+        corrupted_report = rendered.replace("4,500", "1,485")
         ok, errors = validate_numeric_provenance(corrupted_report, context)
         self.assertFalse(ok)
         self.assertTrue(any("1485" in e for e in errors))

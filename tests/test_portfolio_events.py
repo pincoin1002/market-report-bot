@@ -117,7 +117,7 @@ class PortfolioEventMonitoringSuiteTest(unittest.TestCase):
             ),
             quote_observations=self.quotes,
         )
-        self.context = build_market_context(self.snapshot, "tw_close", run_id="test_run")
+        self.context = build_market_context(self.snapshot, "tw_close", run_id="test_run", now=self.snapshot.generated_at)
 
     def test_01_production_run_portfolio_advice_passes_real_event_evidence(self):
         with tempfile.TemporaryDirectory() as td:
@@ -125,7 +125,7 @@ class PortfolioEventMonitoringSuiteTest(unittest.TestCase):
                 PortfolioEventFact(
                     instrument_id="NVDA",
                     ticker="NVDA",
-                    checked_at=datetime.now(tz=timezone.utc),
+                    checked_at=self.context.generated_at,
                     event_status="EVENT_CHECKED_NO_MATERIAL_CHANGE",
                     summary="未發現重大異常",
                 )
@@ -160,7 +160,7 @@ class PortfolioEventMonitoringSuiteTest(unittest.TestCase):
         fact = PortfolioEventFact(
             instrument_id="2330",
             ticker="2330",
-            checked_at=datetime.now(tz=timezone.utc),
+            checked_at=self.context.generated_at,
             event_status="EVENT_CHECKED_NO_MATERIAL_CHANGE",
             summary="法說會前無重大異常",
         )
@@ -178,7 +178,7 @@ class PortfolioEventMonitoringSuiteTest(unittest.TestCase):
             PortfolioEventFact(
                 instrument_id=p.instrument_id,
                 ticker=p.ticker,
-                checked_at=datetime.now(tz=timezone.utc),
+                checked_at=self.context.generated_at,
                 event_status="EVENT_CHECKED_NO_MATERIAL_CHANGE",
             )
             for p in self.portfolio.positions[:-1]
@@ -196,7 +196,7 @@ class PortfolioEventMonitoringSuiteTest(unittest.TestCase):
             PortfolioEventFact(
                 instrument_id=p.instrument_id,
                 ticker=p.ticker,
-                checked_at=datetime.now(tz=timezone.utc),
+                checked_at=self.context.generated_at,
                 event_status="EVENT_CHECKED_NO_MATERIAL_CHANGE",
             )
             for p in self.portfolio.positions
@@ -214,7 +214,7 @@ class PortfolioEventMonitoringSuiteTest(unittest.TestCase):
         failed_fact = PortfolioEventFact(
             instrument_id="NVDA",
             ticker="NVDA",
-            checked_at=datetime.now(tz=timezone.utc),
+            checked_at=self.context.generated_at,
             event_status="EVENT_CHECK_FAILED",
             summary="新聞搜尋連線失敗，本次事件未完成驗證。",
         )
@@ -233,10 +233,14 @@ class PortfolioEventMonitoringSuiteTest(unittest.TestCase):
         event = PortfolioEventFact(
             instrument_id="AMZN",
             ticker="AMZN",
-            checked_at=datetime.now(tz=timezone.utc),
+            checked_at=self.context.generated_at,
             event_status="EVENT_MATERIAL_FOUND",
             event_type="GUIDANCE_CUT",
             title="AWS 展望下修",
+            source_url="https://example.com/amazon-announcement",
+            source_name="Amazon 投資人關係網站",
+            source_published_at=self.context.generated_at,
+            publication_date_verified=True,
             summary="公司大幅下修下一季度 AWS 營收增長指引至 8%",
             impact="影響中長期估值假設",
             severity="HIGH",
@@ -249,7 +253,7 @@ class PortfolioEventMonitoringSuiteTest(unittest.TestCase):
         self.assertEqual(item.event_status, "EVENT_MATERIAL_FOUND")
         rendered = render_action_brief(brief)
         self.assertIn("【值得重新檢視】", rendered)
-        self.assertIn("AMZN｜AWS 展望下修", rendered)
+        self.assertIn("AMZN｜2026-09-29｜AWS 展望下修", rendered)
 
     def test_08_at_or_above_7pct_price_plus_no_verified_event_produces_price_watch_with_event_uncertainty(self):
         quotes = dict(self.quotes)
@@ -269,22 +273,30 @@ class PortfolioEventMonitoringSuiteTest(unittest.TestCase):
         rendered = render_action_brief(brief)
         self.assertIn("【需要關注】", rendered)
         self.assertIn("TSLA｜單日 +8.0%", rendered)
-        self.assertIn("目前事件面尚未完成驗證，不直接產生交易結論。", rendered)
+        self.assertIn("在事件完成驗證前，不直接產生交易結論。", rendered)
 
     def test_09_upcoming_earnings_event_renders_naturally(self):
         upcoming = [
             {
                 "ticker": "NVDA",
                 "event": "美股盤後財報",
-                "date": "10/25",
-                "why": "Data Center 成長、毛利率與下一季 guidance",
-                "source": "NVIDIA IR",
+                "title": "美股盤後財報",
+                "date": "2026-10-03",
+                "event_date": "2026-10-03",
+                "is_upcoming": True,
+                "event_status": "EVENT_CHECKED_NO_MATERIAL_CHANGE",
+                "checked_at": self.context.generated_at,
+                "source_published_at": self.context.generated_at,
+                "publication_date_verified": True,
+                "summary": "重點看資料中心成長、毛利率與下一季營運展望",
+                "source_name": "NVIDIA 投資人關係網站",
+                "source_url": "https://investor.nvidia.com/calendar",
             }
         ]
         brief = build_action_brief(self.context, self.portfolio, upcoming_events=upcoming)
         rendered = render_action_brief(brief)
         self.assertIn("【近期事件】", rendered)
-        self.assertIn("NVDA｜美股盤後財報｜10/25｜Data Center 成長、毛利率與下一季 guidance（來源：NVIDIA IR）", rendered)
+        self.assertIn("NVDA｜美股盤後財報｜2026-10-03｜重點看資料中心成長、毛利率與下一季營運展望", rendered)
 
     def test_10_upcoming_event_requires_provenance(self):
         upcoming = [
@@ -297,26 +309,26 @@ class PortfolioEventMonitoringSuiteTest(unittest.TestCase):
             }
         ]
         brief = build_action_brief(self.context, self.portfolio, upcoming_events=upcoming)
-        self.assertTrue(bool(brief.upcoming_events))
-        evt = brief.upcoming_events[0]
-        self.assertIsInstance(evt, dict)
-        self.assertEqual(evt.get("source"), "Company IR")
+        self.assertFalse(brief.upcoming_events)
 
     def test_11_no_raw_event_enums_leak_to_telegram(self):
         facts = [
             PortfolioEventFact(
                 instrument_id="NVDA",
                 ticker="NVDA",
-                checked_at=datetime.now(tz=timezone.utc),
+                checked_at=self.context.generated_at,
                 event_status="EVENT_CHECK_FAILED",
                 summary="搜尋連線中斷",
             ),
             PortfolioEventFact(
                 instrument_id="AMZN",
                 ticker="AMZN",
-                checked_at=datetime.now(tz=timezone.utc),
+                checked_at=self.context.generated_at,
                 event_status="EVENT_MATERIAL_FOUND",
                 title="收購要約",
+                source_url="https://example.com/amazon-announcement",
+                source_published_at=self.context.generated_at,
+                publication_date_verified=True,
                 summary="公司宣布重要併購",
                 severity="HIGH",
             ),
@@ -406,7 +418,7 @@ class PortfolioEventMonitoringSuiteTest(unittest.TestCase):
             PortfolioEventFact(
                 instrument_id=p.instrument_id,
                 ticker=p.ticker,
-                checked_at=datetime.now(tz=timezone.utc),
+                checked_at=self.context.generated_at,
                 event_status="EVENT_CHECKED_NO_MATERIAL_CHANGE",
             )
             for p in self.portfolio.positions[:10]
@@ -497,7 +509,7 @@ class PortfolioEventMonitoringSuiteTest(unittest.TestCase):
             report_type="tw_close",
             quote_observations=quotes,
         )
-        ctx = build_market_context(snap, "tw_close", run_id="event_without_quote")
+        ctx = build_market_context(snap, "tw_close", run_id="event_without_quote", now=snap.generated_at)
         event = PortfolioEventFact(
             instrument_id="AMZN",
             ticker="AMZN",
@@ -505,6 +517,8 @@ class PortfolioEventMonitoringSuiteTest(unittest.TestCase):
             event_status="EVENT_MATERIAL_FOUND",
             event_type="GUIDANCE",
             title="AWS guidance cut",
+            source_published_at=ctx.generated_at,
+            publication_date_verified=True,
             summary="Verified guidance change.",
             severity="HIGH",
             source_name="Amazon IR",
@@ -571,10 +585,12 @@ class PortfolioEventMonitoringSuiteTest(unittest.TestCase):
         event = PortfolioEventFact(
             instrument_id="AMZN",
             ticker="AMZN",
-            checked_at=datetime(2026, 10, 5, 2, 0, tzinfo=timezone.utc),
+            checked_at=self.context.generated_at,
             event_status="EVENT_MATERIAL_FOUND",
             event_type="REGULATORY",
             title="Regulatory development",
+            source_published_at=self.context.generated_at,
+            publication_date_verified=True,
             summary="Verified event requiring monitoring.",
             severity="MEDIUM",
             source_name="Regulator",

@@ -7,7 +7,7 @@ pydantic v2. These models ARE the schema of data/*.json — change them here onl
 from datetime import datetime, timezone
 from typing import Literal
 
-from pydantic import BaseModel, Field, computed_field, field_validator
+from pydantic import BaseModel, Field, computed_field, field_validator, model_validator
 
 ReportType = Literal["tw_open", "tw_close", "us_open", "us_close"]
 Session = Literal["PREMARKET", "REGULAR", "AFTER_HOURS", "PREVIOUS_CLOSE", "CLOSED_REFERENCE"]
@@ -90,9 +90,19 @@ class QuoteObservation(BaseModel):
     quality_status: QualityStatus
     previous_regular_close: float = Field(gt=0)
     change_pct: float
+    change_interval: Literal["PREVIOUS_CLOSE", "ROLLING_24H", "SESSION_TO_SESSION", "UNKNOWN"] = "PREVIOUS_CLOSE"
     quality_notes: list[str] = Field(default_factory=list)
     corporate_action_note: str | None = None
     market: str = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _legacy_interval(cls, values):
+        if isinstance(values, dict) and "change_interval" not in values:
+            values = dict(values)
+            if values.get("provider") in {"coingecko_simple_price", "coinbase_exchange"}:
+                values["change_interval"] = "ROLLING_24H"
+        return values
 
     @property
     def trading_date(self) -> str:
@@ -123,6 +133,8 @@ class TaiexMarketSummary(BaseModel):
     previous_session_date: str | None = None
     source: str | None = None
     retrieved_at: datetime | None = None
+    previous_change_pct: float | None = None
+    turnover_prev_ntd_billions: float | None = None
 
     @computed_field
     @property
@@ -419,6 +431,13 @@ class PortfolioEventFact(BaseModel):
     is_upcoming: bool = False
     checked_window_start: datetime | None = None
     checked_window_end: datetime | None = None
+    source_published_at: datetime | None = None
+    publication_date_verified: bool = False
+    display_title_zh: str = ""
+    raw_source_title: str = ""
+    fact_summary: str = ""
+    investment_interpretation: str = ""
+    uncertainty_note: str = ""
 
 
 class PortfolioActionItem(BaseModel):
@@ -437,6 +456,8 @@ class PortfolioActionItem(BaseModel):
     price_status: str = "PRICE_NORMAL"
     event_status: str = "EVENT_UNCHECKED"
     verified_event: dict | PortfolioEventFact | None = None
+    asset_type: str = "EQUITY"
+    change_interval: Literal["PREVIOUS_CLOSE", "ROLLING_24H", "SESSION_TO_SESSION", "UNKNOWN"] = "PREVIOUS_CLOSE"
 
 
 class PortfolioActionBrief(BaseModel):
@@ -457,6 +478,7 @@ class PortfolioActionBrief(BaseModel):
     event_check_failed_positions: int = 0
     event_coverage_ratio: float = 0.0
     event_facts: list[PortfolioEventFact] = Field(default_factory=list)
+    suppressed_events: list[dict] = Field(default_factory=list)
 
 
 class StructureCheck(BaseModel):

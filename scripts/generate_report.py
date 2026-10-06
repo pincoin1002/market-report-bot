@@ -886,6 +886,7 @@ def run_portfolio_advice(report: str, report_type: str,
         portfolio_context,
         verified_events=event_facts,
         upcoming_events=upcoming_events,
+        as_of=datetime.now(tz=timezone.utc),
     )
     ok, reason = validate_action_brief(brief, context, portfolio_context)
     if not ok:

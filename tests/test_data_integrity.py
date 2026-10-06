@@ -745,7 +745,7 @@ class StructuredReportTest(unittest.TestCase):
     def test_structured_report_round_trip_render(self):
         context = self._context()
         draft = build_public_draft(context)
-        self.assertIn("Executive Market State", draft.rendered_markdown)
+        self.assertIn("市場核心概況", draft.rendered_markdown)
         ok, reason = validate_public_draft(draft, context)
         self.assertTrue(ok, reason)
 
@@ -764,7 +764,8 @@ class StructuredReportTest(unittest.TestCase):
         )
         context = build_market_context(snapshot, "tw_close", run_id="portfolio-coverage")
         rendered = build_public_draft(context).rendered_markdown
-        self.assertIn("23/23", rendered)
+        self.assertNotIn("23/23", rendered)
+        self.assertNotIn("持股資料狀態", rendered)
         ok, errors = validate_numeric_provenance(rendered, context)
         self.assertTrue(ok, errors)
 
@@ -811,12 +812,7 @@ class StructuredReportTest(unittest.TestCase):
         self.assertTrue(any("未推定單一因果" in line for line in draft.drivers))
         self.assertTrue(any("逆勢上漲，部分抵銷權值跌勢" in line for line in draft.drivers))
         self.assertFalse(any("同步上漲，與加權指數表現一致" in line for line in draft.drivers))
-        self.assertTrue(any("TAIEX session-over-session" in line for line in draft.material_changes))
-        self.assertTrue(any("成交金額：UNRESOLVED" in line for line in draft.material_changes))
-        self.assertTrue(any("市場廣度：UNRESOLVED" in line for line in draft.material_changes))
-        self.assertTrue(any("三大法人：UNRESOLVED" in line for line in draft.material_changes))
-        self.assertTrue(any("Portfolio coverage change：UNRESOLVED" in line for line in draft.material_changes))
-        self.assertTrue(any("Portfolio relative performance：UNRESOLVED" in line for line in draft.material_changes))
+        self.assertEqual(draft.material_changes, [])  # no validated previous-period structure
         self.assertNotIn("因為", draft.rendered_markdown)
         ok, reason = validate_public_draft(draft, context)
         self.assertTrue(ok, reason)
@@ -854,7 +850,8 @@ class StructuredReportTest(unittest.TestCase):
         context = build_market_context(snapshot, "tw_close", run_id="tw-degraded-public")
         draft = build_public_draft(context)
         self.assertTrue(validate_public_draft(draft, context)[0])
-        self.assertIn("操作建議暫停", draft.rendered_markdown)
+        self.assertNotIn("操作建議暫停", draft.rendered_markdown)
+        self.assertNotIn("持股", draft.rendered_markdown)
 
 
 class StructuredBriefTest(unittest.TestCase):

@@ -214,6 +214,11 @@ def validate_numeric_provenance(report_text: str, context: MarketContext) -> tup
                 f"{obs.price:.2f}",
             ]
             price_variants = [v for v in price_variants if v]
+            from investment_language import format_price
+            if obs.price < 0.01:
+                price_variants = [format_price(obs.price), f"{obs.price:g}"]
+            else:
+                price_variants.append(format_price(obs.price))
             if not any(re.search(rf"(?<![\d.]){re.escape(v)}(?![\d.])", price_cell) for v in price_variants):
                 errors.append(f"Price for {symbol} ({obs.price}) not found matching in rendered line: '{line}'")
 
@@ -250,6 +255,12 @@ def validate_numeric_provenance(report_text: str, context: MarketContext) -> tup
                 allowed_numbers.add(round(float(val), 2))
                 allowed_numbers.add(round(abs(float(val)), 2))
                 allowed_numbers.add(float(int(abs(val))))
+        for val in (getattr(ts, "previous_change_pct", None), getattr(ts, "turnover_prev_ntd_billions", None)):
+            if val is not None:
+                allowed_numbers.add(round(abs(float(val)), 2))
+        previous_turnover = getattr(ts, "turnover_prev_ntd_billions", None)
+        if previous_turnover is not None and ts.turnover_ntd_billions is not None:
+            allowed_numbers.add(round(abs(ts.turnover_ntd_billions - previous_turnover), 2))
         # Intraday range & retracement tenths
         if ts.high and ts.low and ts.high > ts.low:
             rng = round(ts.high - ts.low, 2)
@@ -298,6 +309,8 @@ def validate_numeric_provenance(report_text: str, context: MarketContext) -> tup
     net = (ts_breadth.advancing - ts_breadth.declining) if ts_breadth and ts_breadth.advancing is not None and ts_breadth.declining is not None else None
     previous_net = (ts_breadth.advancing_prev - ts_breadth.declining_prev) if ts_breadth and ts_breadth.advancing_prev is not None and ts_breadth.declining_prev is not None else None
     net_delta = net - previous_net if net is not None and previous_net is not None else None
+    if previous_net is not None:
+        allowed_numbers.add(float(abs(previous_net)))
     if net is not None:
         # Narrative number extraction ignores a leading minus sign, so allow
         # both signed and absolute representations for deterministic breadth math.
@@ -322,12 +335,18 @@ def validate_numeric_provenance(report_text: str, context: MarketContext) -> tup
                 ("上漲", re.search(r"上漲\s*([+-]?\d[\d,]*)\s*家", line_s), ts.advancing if ts else None),
                 ("下跌", re.search(r"下跌\s*([+-]?\d[\d,]*)\s*家", line_s), ts.declining if ts else None),
                 ("持平", re.search(r"持平\s*([+-]?\d[\d,]*)\s*家", line_s), ts.unchanged if ts else None),
-                ("淨廣度", re.search(r"淨廣度\s*([+-]?\d[\d,]*)\s*家", line_s), net),
+                ("前日淨廣度", re.search(r"前日淨廣度\s*([+-]?\d[\d,]*)\s*家", line_s), previous_net),
+                ("淨廣度", re.search(r"(?<!前日)淨廣度\s*([+-]?\d[\d,]*)\s*家", line_s), net),
                 ("淨廣度變化", re.search(r"較前一(?:交易日|session)\s*([+-]?\d[\d,]*)\s*家", line_s), net_delta),
             ):
                 if observed and (expected is None or int(observed.group(1).replace(",", "")) != expected):
                     errors.append(f"{label} deterministic provenance mismatch: expected {expected}, rendered {observed.group(1)}")
-        if line_s.startswith("## ") and any(k in line_s for k in ("Top Market Drivers", "今日走勢", "Rotation", "輪動", "Events", "事件", "今日關鍵驅動", "相較昨日", "相較前一交易日", "明日觀察")):
+        if "指數報酬" in line_s:
+            match = re.search(r"前日\s*([+-]?[\d.]+)%\s*→\s*今日\s*([+-]?[\d.]+)%", line_s)
+            ts = context.taiex_summary
+            if not match or not ts or getattr(ts, "previous_change_pct", None) is None or abs(float(match.group(1)) - ts.previous_change_pct) > 0.005 or abs(float(match.group(2)) - ts.change_pct) > 0.005:
+                errors.append("index-return comparison deterministic provenance mismatch")
+        if line_s.startswith("## ") and any(k in line_s for k in ("Top Market Drivers", "今日走勢", "今天盤面重點", "Rotation", "輪動", "Events", "事件", "今日關鍵驅動", "相較昨日", "相較前一交易日", "相較上一交易日", "後續觀察重點", "明日觀察")):
             in_narrative = True
             continue
         elif line_s.startswith("## ") and any(k in line_s for k in ("Executive Market State", "市場核心概況", "What Changed", "今日市場", "法人與資金", "權值與族群", "持股資料狀態", "【市場】", "【我的持股】")):
@@ -347,6 +366,14 @@ def validate_numeric_provenance(report_text: str, context: MarketContext) -> tup
                     errors.append(f"Ungrounded numeric claim '{raw_num}' in narrative without structured data provenance: '{line_s}'")
 
 
+    index = context.quotes.get("TAIEX")
+    if index and index.quality_status == "VALID":
+        for line in report_text.splitlines():
+            if re.search(r"與加權指數[^。；]*一致", line):
+                if index.change_pct > 0 and re.search(r"同步走弱|同步下跌|大型權值.*跌勢", line):
+                    errors.append("directional contradiction: falling components claimed consistent with rising TAIEX")
+                if index.change_pct < 0 and re.search(r"同步上漲|同步走強", line):
+                    errors.append("directional contradiction: rising components claimed consistent with falling TAIEX")
     return len(errors) == 0, errors
 
 

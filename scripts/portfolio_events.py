@@ -107,7 +107,7 @@ def is_entry_fresh(
     except Exception:
         return False
 
-    if now - checked_at >= timedelta(hours=ttl_hours):
+    if not timedelta(0) <= now - checked_at < timedelta(hours=ttl_hours):
         return False
 
     # If there's an upcoming event within 48 hours, refresh to check if it concluded
@@ -153,14 +153,19 @@ Rules:
     "ticker": "NVDA",
     "event_status": "EVENT_CHECKED_NO_MATERIAL_CHANGE" or "EVENT_MATERIAL_FOUND",
     "event_type": "EARNINGS" or "GUIDANCE" or "M&A" or "MANAGEMENT" or "REGULATORY" or "PRODUCT" or "NONE",
-    "title": "Short title in Traditional Chinese or English",
+    "title": "Short display title in Traditional Chinese",
+    "raw_source_title": "Exact original article title for source verification",
+    "display_title_zh": "Traditional Chinese event title",
     "event_date": "YYYY-MM-DD",
     "published_at": "ISO-8601 publication/filing timestamp for recent events, or null for upcoming-only calendar events",
-    "summary": "Concise factual summary (1-2 sentences)",
-    "impact": "Brief impact on investment thesis",
+    "summary": "Traditional Chinese factual summary, only sourced facts",
+    "fact_summary": "Traditional Chinese factual summary, distinct from interpretation",
+    "investment_interpretation": "Traditional Chinese investment interpretation explicitly framed as inference",
+    "uncertainty_note": "Traditional Chinese uncertainty; authorization is not execution and does not guarantee a price rise",
+    "impact": "Traditional Chinese interpretation, not a verified fact",
     "severity": "LOW" or "MEDIUM" or "HIGH",
     "source_name": "Official IR / Bloomberg / SEC / etc.",
-    "source_url": "URL if available",
+    "source_url": "Direct event article URL, never a search redirect or generic homepage",
     "source_type": "OFFICIAL_FILING" or "PRIMARY_NEWS" or "SEARCH_GROUNDED",
     "is_upcoming": false
   }}
@@ -195,7 +200,7 @@ def _claim_within_requested_window(result: dict[str, Any], now: datetime) -> boo
     if result.get("event_status") != "EVENT_MATERIAL_FOUND":
         return True
 
-    evidence_time = published_at or event_date
+    evidence_time = _parse_event_datetime(result.get("source_published_at")) or published_at or event_date
     if evidence_time is None:
         return False
     age = now.astimezone(timezone.utc) - evidence_time
@@ -265,7 +270,9 @@ def _query_gemini_search(
             raise EventSearchError("INVALID_JSON") from None
     if not isinstance(parsed, list):
         raise EventSearchError("NON_ARRAY_RESPONSE")
-    return parsed
+    from event_source_evidence import verify_event_publication
+    return [verify_event_publication(item) if item.get("event_status") == "EVENT_MATERIAL_FOUND" or item.get("is_upcoming")
+            else item for item in parsed]
 
 
 def _safe_query_once(
@@ -388,23 +395,11 @@ def fetch_portfolio_events(
             # Cache hit: reconstruct facts
             entry_facts = entry.get("facts", [])
             for f in entry_facts:
-                fact_obj = PortfolioEventFact(
-                    instrument_id=pos.instrument_id,
-                    ticker=ticker,
-                    checked_at=datetime.fromisoformat(f.get("checked_at", current_time.isoformat())),
-                    event_status=f.get("event_status", "EVENT_CHECKED_NO_MATERIAL_CHANGE"),
-                    event_type=f.get("event_type"),
-                    title=f.get("title"),
-                    event_date=f.get("event_date"),
-                    published_at=_parse_event_datetime(f.get("published_at")),
-                    summary=f.get("summary", ""),
-                    impact=f.get("impact", ""),
-                    severity=f.get("severity", "LOW"),
-                    source_name=f.get("source_name", "CACHE"),
-                    source_url=f.get("source_url", ""),
-                    source_type=f.get("source_type", "SEARCH_GROUNDED"),
-                    is_upcoming=f.get("is_upcoming", False),
-                )
+                fact_obj = PortfolioEventFact.model_validate({
+                    **f, "instrument_id": pos.instrument_id, "ticker": ticker,
+                    "checked_at": f.get("checked_at") or entry.get("checked_at"),
+                    "event_status": f.get("event_status", "EVENT_UNCHECKED"),
+                })
                 all_facts.append(fact_obj)
             for up in entry.get("upcoming", []):
                 upcoming_events.append(up)
@@ -504,7 +499,7 @@ def fetch_portfolio_events(
                         invalid_provenance = any(
                             (
                                 (r.get("event_status") == "EVENT_MATERIAL_FOUND" or r.get("is_upcoming"))
-                                and (not r.get("source_name") or not r.get("source_url"))
+                                and (not r.get("source_name") or not r.get("source_url") or not r.get("publication_date_verified"))
                             )
                             for r in t_results
                         )
@@ -515,7 +510,7 @@ def fetch_portfolio_events(
                         )
                         if invalid_provenance or invalid_window:
                             reason = (
-                                "搜尋結果缺少可驗證來源，本次事件未完成驗證。"
+                                "搜尋結果缺少可驗證來源或原始發布日期，本次事件未完成驗證。"
                                 if invalid_provenance
                                 else "搜尋結果超出事件監控時間窗或缺少日期證據，本次事件未完成驗證。"
                             )
@@ -556,6 +551,15 @@ def fetch_portfolio_events(
                                 title=res.get("title"),
                                 event_date=res.get("event_date"),
                                 published_at=_parse_event_datetime(res.get("published_at")),
+                                source_published_at=_parse_event_datetime(res.get("source_published_at")),
+                                publication_date_verified=res.get("publication_date_verified", False),
+                                display_title_zh=res.get("display_title_zh", ""),
+                                raw_source_title=res.get("raw_source_title", ""),
+                                fact_summary=res.get("fact_summary", ""),
+                                investment_interpretation=res.get("investment_interpretation", ""),
+                                uncertainty_note=res.get("uncertainty_note", ""),
+                                checked_window_start=current_time - timedelta(hours=48),
+                                checked_window_end=current_time,
                                 summary=res.get("summary", ""),
                                 impact=res.get("impact", ""),
                                 severity=res.get("severity", "LOW"),
@@ -570,6 +574,7 @@ def fetch_portfolio_events(
 
                             if is_up:
                                 up_entry = {
+                                    **fact_obj.model_dump(mode="json"),
                                     "ticker": ticker,
                                     "event": res.get("title") or res.get("event_type") or "公司日程",
                                     "date": res.get("event_date") or "",
