@@ -281,4 +281,4 @@ jobs:
 
       - name: Report terminal result
         if: always()
-        run: python scripts/print_report_result.py tw_open
+        run: python scripts/print_report_result.py tw_open "${{ steps.fetch.outputs.terminal_state }}"

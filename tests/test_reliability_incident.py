@@ -17,6 +17,7 @@ from dry_run_v2 import _snapshot, run_one
 from generate_report import (deliver_validated_report, generate_report, send_advice_telegram,
                              send_telegram, telegram_destination_fingerprint)
 from market_context import build_market_context
+from print_report_result import result_line
 from send_operational_alert import validation_alert
 from structured_reports import build_public_draft
 from validate_report import (validate_numeric_provenance, validate_render_matches_draft,
@@ -109,6 +110,14 @@ class ReliabilityIncidentTest(unittest.TestCase):
             self.assertIn("GOOG / GOOGL", validation_alert("us_open", path))
             path.write_text('{"numeric_provenance":{"errors":["淨廣度 -267 ungrounded"]}}', encoding="utf-8")
             self.assertIn("市場廣度衍生數值", validation_alert("tw_close", path))
+
+    def test_terminal_result_reports_fetch_contract_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tw_line = result_line("tw_open", Path(tmp), "TW_OPEN_INTENT_EXPIRED")
+            us_line = result_line("us_open", Path(tmp), "INTENT_PENDING")
+        self.assertIn("terminal_state=TW_OPEN_INTENT_EXPIRED", tw_line)
+        self.assertIn("reason=INTENT_PENDING", us_line)
+        self.assertNotIn("market_date=unknown", tw_line + us_line)
 
 
 if __name__ == "__main__":

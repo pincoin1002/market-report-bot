@@ -209,6 +209,10 @@ jobs:
             echo "intent_unavailable=true" >> $GITHUB_OUTPUT
             echo "terminal_state=INTENT_EXPIRED" >> $GITHUB_OUTPUT
             exit 0
+          elif [ $EXIT_CODE -eq 7 ]; then
+            echo "intent_unavailable=true" >> $GITHUB_OUTPUT
+            echo "terminal_state=INTENT_PENDING" >> $GITHUB_OUTPUT
+            exit 0
           elif [ $EXIT_CODE -eq 3 ]; then
             echo "market_closed=true" >> $GITHUB_OUTPUT
             echo "terminal_state=MARKET_CLOSED" >> $GITHUB_OUTPUT
@@ -241,7 +245,7 @@ jobs:
           git push || true
 
       - name: Fail unavailable US Open intent
-        if: always() && steps.fetch.outputs.terminal_state == 'INTENT_EXPIRED'
+        if: always() && (steps.fetch.outputs.terminal_state == 'INTENT_EXPIRED' || steps.fetch.outputs.terminal_state == 'INTENT_PENDING')
         run: exit 1
 
       - name: Generate US Open Report
@@ -414,4 +418,4 @@ jobs:
 
       - name: Report terminal result
         if: always()
-        run: python scripts/print_report_result.py us_open
+        run: python scripts/print_report_result.py us_open "${{ steps.fetch.outputs.terminal_state }}"

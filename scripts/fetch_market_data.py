@@ -439,7 +439,7 @@ def main() -> None:
             })
             _set_github_output("market_closed", "false")
             _set_github_output("intent_unavailable", "true")
-            sys.exit(5)
+            sys.exit(7 if contract_status == "INTENT_PENDING" else 5)
 
     _set_github_output("market_closed", "false")
     _set_github_output("intent_unavailable", "false")
