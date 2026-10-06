@@ -14,6 +14,12 @@ def chinese_text(value: str | None, fallback: str) -> str:
     if (not re.search(r"[\u4e00-\u9fff]", text) or re.search(r"\b[A-Za-z]+(?:\s+[A-Za-z]+){2,}\b", text)
             or any(token in text for token in ("EVENT_CHECK_FAILED", "EVENT_UNCHECKED", "ACTION_REVIEW", "DATA_BLOCKED", "ROLLING_24H", "PREVIOUS_CLOSE", "FULL", "WATCH"))):
         return fallback
+    for term, display in (("Data Center", "資料中心"), ("guidance", "營運展望"), ("earnings", "財報"),
+                          ("revenue", "營收"), ("EPS", "每股盈餘"), ("buyback", "庫藏股回購")):
+        text = re.sub(rf"\b{re.escape(term)}\b", display, text, flags=re.I)
+    # Preserve tickers and proper names; untranslated explanatory words fail closed.
+    if any(word[0].islower() for word in re.findall(r"\b[A-Za-z]{3,}\b", text)):
+        return fallback
     return _TRADITIONAL.convert(text)
 
 

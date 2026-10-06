@@ -242,6 +242,11 @@ class InvestmentProductQualityTest(unittest.TestCase):
     def test_38_model_date_cannot_certify_itself(self):
         self.assertFalse(self.brief([event(publication_date_verified=False)]).action_queue)
 
+    def test_39_mixed_english_investment_words_do_not_leak(self):
+        self.assertEqual(chinese_text("AWS guidance 下修", "公告"), "AWS 營運展望 下修")
+        self.assertEqual(chinese_text("Data Center 营收", "公告"), "資料中心 營收")
+        self.assertEqual(chinese_text("公司 potentially 上漲", "仍需核對"), "仍需核對")
+
 
 if __name__ == "__main__":
     unittest.main()

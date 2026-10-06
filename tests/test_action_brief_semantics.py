@@ -216,7 +216,7 @@ class ActionBriefSemanticsSuiteTest(unittest.TestCase):
         rendered = render_action_brief(brief)
         self.assertIn("【值得重新檢視】", rendered)
         self.assertIn("AMZN", rendered)
-        self.assertIn("公司大幅下修 AWS guidance", rendered)
+        self.assertIn("公司大幅下修 AWS 營運展望", rendered)
 
     def test_11_upcoming_events_does_not_use_sizing_state(self):
         upcoming = [
