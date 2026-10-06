@@ -199,6 +199,11 @@ def validate_numeric_provenance(report_text: str, context: MarketContext) -> tup
             if has_exact_symbol or has_exact_display_name:
                 matching_lines.append(line)
         for line in matching_lines:
+            cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+            if len(cells) < 2:
+                continue
+            # The quote is the price cell, never another number on the row.
+            price_cell = cells[1]
             # Expected price representations
             price_variants = [
                 f"{obs.price:,.2f}",
@@ -209,7 +214,7 @@ def validate_numeric_provenance(report_text: str, context: MarketContext) -> tup
                 f"{obs.price:.2f}",
             ]
             price_variants = [v for v in price_variants if v]
-            if not any(v in line for v in price_variants):
+            if not any(re.search(rf"(?<![\d.]){re.escape(v)}(?![\d.])", price_cell) for v in price_variants):
                 errors.append(f"Price for {symbol} ({obs.price}) not found matching in rendered line: '{line}'")
 
     # 2. Narrative numeric integrity: numbers in narrative must be traceable to structured data
@@ -289,16 +294,17 @@ def validate_numeric_provenance(report_text: str, context: MarketContext) -> tup
                 allowed_numbers.add(delta)
                 allowed_numbers.add(float(int(delta)))
 
-    if context.taiex_summary and context.taiex_summary.advancing is not None and context.taiex_summary.declining is not None:
-        net = context.taiex_summary.advancing - context.taiex_summary.declining
+    ts_breadth = context.taiex_summary
+    net = (ts_breadth.advancing - ts_breadth.declining) if ts_breadth and ts_breadth.advancing is not None and ts_breadth.declining is not None else None
+    previous_net = (ts_breadth.advancing_prev - ts_breadth.declining_prev) if ts_breadth and ts_breadth.advancing_prev is not None and ts_breadth.declining_prev is not None else None
+    net_delta = net - previous_net if net is not None and previous_net is not None else None
+    if net is not None:
         # Narrative number extraction ignores a leading minus sign, so allow
         # both signed and absolute representations for deterministic breadth math.
         for val in (net, abs(net)):
             allowed_numbers.add(float(val))
             allowed_numbers.add(float(int(abs(val))))
-        if context.taiex_summary.advancing_prev is not None and context.taiex_summary.declining_prev is not None:
-            previous_net = context.taiex_summary.advancing_prev - context.taiex_summary.declining_prev
-            net_delta = net - previous_net
+        if net_delta is not None:
             for val in (net_delta, abs(net_delta)):
                 allowed_numbers.add(float(val))
                 allowed_numbers.add(float(int(abs(val))))
@@ -310,6 +316,17 @@ def validate_numeric_provenance(report_text: str, context: MarketContext) -> tup
     in_narrative = False
     for line in report_text.splitlines():
         line_s = line.strip()
+        if "淨廣度" in line_s:
+            ts = context.taiex_summary
+            for label, observed, expected in (
+                ("上漲", re.search(r"上漲\s*([+-]?\d[\d,]*)\s*家", line_s), ts.advancing if ts else None),
+                ("下跌", re.search(r"下跌\s*([+-]?\d[\d,]*)\s*家", line_s), ts.declining if ts else None),
+                ("持平", re.search(r"持平\s*([+-]?\d[\d,]*)\s*家", line_s), ts.unchanged if ts else None),
+                ("淨廣度", re.search(r"淨廣度\s*([+-]?\d[\d,]*)\s*家", line_s), net),
+                ("淨廣度變化", re.search(r"較前一(?:交易日|session)\s*([+-]?\d[\d,]*)\s*家", line_s), net_delta),
+            ):
+                if observed and (expected is None or int(observed.group(1).replace(",", "")) != expected):
+                    errors.append(f"{label} deterministic provenance mismatch: expected {expected}, rendered {observed.group(1)}")
         if line_s.startswith("## ") and any(k in line_s for k in ("Top Market Drivers", "今日走勢", "Rotation", "輪動", "Events", "事件", "今日關鍵驅動", "相較昨日", "相較前一交易日", "明日觀察")):
             in_narrative = True
             continue

@@ -11,6 +11,11 @@ on:
     types: [trigger-us-open]
   workflow_dispatch:
     inputs:
+      dry_run:
+        description: "Exercise production path without external sends or report commits"
+        required: false
+        default: false
+        type: boolean
       send_telegram:
         description: "Deliver report to production Telegram (default: false)"
         required: false
@@ -117,7 +122,7 @@ jobs:
         run: python scripts/us_open_run_status.py SCHEDULER_WINDOW_EXPIRED "external scheduler invoked outside 08:00-08:59 New York staging window"
 
       - name: Send expired scheduler operational alert
-        if: github.event.inputs.scheduler_terminal_state == 'SCHEDULER_WINDOW_EXPIRED'
+        if: github.event.inputs.dry_run != 'true' && github.event.inputs.scheduler_terminal_state == 'SCHEDULER_WINDOW_EXPIRED'
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -186,7 +191,7 @@ jobs:
           PY
 
       - name: Wait for canonical US Open snapshot time
-        if: (github.event_name != 'workflow_dispatch' || (github.event.inputs.safe_verify != 'true' && github.event.inputs.scheduler_delivery_test != 'true')) && steps.intent.outputs.already_reported != 'true'
+        if: github.event.inputs.dry_run != 'true' && (github.event_name != 'workflow_dispatch' || (github.event.inputs.safe_verify != 'true' && github.event.inputs.scheduler_delivery_test != 'true')) && steps.intent.outputs.already_reported != 'true'
         run: python scripts/us_open_wait.py
 
       - name: Fetch market snapshot
@@ -222,7 +227,7 @@ jobs:
         run: python scripts/us_open_run_status.py "${{ steps.fetch.outputs.terminal_state }}"
 
       - name: Send US Open operational alert
-        if: always() && steps.fetch.outputs.terminal_state == 'INTENT_EXPIRED'
+        if: always() && github.event.inputs.dry_run != 'true' && steps.fetch.outputs.terminal_state == 'INTENT_EXPIRED'
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -265,7 +270,7 @@ jobs:
           fi
 
       - name: Send non-trading day notice
-        if: (github.event_name != 'workflow_dispatch' || (github.event.inputs.safe_verify != 'true' && github.event.inputs.scheduler_delivery_test != 'true')) && steps.fetch.outputs.market_closed == 'true'
+        if: github.event.inputs.dry_run != 'true' && (github.event_name != 'workflow_dispatch' || (github.event.inputs.safe_verify != 'true' && github.event.inputs.scheduler_delivery_test != 'true')) && steps.fetch.outputs.market_closed == 'true'
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -304,16 +309,21 @@ jobs:
 
       - name: Deliver validated US Open Report
         id: deliver
-        if: (github.event_name != 'workflow_dispatch' || (github.event.inputs.safe_verify != 'true' && github.event.inputs.scheduler_delivery_test != 'true')) && steps.intent.outputs.already_reported != 'true' && steps.fetch.outputs.market_closed != 'true' && steps.fetch.outputs.intent_unavailable != 'true' && steps.generate.outputs.terminal_state != 'VALIDATION_BLOCKED' && steps.validate.outputs.terminal_state != 'VALIDATION_BLOCKED' && (github.event_name == 'schedule' || inputs.send_telegram == true || github.event.inputs.send_telegram == 'true')
+        if: (github.event_name != 'workflow_dispatch' || (github.event.inputs.safe_verify != 'true' && github.event.inputs.scheduler_delivery_test != 'true')) && steps.intent.outputs.already_reported != 'true' && steps.fetch.outputs.market_closed != 'true' && steps.fetch.outputs.intent_unavailable != 'true' && steps.generate.outputs.terminal_state != 'VALIDATION_BLOCKED' && steps.validate.outputs.terminal_state != 'VALIDATION_BLOCKED' && (github.event.inputs.dry_run == 'true' || github.event_name == 'schedule' || inputs.send_telegram == true || github.event.inputs.send_telegram == 'true')
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           PORTFOLIO_KEY: ${{ secrets.PORTFOLIO_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           REPORT_MODEL: ${{ vars.REPORT_MODEL }}
+          DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
         run: |
           set +e
-          python scripts/generate_report.py us_open --deliver-existing
+          if [ "$DRY_RUN" = "true" ]; then
+            python scripts/generate_report.py us_open --deliver-existing --dry-run
+          else
+            python scripts/generate_report.py us_open --deliver-existing
+          fi
           EXIT_CODE=$?
           set -e
           if [ $EXIT_CODE -ne 0 ]; then
@@ -329,7 +339,7 @@ jobs:
           python scripts/us_open_run_status.py "$STATE"
 
       - name: Send validation or delivery operational alert
-        if: always() && (steps.generate.outputs.terminal_state == 'VALIDATION_BLOCKED' || steps.validate.outputs.terminal_state == 'VALIDATION_BLOCKED' || steps.deliver.outputs.terminal_state == 'DELIVERY_FAILED')
+        if: always() && github.event.inputs.dry_run != 'true' && (steps.generate.outputs.terminal_state == 'VALIDATION_BLOCKED' || steps.validate.outputs.terminal_state == 'VALIDATION_BLOCKED' || steps.deliver.outputs.terminal_state == 'DELIVERY_FAILED')
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -354,7 +364,7 @@ jobs:
         run: python scripts/prepare_review.py us_open
 
       - name: Commit and push generated report
-        if: (github.event_name != 'workflow_dispatch' || (github.event.inputs.safe_verify != 'true' && github.event.inputs.scheduler_delivery_test != 'true')) && steps.intent.outputs.already_reported != 'true' && steps.fetch.outputs.market_closed != 'true' && steps.fetch.outputs.intent_unavailable != 'true' && steps.generate.outputs.terminal_state != 'VALIDATION_BLOCKED' && steps.validate.outputs.terminal_state != 'VALIDATION_BLOCKED' && steps.deliver.outputs.terminal_state != 'DELIVERY_FAILED'
+        if: github.event.inputs.dry_run != 'true' && (github.event_name != 'workflow_dispatch' || (github.event.inputs.safe_verify != 'true' && github.event.inputs.scheduler_delivery_test != 'true')) && steps.intent.outputs.already_reported != 'true' && steps.fetch.outputs.market_closed != 'true' && steps.fetch.outputs.intent_unavailable != 'true' && steps.generate.outputs.terminal_state != 'VALIDATION_BLOCKED' && steps.validate.outputs.terminal_state != 'VALIDATION_BLOCKED' && steps.deliver.outputs.terminal_state != 'DELIVERY_FAILED'
         continue-on-error: true
         run: |
           git config --global user.name "github-actions[bot]"
@@ -397,6 +407,11 @@ jobs:
             data/portfolio_advice_audit.json
             data/portfolio_action_brief.json
             data/delivery_state.json
+            data/report_result.json
             data/us_open_run_status.json
           retention-days: 30
           if-no-files-found: ignore
+
+      - name: Report terminal result
+        if: always()
+        run: python scripts/print_report_result.py us_open

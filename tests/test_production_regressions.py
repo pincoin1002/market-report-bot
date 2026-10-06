@@ -154,7 +154,9 @@ class USOpenSchedulerContractSuiteTest(unittest.TestCase):
             reports_dir.mkdir()
             (reports_dir / "us_open_20260929_090500.md").write_text("# Report", encoding="utf-8")
             with patch.object(us_open_intent, "ROOT", Path(tmpdir)):
-                self.assertTrue(us_open_intent.has_existing_report("2026-09-29"))
+                self.assertFalse(us_open_intent.has_existing_report("2026-09-29"))
+                with patch("delivery_state.already_delivered", side_effect=lambda key: key == "us_open:20260929"):
+                    self.assertTrue(us_open_intent.has_existing_report("2026-09-29"))
                 self.assertFalse(us_open_intent.has_existing_report("2026-09-30"))
 
     def test_11_failure_operational_alert_exactly_once(self):

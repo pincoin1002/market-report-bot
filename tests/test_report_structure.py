@@ -452,10 +452,16 @@ class ReportStructuralValidationTest(unittest.TestCase):
             "# 美股開盤日報 2026-10-05\n\n"
             "| 標的 | 報價 | 漲跌 |\n"
             "|---|---:|---:|\n"
+            "| Alphabet Class C (GOOG) | 339.20 | +0.35% |\n"
             "| Alphabet Class A (GOOGL) | 342.59 | -0.05% |\n"
         )
         ok, errors = validate_numeric_provenance(report, context)
         self.assertTrue(ok, errors)
+        for wrong, right in (("(GOOG) | 342.59", "(GOOG) | 339.20"),
+                             ("(GOOGL) | 339.20", "(GOOGL) | 342.59")):
+            swapped = report.replace(right, wrong)
+            ok, errors = validate_numeric_provenance(swapped, context)
+            self.assertFalse(ok, (wrong, errors))
 
     def test_numeric_provenance_accepts_signed_derived_breadth_values(self):
         from types import SimpleNamespace
@@ -490,6 +496,11 @@ class ReportStructuralValidationTest(unittest.TestCase):
         )
         ok, errors = validate_numeric_provenance(report, context)
         self.assertTrue(ok, errors)
+        for wrong, right in (("淨廣度 -266", "淨廣度 -267"),
+                             ("較前一交易日 -243", "較前一交易日 -244")):
+            invalid = report.replace(right, wrong)
+            ok, errors = validate_numeric_provenance(invalid, context)
+            self.assertFalse(ok, (wrong, errors))
 
 
 if __name__ == "__main__":

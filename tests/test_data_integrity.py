@@ -608,6 +608,11 @@ class ExternalUSOpenSchedulerTest(unittest.TestCase):
                     _, _, already_reported = us_open_intent.resolve_intent(
                         datetime(2026, 9, 24, 8, 55, tzinfo=NY)
                     )
+                self.assertFalse(already_reported)  # generated file is not a delivery receipt
+                with patch("delivery_state.already_delivered", return_value=True):
+                    _, _, already_reported = us_open_intent.resolve_intent(
+                        datetime(2026, 9, 24, 8, 55, tzinfo=NY)
+                    )
                 self.assertTrue(already_reported)
             finally:
                 us_open_intent.ROOT = old_root
@@ -964,12 +969,17 @@ class SafetyAndWorkflowTest(unittest.TestCase):
         import delivery_state
         with tempfile.TemporaryDirectory() as td:
             old = delivery_state.STATE_PATH
+            old_receipts = delivery_state.RECEIPTS_DIR
             delivery_state.STATE_PATH = Path(td) / "delivery_state.json"
+            delivery_state.RECEIPTS_DIR = Path(td) / "receipts"
             try:
-                delivery_state.mark_state("us_open:20260828", "DELIVERED")
+                delivery_state.mark_state("us_open:20260828", "GENERATED")
+                self.assertFalse(delivery_state.already_delivered("us_open:20260828"))
+                delivery_state.mark_state("us_open:20260828", "DELIVERED", telegram_result={"ok": True, "message_ids": [1], "destination_fingerprints": ["deadbeef"]})
                 self.assertTrue(delivery_state.already_delivered("us_open:20260828"))
             finally:
                 delivery_state.STATE_PATH = old
+                delivery_state.RECEIPTS_DIR = old_receipts
 
     def test_rendered_validation_detects_missing_symbol(self):
         context = build_market_context(_snapshot({"NVDA": _obs("NVDA")}), "us_close", run_id="test")
@@ -1055,22 +1065,23 @@ class SafetyAndWorkflowTest(unittest.TestCase):
 
     def test_generate_only_does_not_use_duplicate_report_skip(self):
         text = (ROOT / "scripts/generate_report.py").read_text(encoding="utf-8")
-        self.assertIn("if not args.generate_only and check_report_already_generated(report_type):", text)
+        self.assertIn("delivery_state.already_delivered(idempotency_key)", text)
 
     def test_generate_only_still_generates_private_audit_artifacts(self):
         source = inspect.getsource(__import__("generate_report").main)
-        self.assertIn("deliver=not args.generate_only", source)
+        self.assertIn("deliver=False", source)
         self.assertLess(
             source.index("run_portfolio_advice(report, report_type, snapshot, model"),
             source.index("if args.generate_only:"),
         )
 
-    def test_delivery_skips_same_day_duplicate_before_send(self):
+    def test_delivery_uses_receipt_not_same_day_report_count(self):
         import generate_report
 
         source = inspect.getsource(generate_report.main)
-        self.assertIn("same-day report already existed before this run", source)
-        self.assertIn("skipping duplicate delivery", source)
+        self.assertNotIn("duplicate_path.unlink", source)
+        self.assertIn("reports_for_market_date(report_type)", source)
+        self.assertIn("deliver_validated_report", source)
 
     def test_critical_workflow_validation_is_blocking(self):
         for name in ("tw-open.yml", "tw-close.yml", "us-open.yml", "us-close.yml"):

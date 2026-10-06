@@ -11,6 +11,7 @@ import sys
 import smtplib
 import time
 import argparse
+import hashlib
 import json
 import re
 from datetime import datetime, timezone, timedelta
@@ -143,21 +144,16 @@ def generate_report(prompt: str, model: str, report_type: str) -> str:
     try:
         return _call_gemini_api(prompt, model, report_type, use_search=True)
     except Exception as exc:
-        log.warning("Generate report with Google Search failed. Retrying without search...", extra={"error": str(exc)})
+        log.warning("Google Search generation failed; using verified-data path", extra={"error_type": type(exc).__name__})
         if os.getenv("ALLOW_UNGROUNDED_NEWS_FALLBACK", "").lower() == "true":
             return _call_gemini_api(prompt, model, report_type, use_search=False)
         return _verified_data_only_report(prompt, report_type)
 
 
 def _verified_data_only_report(prompt: str, report_type: str) -> str:
-    title = REPORT_TITLES[report_type]
-    now_str = datetime.now(tz=TPE).strftime("%Y-%m-%d %H:%M TPE")
-    return (
-        f"# {title} {now_str}\n\n"
-        "⚠️ 新聞搜尋目前不可用。本次不使用未 grounding 的模型記憶生成即時市場敘事。\n\n"
-        "以下僅保留系統已抓取並注入 prompt 的驗證行情資料；缺少新聞脈絡時，不產生事件歸因或交易推論。\n\n"
-        f"{prompt[:6000]}"
-    )
+    # The structured renderer owns all public sections and quote facts. Never
+    # copy the internal prompt into a fallback report or its artifacts.
+    return "新聞搜尋目前不可用；以下報告僅使用已驗證行情，不推論未核實的事件原因。"
 
 
 def _build_snapshot_block(snapshot: Snapshot) -> str:
@@ -314,7 +310,7 @@ def reports_for_market_date(report_type: str) -> list[Path]:
     if not files:
         files = list(reports_dir.glob(f"{report_type}_{date_str}*.md"))
     if files:
-        log.info("report already exists for market date — skipping duplicate delivery",
+        log.info("report file exists for market date; delivery state remains independent",
                  extra={"report_type": report_type, "market_date": date_str,
                         "existing": files[0].name})
     return sorted(files, reverse=True)
@@ -493,41 +489,72 @@ def _clean_markdown_for_telegram_report(text: str) -> str:
     return cleaned_text.strip()
 
 
-def send_telegram(report: str, report_type: str) -> None:
+def telegram_destination_fingerprint(chat_id: str) -> str:
+    return hashlib.sha256(str(chat_id).strip().encode("utf-8")).hexdigest()[:8]
+
+
+def _send_telegram_product(text: str, *, product: str, dry_run: bool = False) -> dict:
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-    chat_id_raw = os.getenv("TELEGRAM_CHAT_ID", "").strip()
-    if not token or not chat_id_raw:
-        log.info("Telegram not configured — skipping")
-        return
-
-    # Support multiple comma-separated chat/user IDs
-    chat_ids = [cid.strip() for cid in chat_id_raw.split(",") if cid.strip()]
-
-    title = REPORT_TITLES[report_type]
-    now_str = datetime.now(tz=TPE).strftime("%Y-%m-%d %H:%M TPE")
-    header = f"📊 *{title}* ｜ {now_str}\n{'─' * 30}\n\n"
-    
-    cleaned_report = _clean_markdown_for_telegram_report(report)
-    chunks = _split_message(header + cleaned_report)
-
+    chat_ids = [cid.strip() for cid in os.getenv("TELEGRAM_CHAT_ID", "").split(",") if cid.strip()]
+    if not dry_run and (not token or not chat_ids):
+        raise RuntimeError("Telegram delivery credentials missing")
+    chunks = _split_message(text)
+    fingerprints = [telegram_destination_fingerprint(cid) for cid in chat_ids]
+    result = {"ok": False, "product": product, "destination_fingerprints": fingerprints,
+              "message_ids": [], "message_lengths": [len(chunk) for chunk in chunks],
+              "chunk_count": len(chunks), "destination_count": len(chat_ids)}
+    if dry_run:
+        result.update({"ok": True, "simulated": True})
+        log.info("Telegram delivery simulated", extra={"product": product,
+                                                       "destination_fingerprints": fingerprints,
+                                                       "chunk_count": len(chunks),
+                                                       "message_lengths": result["message_lengths"]})
+        return result
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     for cid in chat_ids:
+        fingerprint = telegram_destination_fingerprint(cid)
         for i, chunk in enumerate(chunks):
             try:
-                resp = requests.post(url, json={"chat_id": cid, "text": chunk, "parse_mode": "Markdown"}, timeout=30)
-                if resp.status_code != 200:
-                    log.warning("Telegram Markdown send failed; retrying as plain text",
-                                extra={"chat_id": cid, "chunk": i + 1,
-                                       "total": len(chunks), "status": resp.status_code,
-                                       "response": resp.text[:500]})
-                    resp = requests.post(url, json={"chat_id": cid, "text": chunk}, timeout=30)
-                resp.raise_for_status()
-                log.info("Telegram chunk sent", extra={"chat_id": cid, "chunk": i + 1, "total": len(chunks)})
-            except requests.RequestException:
-                log.error("Telegram send failed", exc_info=True,
-                          extra={"chat_id": cid, "chunk": i + 1, "total": len(chunks)})
+                response = requests.post(url, json={"chat_id": cid, "text": chunk, "parse_mode": "Markdown"}, timeout=30)
+                if response.status_code != 200:
+                    log.warning("Telegram Markdown rejected; retrying plain text", extra={"product": product,
+                                "destination_fingerprint": fingerprint, "chunk": i + 1,
+                                "chunk_count": len(chunks), "http_status": response.status_code})
+                    response = requests.post(url, json={"chat_id": cid, "text": chunk}, timeout=30)
+                response.raise_for_status()
+                payload = response.json()
+                if payload.get("ok") is not True or not isinstance((payload.get("result") or {}).get("message_id"), int):
+                    raise RuntimeError("Telegram response lacked confirmed message_id")
+                returned_chat = (payload.get("result") or {}).get("chat") or {}
+                if cid.lstrip("-").isdigit() and str(returned_chat.get("id")) != cid:
+                    raise RuntimeError("Telegram confirmed a different destination")
+                message_id = payload["result"]["message_id"]
+                result["message_ids"].append(message_id)
+                log.info("Telegram chunk confirmed", extra={"product": product, "ok": True,
+                         "message_id": message_id, "destination_fingerprint": fingerprint,
+                         "message_length": len(chunk), "chunk": i + 1, "chunk_count": len(chunks)})
+            except (requests.RequestException, ValueError, RuntimeError) as exc:
+                log.error("Telegram chunk unconfirmed", extra={"product": product,
+                          "destination_fingerprint": fingerprint, "chunk": i + 1,
+                          "chunk_count": len(chunks), "error_type": type(exc).__name__})
+                raise RuntimeError(f"{product} Telegram delivery unconfirmed") from None
             if i < len(chunks) - 1:
                 time.sleep(0.5)
+    result["ok"] = True
+    return result
+
+
+def public_telegram_payload(report: str, report_type: str, *, at: datetime | None = None) -> str:
+    title = REPORT_TITLES[report_type]
+    now_str = (at or datetime.now(tz=TPE)).astimezone(TPE).strftime("%Y-%m-%d %H:%M TPE")
+    header = f"📊 *{title}* ｜ {now_str}\n{'─' * 30}\n\n"
+    return header + _clean_markdown_for_telegram_report(report)
+
+
+def send_telegram(report: str, report_type: str, *, dry_run: bool = False,
+                  at: datetime | None = None) -> dict:
+    return _send_telegram_product(public_telegram_payload(report, report_type, at=at),
+                                  product="PUBLIC_REPORT", dry_run=dry_run)
 
 # ── Email ──────────────────────────────────────────────────────────────────────
 
@@ -658,29 +685,15 @@ def _build_advice_prompt(report: str, portfolio: Portfolio,
     return "\n".join(parts)
 
 
-def send_advice_telegram(advice: str, report_type: str) -> None:
-    token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-    chat_id_raw = os.getenv("TELEGRAM_CHAT_ID", "").strip()
-    if not token or not chat_id_raw:
-        return
-    chat_ids = [cid.strip() for cid in chat_id_raw.split(",") if cid.strip()]
+def private_telegram_payload(advice: str, report_type: str) -> str:
     now_str = datetime.now(tz=TPE).strftime("%Y-%m-%d %H:%M TPE")
     header = f"💼 *持股操作建議*（私訊限定）｜ {now_str}\n{'─' * 30}\n\n"
-    chunks = _split_message(header + _clean_markdown_for_telegram_report(advice))
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-    for cid in chat_ids:
-        for i, chunk in enumerate(chunks):
-            try:
-                resp = requests.post(url, json={"chat_id": cid, "text": chunk,
-                                                "parse_mode": "Markdown"}, timeout=30)
-                if resp.status_code != 200:   # Markdown parse issues → plain text
-                    resp = requests.post(url, json={"chat_id": cid, "text": chunk}, timeout=30)
-                resp.raise_for_status()
-            except requests.RequestException:
-                log.error("advice Telegram send failed", exc_info=True, extra={"chat_id": cid})
-            if i < len(chunks) - 1:
-                time.sleep(0.5)
-    log.info("portfolio advice sent via Telegram", extra={"chats": len(chat_ids)})
+    return header + _clean_markdown_for_telegram_report(advice)
+
+
+def send_advice_telegram(advice: str, report_type: str, *, dry_run: bool = False) -> dict:
+    return _send_telegram_product(private_telegram_payload(advice, report_type),
+                                  product="PRIVATE_ADVICE", dry_run=dry_run)
 
 
 def send_advice_email(advice: str, report_type: str) -> None:
@@ -716,7 +729,7 @@ def send_advice_email(advice: str, report_type: str) -> None:
 def send_operational_notice(text: str, report_type: str) -> None:
     title = REPORT_TITLES[report_type]
     msg = f"⚠️ {title}｜持股操作建議暫停\n\n{text}"
-    send_telegram(msg, report_type)
+    _send_telegram_product(msg, product="PRIVATE_ADVICE_NOTICE")
     send_email(msg, report_type)
 
 
@@ -838,7 +851,7 @@ def write_advice_audit(report_type: str, status: str, reason: str,
 
 def run_portfolio_advice(report: str, report_type: str,
                          snapshot: "Snapshot | None", model: str,
-                         *, deliver: bool = True) -> None:
+                         *, deliver: bool = True) -> str:
     """Generate private portfolio artifacts; only send when ``deliver`` is true.
 
     Generate-only workflows must still leave an audit trail in the protected
@@ -852,7 +865,7 @@ def run_portfolio_advice(report: str, report_type: str,
         write_advice_audit(report_type, "BLOCKED", reason, snapshot)
         if deliver and (portfolio_context.positions or portfolio_store.ENC_PATH.exists() or portfolio_store.has_positions(raw)):
             send_operational_notice(f"{reason}\n\n已停止產生持股建議，避免用錯誤或缺漏價格下判斷。", report_type)
-        return
+        return "BLOCKED"
     context = load_market_context(report_type, snapshot)
     force_event_refresh = {
         pos.ticker.upper()
@@ -880,7 +893,7 @@ def run_portfolio_advice(report: str, report_type: str,
         write_advice_audit(report_type, "BLOCKED", reason, snapshot)
         if deliver:
             send_operational_notice(f"{reason}\n\n已停止傳送持股建議。", report_type)
-        return
+        return "BLOCKED"
     write_advice_audit(report_type, "VALIDATED", reason, snapshot)
     data_dir = Path(__file__).parent.parent / "data"
     (data_dir / "portfolio_action_brief.json").write_text(brief.model_dump_json(indent=2), encoding="utf-8")
@@ -891,10 +904,92 @@ def run_portfolio_advice(report: str, report_type: str,
         write_advice_audit(report_type, "BLOCKED", reason, snapshot)
         if deliver:
             send_operational_notice(f"{reason}\n\n已停止傳送持股建議。", report_type)
-        return
+        return "BLOCKED"
     if deliver:
         send_advice_telegram(advice, report_type)
         send_advice_email(advice, report_type)
+        return "SENT"
+    return "SKIPPED"
+
+
+def _report_result(report_type: str, market_date: str, validation: str, delivery: str,
+                   message_ids: list[int], private_advice: str, terminal_state: str, reason: str) -> None:
+    result = {"report_type": report_type, "market_date": market_date,
+              "public_validation": validation, "public_delivery": delivery,
+              "telegram_message_ids": message_ids, "private_advice": private_advice,
+              "terminal_state": terminal_state, "reason": reason}
+    path = Path(__file__).parent.parent / "data" / "report_result.json"
+    path.parent.mkdir(exist_ok=True)
+    path.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+    if not os.getenv("GITHUB_ACTIONS"):
+        print("REPORT_RESULT " + " ".join(f"{key}={','.join(map(str, value)) or 'none' if isinstance(value, list) else value}"
+                                              for key, value in result.items()), flush=True)
+
+
+def deliver_validated_report(report: str, report_type: str, context: MarketContext,
+                             draft, snapshot: Snapshot | None, model: str,
+                             idempotency_key: str, *, dry_run: bool = False,
+                             simulated_deliveries: set[str] | None = None,
+                             at: datetime | None = None) -> dict:
+    """Use the same validation and payload path for production and no-send replay."""
+    from validate_report import (validate_numeric_provenance,
+                                 validate_rendered_report_structure, validate_render_matches_draft)
+
+    market_date = idempotency_key.split(":", 1)[-1]
+    simulated_deliveries = simulated_deliveries if simulated_deliveries is not None else set()
+    if idempotency_key in simulated_deliveries or (not dry_run and delivery_state.already_delivered(idempotency_key)):
+        _report_result(report_type, market_date, "PASS", "SKIPPED", [], "SKIPPED",
+                       "SIMULATED" if dry_run else "DELIVERED",
+                       "ALREADY_SIMULATED" if dry_run else "ALREADY_DELIVERED")
+        return {"public_delivery": "SKIPPED", "private_advice": "SKIPPED", "message_ids": []}
+
+    draft_ok, draft_reason = validate_public_draft(draft, context)
+    structure_ok, structure_errors = validate_rendered_report_structure(report, report_type)
+    numeric_ok, numeric_errors = validate_numeric_provenance(report, context)
+    render_ok, render_reason = validate_render_matches_draft(report, draft)
+    if report != draft.rendered_markdown or not all((draft_ok, structure_ok, numeric_ok, render_ok)):
+        reason = "DRAFT_MISMATCH" if report != draft.rendered_markdown else "DRAFT_INVALID" if not draft_ok else "STRUCTURE_INVALID" if not structure_ok else "NUMERIC_PROVENANCE_INVALID" if not numeric_ok else "RENDER_MISMATCH"
+        log.error("Public report validation blocked", extra={"reason": reason, "draft_reason": draft_reason,
+                                                           "structure_errors": structure_errors[:3],
+                                                           "numeric_errors": numeric_errors[:3],
+                                                           "render_reason": render_reason})
+        if not dry_run:
+            delivery_state.mark_state(idempotency_key, "BLOCKED")
+        _report_result(report_type, market_date, "FAIL", "SKIPPED", [], "SKIPPED", "VALIDATION_BLOCKED", reason)
+        return {"public_delivery": "SKIPPED", "private_advice": "SKIPPED", "message_ids": [], "reason": reason}
+
+    if not dry_run:
+        delivery_state.mark_state(idempotency_key, "VALIDATED")
+        delivery_state.mark_state(idempotency_key, "DELIVERING")
+    try:
+        telegram = send_telegram(report, report_type, dry_run=dry_run, at=at)
+        if not telegram.get("ok"):
+            raise RuntimeError("public Telegram delivery unconfirmed")
+    except Exception as exc:
+        if not dry_run:
+            delivery_state.mark_state(idempotency_key, "FAILED")
+        log.error("Public report delivery failed", extra={"error_type": type(exc).__name__})
+        _report_result(report_type, market_date, "PASS", "FAILED", [], "SKIPPED", "DELIVERY_FAILED", "TELEGRAM_UNCONFIRMED")
+        return {"public_delivery": "FAILED", "private_advice": "SKIPPED", "message_ids": [], "reason": "TELEGRAM_UNCONFIRMED"}
+
+    message_ids = list(telegram.get("message_ids", []))
+    if dry_run:
+        simulated_deliveries.add(idempotency_key)
+        _report_result(report_type, market_date, "PASS", "SKIPPED", [], "SKIPPED", "SIMULATED", "NO_SEND")
+        return {"public_delivery": "SIMULATED", "private_advice": "SKIPPED", "message_ids": [],
+                "telegram": telegram}
+
+    delivery_state.mark_state(idempotency_key, "DELIVERED", telegram_result=telegram)
+    private_status = "SKIPPED"
+    try:
+        send_email(report, report_type)
+        private_status = run_portfolio_advice(report, report_type, snapshot, model, deliver=True)
+    except Exception as exc:
+        private_status = "BLOCKED"
+        log.error("Private advice degraded after public delivery", extra={"error_type": type(exc).__name__})
+    _report_result(report_type, market_date, "PASS", "SENT", message_ids, private_status, "DELIVERED", "OK")
+    return {"public_delivery": "SENT", "private_advice": private_status, "message_ids": message_ids,
+            "telegram": telegram}
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────
@@ -907,9 +1002,11 @@ def main() -> None:
                         help="Generate and save report without delivery")
     parser.add_argument("--deliver-existing", action="store_true",
                         help="Deliver latest saved report after validation")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Exercise validation and Telegram payload without external send")
     args = parser.parse_args()
 
-    if not os.getenv("GEMINI_API_KEY"):
+    if not args.deliver_existing and not os.getenv("GEMINI_API_KEY"):
         log.error("GEMINI_API_KEY is not set")
         sys.exit(1)
 
@@ -921,20 +1018,11 @@ def main() -> None:
         sys.exit(2)
 
     if args.deliver_existing:
-        reports_dir = Path(__file__).parent.parent / "reports"
-        files = sorted(reports_dir.glob(f"{report_type}_*.md"), reverse=True)
-        if not files:
-            log.error("no saved report to deliver", extra={"report_type": report_type})
-            sys.exit(1)
         same_day_reports = reports_for_market_date(report_type)
-        if len(same_day_reports) > 1:
-            duplicate_path = same_day_reports[0]
-            duplicate_path.unlink(missing_ok=True)
-            log.info("same-day report already existed before this run — skipping duplicate delivery",
-                     extra={"report_type": report_type, "removed_duplicate": duplicate_path.name,
-                            "existing": same_day_reports[-1].name})
-            return
-        report = files[0].read_text(encoding="utf-8")
+        if not same_day_reports:
+            log.error("no same-market-date report to deliver", extra={"report_type": report_type})
+            sys.exit(1)
+        report = same_day_reports[0].read_text(encoding="utf-8")
         snapshot = None
         snapshot_path = Path(__file__).parent.parent / "data" / "market_snapshot.json"
         try:
@@ -942,36 +1030,27 @@ def main() -> None:
         except Exception:
             log.warning("snapshot unavailable during delivery", exc_info=True)
         idempotency_key = f"{report_type}:{get_market_date(report_type).strftime('%Y%m%d')}"
-        if delivery_state.already_delivered(idempotency_key):
-            log.info("delivery already completed for idempotency key", extra={"key": idempotency_key})
-            return
-        delivery_state.mark_state(idempotency_key, "VALIDATING")
+        if not args.dry_run:
+            delivery_state.mark_state(idempotency_key, "VALIDATING")
         try:
             context = load_market_context(report_type, snapshot)
             draft_path = Path(__file__).parent.parent / "data" / "market_report_draft.json"
-            if draft_path.exists():
-                from models import MarketReportDraft
-                draft = MarketReportDraft.model_validate_json(draft_path.read_text(encoding="utf-8"))
-                ok, reason = validate_public_draft(draft, context)
-                if not ok:
-                    delivery_state.mark_state(idempotency_key, "BLOCKED")
-                    log.error("public draft validation failed before delivery", extra={"reason": reason})
-                    sys.exit(1)
+            from models import MarketReportDraft
+            draft = MarketReportDraft.model_validate_json(draft_path.read_text(encoding="utf-8"))
         except Exception:
-            delivery_state.mark_state(idempotency_key, "BLOCKED")
+            if not args.dry_run:
+                delivery_state.mark_state(idempotency_key, "BLOCKED")
             log.error("market context unavailable before delivery", exc_info=True)
             sys.exit(1)
-        delivery_state.mark_state(idempotency_key, "VALIDATED")
-        delivery_state.mark_state(idempotency_key, "DELIVERING")
-        send_telegram(report, report_type)
-        send_email(report, report_type)
-        run_portfolio_advice(report, report_type, snapshot, model)
-        delivery_state.mark_state(idempotency_key, "DELIVERED")
-        log.info("delivered validated report", extra={"report_type": report_type, "path": str(files[0])})
+        result = deliver_validated_report(report, report_type, context, draft, snapshot, model,
+                                          idempotency_key, dry_run=args.dry_run)
+        if result["public_delivery"] not in {"SENT", "SKIPPED", "SIMULATED"}:
+            sys.exit(1)
         return
 
-    # Prevent duplicate runs for the same market date
-    if not args.generate_only and check_report_already_generated(report_type):
+    # A generated file is not a delivery receipt.
+    idempotency_key = f"{report_type}:{get_market_date(report_type).strftime('%Y%m%d')}"
+    if not args.generate_only and not args.dry_run and delivery_state.already_delivered(idempotency_key):
         sys.exit(0)
 
     prompt = load_prompt(report_type)
@@ -1024,14 +1103,15 @@ def main() -> None:
     report = draft.rendered_markdown
 
     filepath = save_report(report, report_type)
+    if not args.dry_run:
+        delivery_state.mark_state(idempotency_key, "GENERATED")
     log.info("report saved", extra={"path": str(filepath)})
 
     # Produce audit/brief artifacts during generation as well as delivery.
     # This makes a manually dispatched dry run observable without sending a
     # portfolio message or placing private holdings in the public report.
     try:
-        run_portfolio_advice(report, report_type, snapshot, model,
-                             deliver=not args.generate_only)
+        run_portfolio_advice(report, report_type, snapshot, model, deliver=False)
     except Exception:
         log.error("portfolio artifact stage failed", exc_info=True)
 
@@ -1039,10 +1119,10 @@ def main() -> None:
         log.info("generate-only mode: delivery deferred until validation passes")
         return
 
-    send_telegram(report, report_type)
-    send_email(report, report_type)
-
-    log.info("done", extra={"report_type": report_type})
+    result = deliver_validated_report(report, report_type, context, draft, snapshot, model,
+                                      idempotency_key, dry_run=args.dry_run)
+    if result["public_delivery"] not in {"SENT", "SKIPPED", "SIMULATED"}:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -12,6 +12,11 @@ on:
     types: [trigger-tw-open]
   workflow_dispatch:
     inputs:
+      dry_run:
+        description: "Exercise production path without external sends or report commits"
+        required: false
+        default: false
+        type: boolean
       send_telegram:
         description: "Deliver report to production Telegram (default: false)"
         required: false
@@ -86,16 +91,17 @@ jobs:
         run: |
           python - <<'PY' >> "$GITHUB_OUTPUT"
           from datetime import datetime
-          from pathlib import Path
+          import sys
           from zoneinfo import ZoneInfo
+          sys.path.insert(0, "scripts")
+          from delivery_state import already_delivered
 
           today = datetime.now(tz=ZoneInfo("Asia/Taipei")).strftime("%Y%m%d")
-          files = sorted(Path("reports").glob(f"tw_open_{today}_*.md"))
-          print(f"already_reported={'true' if files else 'false'}")
+          print(f"already_reported={'true' if already_delivered(f'tw_open:{today}') else 'false'}")
           PY
 
       - name: Wait for canonical Taiwan-open snapshot time
-        if: steps.existing.outputs.already_reported != 'true' && github.event_name == 'workflow_dispatch' && github.event.inputs.trigger_source == 'vercel_cron'
+        if: github.event.inputs.dry_run != 'true' && steps.existing.outputs.already_reported != 'true' && github.event_name == 'workflow_dispatch' && github.event.inputs.trigger_source == 'vercel_cron'
         run: |
           python - <<'PY'
           import time
@@ -143,11 +149,11 @@ jobs:
           fi
 
       - name: Record expired Taiwan-open intent
-        if: always() && steps.existing.outputs.already_reported != 'true' && steps.fetch.outputs.terminal_state == 'TW_OPEN_INTENT_EXPIRED'
+        if: always() && github.event.inputs.dry_run != 'true' && steps.existing.outputs.already_reported != 'true' && steps.fetch.outputs.terminal_state == 'TW_OPEN_INTENT_EXPIRED'
         run: echo "TW_OPEN_INTENT_EXPIRED — runner entered after 09:00 Taipei; stale previous-close report blocked."
 
       - name: Send Taiwan-open expiry alert
-        if: always() && steps.existing.outputs.already_reported != 'true' && steps.fetch.outputs.terminal_state == 'TW_OPEN_INTENT_EXPIRED'
+        if: always() && github.event.inputs.dry_run != 'true' && steps.existing.outputs.already_reported != 'true' && steps.fetch.outputs.terminal_state == 'TW_OPEN_INTENT_EXPIRED'
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -193,15 +199,31 @@ jobs:
           REPORT_MODEL: ${{ vars.REPORT_MODEL }}
         run: python scripts/validate_report.py tw_open
 
+      - name: Alert with exact validation reason
+        if: failure() && github.event.inputs.dry_run != 'true'
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          if [ -f data/validation_results.json ]; then
+            python scripts/send_operational_alert.py tw_open VALIDATION_BLOCKED
+          fi
+
       - name: Deliver validated Taiwan Open Report
-        if: steps.existing.outputs.already_reported != 'true' && steps.fetch.outputs.market_closed != 'true' && steps.fetch.outputs.intent_unavailable != 'true' && (github.event_name == 'schedule' || inputs.send_telegram == true || github.event.inputs.send_telegram == 'true')
+        if: steps.existing.outputs.already_reported != 'true' && steps.fetch.outputs.market_closed != 'true' && steps.fetch.outputs.intent_unavailable != 'true' && (github.event.inputs.dry_run == 'true' || github.event_name == 'schedule' || inputs.send_telegram == true || github.event.inputs.send_telegram == 'true')
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           PORTFOLIO_KEY: ${{ secrets.PORTFOLIO_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           REPORT_MODEL: ${{ vars.REPORT_MODEL }}
-        run: python scripts/generate_report.py tw_open --deliver-existing
+          DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+        run: |
+          if [ "$DRY_RUN" = "true" ]; then
+            python scripts/generate_report.py tw_open --deliver-existing --dry-run
+          else
+            python scripts/generate_report.py tw_open --deliver-existing
+          fi
 
 
       - name: Prepare review package
@@ -210,7 +232,7 @@ jobs:
         run: python scripts/prepare_review.py tw_open
 
       - name: Commit and push generated report
-        if: steps.existing.outputs.already_reported != 'true' && steps.fetch.outputs.market_closed != 'true' && steps.fetch.outputs.intent_unavailable != 'true'
+        if: github.event.inputs.dry_run != 'true' && steps.existing.outputs.already_reported != 'true' && steps.fetch.outputs.market_closed != 'true' && steps.fetch.outputs.intent_unavailable != 'true'
         continue-on-error: true
         run: |
           git config --global user.name "github-actions[bot]"
@@ -253,5 +275,10 @@ jobs:
             data/portfolio_advice_audit.json
             data/portfolio_action_brief.json
             data/delivery_state.json
+            data/report_result.json
           retention-days: 30
           if-no-files-found: ignore
+
+      - name: Report terminal result
+        if: always()
+        run: python scripts/print_report_result.py tw_open

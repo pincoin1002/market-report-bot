@@ -8,6 +8,11 @@ on:
     types: [trigger-us-close]
   workflow_dispatch:
     inputs:
+      dry_run:
+        description: "Exercise production path without external sends or report commits"
+        required: false
+        default: false
+        type: boolean
       send_telegram:
         description: "Deliver report to production Telegram (default: false)"
         required: false
@@ -82,7 +87,7 @@ jobs:
           fi
 
       - name: Send non-trading day notice
-        if: steps.fetch.outputs.market_closed == 'true'
+        if: github.event.inputs.dry_run != 'true' && steps.fetch.outputs.market_closed == 'true'
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -110,15 +115,31 @@ jobs:
           REPORT_MODEL: ${{ vars.REPORT_MODEL }}
         run: python scripts/validate_report.py us_close
 
+      - name: Alert with exact validation reason
+        if: failure() && github.event.inputs.dry_run != 'true'
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          if [ -f data/validation_results.json ]; then
+            python scripts/send_operational_alert.py us_close VALIDATION_BLOCKED
+          fi
+
       - name: Deliver validated US Close Report
-        if: steps.fetch.outputs.market_closed != 'true' && (github.event_name == 'schedule' || inputs.send_telegram == true || github.event.inputs.send_telegram == 'true')
+        if: steps.fetch.outputs.market_closed != 'true' && (github.event.inputs.dry_run == 'true' || github.event_name == 'schedule' || inputs.send_telegram == true || github.event.inputs.send_telegram == 'true')
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           PORTFOLIO_KEY: ${{ secrets.PORTFOLIO_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           REPORT_MODEL: ${{ vars.REPORT_MODEL }}
-        run: python scripts/generate_report.py us_close --deliver-existing
+          DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+        run: |
+          if [ "$DRY_RUN" = "true" ]; then
+            python scripts/generate_report.py us_close --deliver-existing --dry-run
+          else
+            python scripts/generate_report.py us_close --deliver-existing
+          fi
 
 
       - name: Prepare review package
@@ -127,7 +148,7 @@ jobs:
         run: python scripts/prepare_review.py us_close
 
       - name: Commit and push generated report
-        if: steps.fetch.outputs.market_closed != 'true'
+        if: github.event.inputs.dry_run != 'true' && steps.fetch.outputs.market_closed != 'true'
         continue-on-error: true
         run: |
           git config --global user.name "github-actions[bot]"
@@ -170,5 +191,10 @@ jobs:
             data/portfolio_advice_audit.json
             data/portfolio_action_brief.json
             data/delivery_state.json
+            data/report_result.json
           retention-days: 30
           if-no-files-found: ignore
+
+      - name: Report terminal result
+        if: always()
+        run: python scripts/print_report_result.py us_close

@@ -7,7 +7,7 @@ pydantic v2. These models ARE the schema of data/*.json — change them here onl
 from datetime import datetime, timezone
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, computed_field, field_validator
 
 ReportType = Literal["tw_open", "tw_close", "us_open", "us_close"]
 Session = Literal["PREMARKET", "REGULAR", "AFTER_HOURS", "PREVIOUS_CLOSE", "CLOSED_REFERENCE"]
@@ -27,7 +27,7 @@ TriggerType = Literal[
 ]
 OptionalModuleState = Literal["AVAILABLE", "PARTIAL", "UNAVAILABLE"]
 PipelineStatus = Literal["FULL", "DEGRADED", "BLOCKED"]
-DeliveryState = Literal["GENERATING", "VALIDATING", "VALIDATED", "DELIVERING", "DELIVERED", "BLOCKED"]
+DeliveryState = Literal["NOT_GENERATED", "GENERATING", "GENERATED", "VALIDATING", "VALIDATED", "DELIVERING", "DELIVERED", "BLOCKED", "FAILED"]
 
 
 class Quote(BaseModel):
@@ -123,6 +123,27 @@ class TaiexMarketSummary(BaseModel):
     previous_session_date: str | None = None
     source: str | None = None
     retrieved_at: datetime | None = None
+
+    @computed_field
+    @property
+    def net_breadth(self) -> int | None:
+        if self.advancing is None or self.declining is None:
+            return None
+        return self.advancing - self.declining
+
+    @computed_field
+    @property
+    def previous_net_breadth(self) -> int | None:
+        if self.advancing_prev is None or self.declining_prev is None:
+            return None
+        return self.advancing_prev - self.declining_prev
+
+    @computed_field
+    @property
+    def net_breadth_change(self) -> int | None:
+        if self.net_breadth is None or self.previous_net_breadth is None:
+            return None
+        return self.net_breadth - self.previous_net_breadth
 
 
 class InstitutionalFlows(BaseModel):

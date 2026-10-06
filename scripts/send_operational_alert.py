@@ -50,6 +50,27 @@ MESSAGES = {
 }
 
 
+def validation_alert(report_type: str, results_path: Path | None = None) -> str:
+    """Translate verified validation failures without exposing report internals."""
+    title = {"tw_open": "台股開盤戰報", "tw_close": "台股收盤日報",
+             "us_open": "美股開盤日報", "us_close": "美股收盤日報"}.get(report_type, report_type)
+    path = results_path or ROOT / "data" / "validation_results.json"
+    try:
+        results = json.loads(path.read_text(encoding="utf-8"))
+        errors = " ".join(str(x) for x in results.get("numeric_provenance", {}).get("errors", []))
+    except (OSError, ValueError, TypeError):
+        errors = ""
+    if "GOOG" in errors and "GOOGL" in errors:
+        reason = "報價驗證發現 GOOG / GOOGL 對應衝突。"
+    elif "淨廣度" in errors or "前一交易日" in errors or "breadth" in errors.lower():
+        reason = "市場廣度衍生數值未通過來源驗證。"
+    elif errors:
+        reason = "行情數字未通過來源驗證。"
+    else:
+        reason = "報告結構或資料驗證未通過。"
+    return f"⚠️ {title}未送出\n原因：{reason}\n市場資料已取得，但為避免錯價，報告未送出。"
+
+
 def get_market_date(report_type: str) -> str:
     tz = NY if report_type.startswith("us_") else TPE
     env_date = os.getenv(f"{report_type.upper()}_INTENDED_MARKET_DATE", "").strip()
@@ -108,13 +129,15 @@ def main() -> None:
         print(f"Operational alert already sent for {report_type}:{market_date}; skipping duplicate.")
         sys.exit(0)
 
-    text = MESSAGES.get(terminal_state, f"⚠️ {report_type} 執行未完成：{terminal_state}")
+    text = (validation_alert(report_type) if terminal_state == "VALIDATION_BLOCKED"
+            else MESSAGES.get(terminal_state, f"⚠️ {report_type} 執行未完成：{terminal_state}"))
     try:
         sent = send_telegram_alert(text)
-        record_alert(report_type, market_date, terminal_state)
+        if sent:
+            record_alert(report_type, market_date, terminal_state)
         print(f"Operational alert processed (sent={sent}) for {report_type}:{market_date} state={terminal_state}")
     except Exception as e:
-        print(f"Failed to send operational alert: {e}", file=sys.stderr)
+        print(f"Failed to send operational alert: {type(e).__name__}", file=sys.stderr)
         sys.exit(1)
 
 

@@ -23,7 +23,8 @@ def _set_github_value(name: str, value: str, output: bool = False) -> None:
 
 
 def has_existing_report(market_date: str) -> bool:
-    return bool(list((ROOT / "reports").glob(f"us_open_{market_date.replace('-', '')}_*.md")))
+    from delivery_state import already_delivered
+    return already_delivered(f"us_open:{market_date.replace('-', '')}")
 
 
 def resolve_intent(now: datetime | None = None) -> tuple[str, str, bool]:

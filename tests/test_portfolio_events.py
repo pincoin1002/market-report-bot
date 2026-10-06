@@ -533,6 +533,7 @@ class PortfolioEventMonitoringSuiteTest(unittest.TestCase):
         )
         with patch("generate_report.fetch_portfolio_events", return_value=([], [])) as mock_fetch, \
              patch("generate_report.load_authoritative_portfolio", return_value=self.portfolio), \
+             patch("generate_report.load_market_context", return_value=self.context.model_copy(update={"quotes": {**self.context.quotes, "TSLA": quotes["TSLA"]}})), \
              patch("generate_report.validate_portfolio_quotes", return_value=(True, "OK")):
             run_portfolio_advice("report", "tw_close", snap, "gemini-2.0-flash", deliver=False)
         _, kwargs = mock_fetch.call_args
