@@ -1,0 +1,11 @@
+{
+  "key": "us_open:20261006",
+  "state": "DELIVERED",
+  "at": "2026-10-06T13:07:41.676095+00:00",
+  "telegram_message_ids": [
+    792
+  ],
+  "destination_fingerprints": [
+    "4fa4c083"
+  ]
+}
