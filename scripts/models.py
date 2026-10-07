@@ -4,6 +4,8 @@
 pydantic v2. These models ARE the schema of data/*.json — change them here only.
 """
 
+from __future__ import annotations
+
 from datetime import datetime, timezone
 from typing import Literal
 
@@ -376,6 +378,11 @@ class PositionContext(BaseModel):
     asset_type: str
     quote_id: str | None = None
     note: str = ""
+    basis_quality: Literal["VERIFIED", "UNRESOLVED"] = "UNRESOLVED"
+    basis_currency: str | None = None
+    target_weight: float | None = Field(default=None, ge=0, le=1)
+    max_weight: float | None = Field(default=None, gt=0, le=1)
+    allocation_verified: bool = False
 
 
 class PortfolioContext(BaseModel):
@@ -386,6 +393,98 @@ class PortfolioContext(BaseModel):
     cash: list[CashContext] = Field(default_factory=list)
     liabilities: list[LiabilityContext] = Field(default_factory=list)
     notes: str = ""
+    allocation_limits: dict[str, float] = Field(default_factory=dict)
+
+
+DecisionAction = Literal["ADD", "HOLD", "REDUCE", "EXIT", "WATCH"]
+DecisionConfidence = Literal["HIGH", "MEDIUM", "LOW"]
+
+
+class HoldingDecisionEvidence(BaseModel):
+    """Optional private, source-tied research input; never Gemini's action vote."""
+    instrument_id: str
+    verified_at: datetime
+    verified: bool = False
+    source_ids: list[str] = Field(default_factory=list)
+    thesis_status: Literal["UNKNOWN", "INTACT", "IMPROVING", "WEAKENED", "INVALIDATED"] = "UNKNOWN"
+    fundamental_signal: Literal["UNKNOWN", "STABLE", "IMPROVING", "WEAKENING"] = "UNKNOWN"
+    valuation_signal: Literal["UNKNOWN", "ATTRACTIVE", "FAIR", "EXPENSIVE"] = "UNKNOWN"
+    event_effect: Literal["NONE", "IMPROVING", "WEAKENING", "THESIS_BREAK", "RESERVE_RISK", "REDEMPTION_BLOCK"] = "NONE"
+    event_source_url: str = ""
+    thesis_basis_zh: str = ""
+    liquidity_verified: bool = False
+
+
+class PortfolioDecision(BaseModel):
+    position_id: str
+    ticker: str
+    instrument_id: str
+    name: str
+    asset_type: str
+    market: str
+    currency: str
+    recommendation: DecisionAction
+    confidence: DecisionConfidence
+    quantity: float
+    quote_id: str | None = None
+    quote_as_of: datetime | None = None
+    quote_market_date: str | None = None
+    quote_session: Session | None = None
+    current_price: float | None = None
+    change_pct: float | None = None
+    change_interval: str = "UNKNOWN"
+    cost_basis: float | None = None
+    basis_quality: Literal["VERIFIED", "UNRESOLVED"] = "UNRESOLVED"
+    unrealized_pnl_pct: float | None = None
+    position_market_value: float | None = None
+    position_market_value_twd: float | None = None
+    portfolio_market_value_twd: float | None = None
+    portfolio_weight: float | None = None
+    weight_quality: str = "UNAVAILABLE"
+    max_weight: float | None = None
+    target_weight: float | None = None
+    liquidity_verified: bool = False
+    allocation_source: str = ""
+    price_signal: str = "UNKNOWN"
+    valuation_signal: str = "UNKNOWN"
+    fundamental_signal: str = "UNKNOWN"
+    event_signal: str = "UNKNOWN"
+    event_impact_verified: bool = False
+    concentration_signal: str = "UNKNOWN"
+    thesis_status: str = "UNKNOWN"
+    rule_id: str
+    reasons: list[str]
+    risks: list[str]
+    add_trigger: str
+    reduce_trigger: str
+    exit_trigger: str
+    watch_condition: str = ""
+    data_gaps: list[str] = Field(default_factory=list)
+    source_ids: list[str] = Field(default_factory=list)
+    verified_event: PortfolioEventFact | None = None
+    event_checks: list[PortfolioEventFact] = Field(default_factory=list)
+    overlap_peers: list[str] = Field(default_factory=list)
+    event_severity: int = 0
+    sizing_status: str = "NOT_COMPUTED"
+    trade_quantity: float | None = None
+
+
+class PortfolioDecisionBrief(BaseModel):
+    schema_version: str = "portfolio-decision-v1"
+    run_id: str
+    as_of: datetime
+    portfolio_snapshot_id: str | None = None
+    policy_version: str
+    weight_basis: str
+    policy_description_zh: str
+    expected_positions: int
+    quote_covered_positions: int
+    event_checked_positions: int
+    decisions: list[PortfolioDecision]
+    summary_counts: dict[str, int]
+    priority_position_ids: list[str]
+    cash_status_zh: str
+    valuation_notes: list[str] = Field(default_factory=list)
 
 
 class Portfolio(BaseModel):

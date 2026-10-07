@@ -46,7 +46,7 @@ def quote_price_reference(symbol: str, context: MarketContext) -> PriceReference
     )
 
 
-from instrument_registry import REGISTRY, resolve_instrument
+from instrument_registry import CORE_MARKET_SYMBOLS, REGISTRY, resolve_instrument
 
 
 @dataclass(frozen=True)
@@ -129,17 +129,18 @@ def select_report_symbols(context: MarketContext) -> list[str]:
     else:
         priority = [
             "SPX", "NDX", "DJI", "SOX", "VIX", "TNX", "US2Y", "DXY",
-            "NVDA", "AAPL", "MSFT", "GOOGL", "AMZN", "META", "TSLA", "TSM", "AVGO", "AMD",
+            "NVDA", "AAPL", "MSFT", "GOOGL", "GOOG", "AMZN", "META", "TSLA", "TSM", "AVGO", "AMD",
             "BTC", "CL", "GC",
         ]
     selected = [s for s in priority if s in context.quotes and context.quotes[s].quality_status == "VALID"]
+    public_universe = set(CORE_MARKET_SYMBOLS) | set(priority)
     primary_market = "TW" if report_type.startswith("tw_") else "US"
     for s, obs in context.quotes.items():
-        if obs.quality_status == "VALID" and obs.market == primary_market and s not in selected:
+        if s in public_universe and obs.quality_status == "VALID" and obs.market == primary_market and s not in selected:
             selected.append(s)
     if len(selected) < 12:
         for s, obs in context.quotes.items():
-            if obs.quality_status == "VALID" and s not in selected:
+            if s in public_universe and obs.quality_status == "VALID" and s not in selected:
                 selected.append(s)
     return selected[:12]
 

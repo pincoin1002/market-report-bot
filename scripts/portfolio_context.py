@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 from datetime import datetime
 from pathlib import Path
@@ -27,10 +28,26 @@ def _position_context(pos: dict, ordinal: int, source: str) -> PositionContext |
     if not ticker:
         return None
     spec = resolve_instrument(ticker)
-    quantity = float(pos.get("quantity") or pos.get("shares") or 0)
+    quantity_value = pos.get("quantity") if pos.get("quantity") is not None else pos.get("shares", 0)
+    if isinstance(quantity_value, bool):
+        raise ValueError("PIOS quantity must be numeric, not boolean")
+    quantity = float(quantity_value)
+    if not math.isfinite(quantity):
+        raise ValueError("PIOS quantity must be finite")
     if quantity <= 0:
         return None
     account = pos.get("account")
+    basis = pos.get("cost_basis")
+    basis_currency = pos.get("basis_currency") or pos.get("currency") or spec.currency
+    basis_quality = str(pos.get("basis_quality") or pos.get("cost_basis_status") or "UNRESOLVED").upper()
+    if isinstance(basis, dict):
+        basis_quality = str(basis.get("quality") or basis.get("status") or basis_quality).upper()
+        basis_currency = basis.get("currency") or basis_currency
+        basis = basis.get("average_cost") if basis.get("average_cost") is not None else basis.get("unit_cost")
+    if not isinstance(basis, (int, float)) or isinstance(basis, bool) or not math.isfinite(basis) or basis <= 0:
+        basis = None
+        basis_quality = "UNRESOLVED"
+    allocation_verified = str(pos.get("allocation_quality", "")).upper() == "VERIFIED"
     return PositionContext(
         position_id=str(pos.get("position_id") or pos.get("id") or f"{source}:{spec.canonical_symbol}:{account or 'default'}:{ordinal}"),
         # The report registry key is a listing-level canonical symbol.  The
@@ -41,7 +58,12 @@ def _position_context(pos: dict, ordinal: int, source: str) -> PositionContext |
         name=str(pos.get("name") or spec.display_name),
         account=str(account) if account is not None else None,
         quantity=quantity,
-        cost_basis=pos.get("cost_basis"),
+        cost_basis=basis,
+        basis_quality="VERIFIED" if source == "pios" and basis_quality == "VERIFIED" else "UNRESOLVED",
+        basis_currency=basis_currency,
+        target_weight=pos.get("target_weight") if allocation_verified else None,
+        max_weight=pos.get("max_weight") if allocation_verified else None,
+        allocation_verified=allocation_verified,
         currency=pos.get("currency") or spec.currency,
         asset_type=pos.get("asset_type") or spec.asset_type,
         quote_id=pos.get("quote_id"),
@@ -117,6 +139,18 @@ class PIOSPortfolioProvider:
             item = _position_context(pos, ordinal, "pios")
             if item:
                 positions.append(item)
+        rules = payload.get("allocation_rules")
+        if isinstance(rules, dict) and str(rules.get("quality", "")).upper() == "VERIFIED":
+            targets = rules.get("target_weight_by_instrument", {})
+            limits = rules.get("max_weight_by_instrument", {})
+            for index, position in enumerate(positions):
+                updates = {}
+                if position.instrument_id in targets:
+                    updates["target_weight"] = targets[position.instrument_id]
+                if position.instrument_id in limits:
+                    updates["max_weight"] = limits[position.instrument_id]
+                if updates:
+                    positions[index] = PositionContext.model_validate({**position.model_dump(), **updates, "allocation_verified": True})
         cash = []
         for item in payload.get("cash", []):
             if isinstance(item, dict) and isinstance(item.get("amount"), (int, float)):
@@ -146,6 +180,9 @@ class PIOSPortfolioProvider:
             cash=cash,
             liabilities=liabilities,
             notes=str(payload.get("notes") or ""),
+            allocation_limits=(payload.get("allocation_rules", {}).get("max_weight_by_asset_type", {})
+                               if isinstance(payload.get("allocation_rules"), dict)
+                               and str(payload["allocation_rules"].get("quality", "")).upper() == "VERIFIED" else {}),
         )
 
 

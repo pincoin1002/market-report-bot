@@ -1,0 +1,72 @@
+version = "decision-risk-v1"
+weight_basis = "ACTIVE_HOLDINGS_MARKET_VALUE"
+description_zh = "預設檢視上限：股票20%、廣泛ETF40%、主題ETF10%、加密幣10%、代幣2%、單一穩定幣20%。占比以全部有效持倉的最新可得報價估值為分母，未含現金與負債；這是可調整的風險檢視規則，並非PIOS已確認的配置目標。個別已驗證PIOS規則優先；逐檔列出適用來源與上限。"
+abnormal_move_pct = 7.0
+stablecoin_depeg_pct = 1.0
+research_max_age_days = 7
+crypto_quote_max_age_minutes = 15
+role_max_age_days = 90
+target_drift_tolerance = 0.01
+
+[max_weights]
+EQUITY = 0.20
+ETF = 0.40
+THEMATIC_ETF = 0.10
+CRYPTO = 0.10
+TOKEN = 0.02
+STABLECOIN = 0.20
+
+# Public instrument mandates, not a user's holdings or recommendations.
+# Families identify qualitative exposure overlap, never a live overlap percentage.
+[etfs.VTI]
+name_zh = "美國全市場ETF"
+family = "US_LARGE_CAP"
+role_zh = "分散持有美國股票市場"
+source_url = "https://investor.vanguard.com/investment-products/etfs/profile/vti"
+checked_at = "2026-10-07"
+[etfs.VOO]
+name_zh = "標普500ETF"
+family = "US_LARGE_CAP"
+role_zh = "追蹤美國大型股標普500指數"
+source_url = "https://advisors.vanguard.com/investments/products/voo/vanguard-sp-500-etf"
+checked_at = "2026-10-07"
+[etfs.QQQ]
+name_zh = "那斯達克100ETF"
+family = "US_LARGE_CAP"
+role_zh = "追蹤那斯達克100指數；與美國大型股ETF存在部分曝險重疊"
+source_url = "https://www.invesco.com/qqq-etf/en/about.html"
+checked_at = "2026-10-07"
+[etfs."0050"]
+name_zh = "元大台灣50"
+family = "TAIWAN_50"
+role_zh = "追蹤臺灣50指數"
+source_url = "https://yuantaetfs.com/product/detail/0050/Basic_information"
+checked_at = "2026-10-07"
+[etfs."006208"]
+name_zh = "富邦台50"
+family = "TAIWAN_50"
+role_zh = "追蹤臺灣50指數"
+source_url = "https://www.fubon.com/asset-management/?Fd=34E"
+checked_at = "2026-10-07"
+[etfs.DRAM]
+name_zh = "記憶體主題ETF"
+family = "MEMORY_SEMICONDUCTORS"
+role_zh = "持有全球記憶體產業主題曝險；不是廣泛市場分散配置"
+thematic = true
+source_url = "https://www.roundhillinvestments.com/etf/dram/"
+checked_at = "2026-10-07"
+
+[stablecoins.USDC]
+name_zh = "美元穩定幣"
+source_url = "https://www.circle.com/legal/usdc-risk-factors"
+checked_at = "2026-10-07"
+[stablecoins.USDT]
+name_zh = "美元穩定幣"
+source_url = "https://tether.to/en/tether-issuance-primer/"
+checked_at = "2026-10-07"
+
+[crypto_kinds]
+BTC = "CRYPTO"
+ETH = "CRYPTO"
+BONK = "TOKEN"
+SXT = "TOKEN"

@@ -219,10 +219,11 @@ class InvestmentProductQualityTest(unittest.TestCase):
         self.assertFalse(validate_numeric_provenance(draft.rendered_markdown.replace("+2.55%", "-2.55%"), self.context)[0])
 
     def test_34_small_price_cannot_validate_zero_or_other_tiny_price(self):
-        draft = build_public_draft(self.context)
-        self.assertTrue(validate_numeric_provenance(draft.rendered_markdown, self.context)[0])
+        # Explicit validator probe: private-only BONK is no longer selected for public reports.
+        text = "# 報價驗證\n| 標的 | 報價 |\n| Bonk (BONK) | 0.00000375 |"
+        self.assertTrue(validate_numeric_provenance(text, self.context)[0])
         for invalid in ("0.00", "0.00000750"):
-            self.assertFalse(validate_numeric_provenance(draft.rendered_markdown.replace("0.00000375", invalid), self.context)[0])
+            self.assertFalse(validate_numeric_provenance(text.replace("0.00000375", invalid), self.context)[0])
 
     def test_35_previous_flow_failure_does_not_erase_current(self):
         flows = _institutional_flows(flow_payload("20261006"), {"data": []}, "2026-10-06", "2026-10-05", NOW)

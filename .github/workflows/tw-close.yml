@@ -171,7 +171,7 @@ jobs:
             data/report_summary.json
             data/validation_results.json
             data/portfolio_advice_audit.json
-            data/portfolio_action_brief.json
+            data/portfolio_decision_brief.json.enc
             data/delivery_state.json
             data/report_result.json
           retention-days: 30

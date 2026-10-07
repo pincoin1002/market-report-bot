@@ -93,7 +93,7 @@ def _make_23_portfolio() -> PortfolioContext:
     return PortfolioContext(
         snapshot_id="snap_23",
         as_of=datetime(2026, 9, 29, 15, 0, tzinfo=timezone.utc),
-        source="TEST",
+        source="PIOS_PORTFOLIO_SNAPSHOT",
         positions=positions,
     )
 

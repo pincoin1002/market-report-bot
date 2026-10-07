@@ -493,12 +493,13 @@ def telegram_destination_fingerprint(chat_id: str) -> str:
     return hashlib.sha256(str(chat_id).strip().encode("utf-8")).hexdigest()[:8]
 
 
-def _send_telegram_product(text: str, *, product: str, dry_run: bool = False) -> dict:
+def _send_telegram_product(text: str, *, product: str, dry_run: bool = False,
+                           chunks_override: list[str] | None = None, plain_text: bool = False) -> dict:
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     chat_ids = [cid.strip() for cid in os.getenv("TELEGRAM_CHAT_ID", "").split(",") if cid.strip()]
     if not dry_run and (not token or not chat_ids):
         raise RuntimeError("Telegram delivery credentials missing")
-    chunks = _split_message(text)
+    chunks = chunks_override if chunks_override is not None else _split_message(text)
     fingerprints = [telegram_destination_fingerprint(cid) for cid in chat_ids]
     result = {"ok": False, "product": product, "destination_fingerprints": fingerprints,
               "message_ids": [], "message_lengths": [len(chunk) for chunk in chunks],
@@ -515,7 +516,10 @@ def _send_telegram_product(text: str, *, product: str, dry_run: bool = False) ->
         fingerprint = telegram_destination_fingerprint(cid)
         for i, chunk in enumerate(chunks):
             try:
-                response = requests.post(url, json={"chat_id": cid, "text": chunk, "parse_mode": "Markdown"}, timeout=30)
+                body = {"chat_id": cid, "text": chunk}
+                if not plain_text:
+                    body["parse_mode"] = "Markdown"
+                response = requests.post(url, json=body, timeout=30)
                 if response.status_code != 200:
                     log.warning("Telegram Markdown rejected; retrying plain text", extra={"product": product,
                                 "destination_fingerprint": fingerprint, "chunk": i + 1,
@@ -696,6 +700,12 @@ def send_advice_telegram(advice: str, report_type: str, *, dry_run: bool = False
                                   product="PRIVATE_ADVICE", dry_run=dry_run)
 
 
+def send_decision_telegram(brief, *, dry_run: bool = False) -> dict:
+    from portfolio_decisions import decision_telegram_chunks
+    return _send_telegram_product("", product="PRIVATE_DECISIONS", dry_run=dry_run,
+                                  chunks_override=decision_telegram_chunks(brief), plain_text=True)
+
+
 def send_advice_email(advice: str, report_type: str) -> None:
     if os.getenv("ENABLE_EMAIL", "false").lower() not in ("true", "1", "yes"):
         log.info("Email advice delivery disabled (ENABLE_EMAIL not set to true) — skipping")
@@ -857,16 +867,16 @@ def run_portfolio_advice(report: str, report_type: str,
     Generate-only workflows must still leave an audit trail in the protected
     Actions artifact.  Holdings never enter the committed public report.
     """
-    raw = portfolio_store.load_portfolio()
     portfolio_context = load_authoritative_portfolio()
-    ok, reason = validate_portfolio_quotes(raw, snapshot, portfolio_context)
-    if not ok:
-        log.warning("portfolio advice blocked", extra={"reason": reason})
-        write_advice_audit(report_type, "BLOCKED", reason, snapshot)
-        if deliver and (portfolio_context.positions or portfolio_store.ENC_PATH.exists() or portfolio_store.has_positions(raw)):
-            send_operational_notice(f"{reason}\n\n已停止產生持股建議，避免用錯誤或缺漏價格下判斷。", report_type)
+    if portfolio_context.source != "PIOS_PORTFOLIO_SNAPSHOT" or not portfolio_context.positions:
+        write_advice_audit(report_type, "BLOCKED", "authoritative active positions unavailable", snapshot)
         return "BLOCKED"
-    context = load_market_context(report_type, snapshot)
+    try:
+        context = load_market_context(report_type, snapshot)
+    except (OSError, ValueError):
+        context = MarketContext(run_id="private-missing-quotes", report_type=report_type,
+            market_date=get_market_date(report_type).strftime("%Y-%m-%d"),
+            generated_at=datetime.now(tz=timezone.utc), market_session="PREVIOUS_CLOSE", quotes={})
     force_event_refresh = {
         pos.ticker.upper()
         for pos in portfolio_context.positions
@@ -875,20 +885,33 @@ def run_portfolio_advice(report: str, report_type: str,
             and abs((context.quotes.get(pos.instrument_id) or context.quotes.get(pos.ticker)).change_pct) >= 7.0
         )
     }
-    event_facts, upcoming_events = fetch_portfolio_events(
-        portfolio=portfolio_context,
-        model=model,
-        force_refresh_tickers=force_event_refresh,
-        network_scope="forced_only",
-    )
+    try:
+        event_facts, upcoming_events = fetch_portfolio_events(
+            portfolio=portfolio_context, model=model, force_refresh_tickers=force_event_refresh,
+            network_scope="forced_only",
+        )
+    except Exception as exc:
+        log.warning("private event evidence unavailable", extra={"error_type": type(exc).__name__})
+        event_facts, upcoming_events = [], []
+    consumed_at = datetime.now(tz=timezone.utc)
+    # Retain the old anomaly artifact as supplementary audit only.
     brief = build_action_brief(
         context,
         portfolio_context,
         verified_events=event_facts,
         upcoming_events=upcoming_events,
-        as_of=datetime.now(tz=timezone.utc),
+        as_of=consumed_at,
     )
-    ok, reason = validate_action_brief(brief, context, portfolio_context)
+    from portfolio_decisions import (build_decision_brief, load_decision_evidence,
+                                     render_decision_brief, validate_decision_brief)
+    try:
+        decision_evidence = load_decision_evidence()
+    except (OSError, ValueError) as exc:
+        decision_evidence = []
+        log.warning("private research input unavailable", extra={"error_type": type(exc).__name__})
+    decisions = build_decision_brief(context, portfolio_context, events=event_facts,
+                                    evidence=decision_evidence, as_of=consumed_at)
+    ok, reason = validate_decision_brief(decisions, context, portfolio_context)
     if not ok:
         log.warning("private advice validation failed", extra={"reason": reason})
         write_advice_audit(report_type, "BLOCKED", reason, snapshot)
@@ -898,16 +921,20 @@ def run_portfolio_advice(report: str, report_type: str,
     write_advice_audit(report_type, "VALIDATED", reason, snapshot)
     data_dir = Path(__file__).parent.parent / "data"
     (data_dir / "portfolio_action_brief.json").write_text(brief.model_dump_json(indent=2), encoding="utf-8")
-    advice = render_action_brief(brief)
-    ok, reason = validate_private_advice_text(advice, raw, snapshot)
-    if not ok:
-        log.warning("rendered private advice validation failed", extra={"reason": reason})
-        write_advice_audit(report_type, "BLOCKED", reason, snapshot)
-        if deliver:
-            send_operational_notice(f"{reason}\n\n已停止傳送持股建議。", report_type)
-        return "BLOCKED"
+    payload = decisions.model_dump_json(indent=2)
+    (data_dir / "portfolio_decision_brief.json").write_text(payload, encoding="utf-8")
+    key = os.getenv("PORTFOLIO_KEY", "").strip()
+    if key:
+        from cryptography.fernet import Fernet
+        try:
+            (data_dir / "portfolio_decision_brief.json.enc").write_bytes(Fernet(key.encode()).encrypt(payload.encode()))
+        except ValueError:
+            log.warning("private decision artifact encryption key invalid; plaintext is not uploaded")
+    else:
+        log.warning("private decision artifact not uploaded without encryption key")
+    advice = render_decision_brief(decisions)
     if deliver:
-        send_advice_telegram(advice, report_type)
+        send_decision_telegram(decisions)
         send_advice_email(advice, report_type)
         return "SENT"
     return "SKIPPED"
