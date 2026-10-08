@@ -1,0 +1,11 @@
+{
+  "key": "us_close:20261008",
+  "state": "DELIVERED",
+  "at": "2026-10-08T06:33:36.131059+00:00",
+  "telegram_message_ids": [
+    815
+  ],
+  "destination_fingerprints": [
+    "4fa4c083"
+  ]
+}
