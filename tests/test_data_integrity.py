@@ -1243,5 +1243,55 @@ class SafetyAndWorkflowTest(unittest.TestCase):
         self.assertNotIn("duplicate_skipped", gen_block)
 
 
+class TaiwanCloseLateRunnerRegressionTest(unittest.TestCase):
+    def test_tw_close_report_date_uses_completed_exchange_session_after_midnight(self):
+        late_runner = datetime(2026, 10, 13, 0, 39, tzinfo=timezone(timedelta(hours=8)))
+        self.assertEqual(report_market_date("tw_close", now=late_runner), "2026-10-12")
+
+    def test_historical_twse_provider_parses_exact_session_close_table(self):
+        payload = {
+            "stat": "OK",
+            "date": "20261012",
+            "tables": [{
+                "fields": ["證券代號", "證券名稱", "成交股數", "收盤價"],
+                "data": [
+                    ["2330", "台積電", "1,000", "2,600.00"],
+                    ["2317", "鴻海", "2,000", "260.50"],
+                ],
+            }],
+        }
+        parsed = providers.TWSEHistoricalCloseProvider._close_map(payload, "2026-10-12")
+        self.assertEqual(parsed["2330"], 2600.0)
+        self.assertEqual(parsed["2317"], 260.5)
+
+    def test_historical_twse_provider_reconstructs_change_from_previous_official_session(self):
+        provider = providers.TWSEHistoricalCloseProvider()
+        current = {"2330": 2600.0, "2317": 260.0}
+        previous = {"2330": 2500.0, "2317": 250.0}
+        with patch.object(provider, "_fetch_close_map", side_effect=[current, previous]), \
+             patch("providers.get_previous_completed_session_date", return_value="2026-10-08"):
+            quotes = provider.fetch_many(
+                ["2330.TW", "2317.TW"],
+                expected_dates={"2330.TW": "2026-10-12", "2317.TW": "2026-10-12"},
+            )
+        self.assertEqual(quotes["2330.TW"].data_date, "2026-10-12")
+        self.assertEqual(quotes["2330.TW"].prev_close, 2500.0)
+        self.assertEqual(quotes["2330.TW"].change_pct, 4.0)
+        self.assertEqual(quotes["2317.TW"].change_pct, 4.0)
+
+    def test_failover_chain_uses_historical_twse_before_yahoo_chart(self):
+        source = inspect.getsource(providers.fetch_with_failover)
+        self.assertLess(source.index("TWSEHistoricalCloseProvider()"), source.index("YahooChartProvider()"))
+
+    def test_tw_close_workflow_stages_early_and_allows_repository_dispatch_delivery(self):
+        text = (ROOT / ".github/workflows/tw-close.yml").read_text(encoding="utf-8")
+        self.assertIn('cron: "17 3 * * 1-5"', text)
+        self.assertIn("name: Stage native Taiwan Close backup", text)
+        self.assertIn("Hold Taiwan-close backup until 15:05 Taipei", text)
+        self.assertIn("needs: [native-stage]", text)
+        delivery = text[text.index("name: Deliver validated Taiwan Close Report"):text.index("name: Prepare review package")]
+        self.assertIn("github.event_name == 'repository_dispatch'", delivery)
+
+
 if __name__ == "__main__":
     unittest.main()
