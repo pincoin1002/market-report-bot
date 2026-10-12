@@ -15,7 +15,7 @@ import requests
 import yfinance as yf
 from tenacity import retry, stop_after_attempt, wait_exponential_jitter
 
-from market_session import NY, TPE, classify_us_session
+from market_session import NY, TPE, classify_us_session, get_previous_completed_session_date
 from models import InstrumentSpec, Quote, QuoteObservation, Session
 from quote_quality import validate_observation
 
@@ -144,6 +144,105 @@ class TWSEProvider:
                     data_date=date)
             except (KeyError, ValueError):
                 continue
+        return out
+
+class TWSEHistoricalCloseProvider:
+    """Historical official TWSE close fallback for listed .TW instruments.
+
+    STOCK_DAY_ALL only exposes the latest trading day. A delayed GitHub
+    runner can therefore miss the intended Taiwan-close session once the
+    calendar date has rolled over. This provider uses the date-addressable
+    RWD MI_INDEX endpoint and reads the all-securities close table for the
+    exact expected exchange session. It also fetches the immediately previous
+    completed session so prev_close and change percent remain deterministic.
+    """
+    name = "twse_historical_close"
+    URL = "https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX"
+
+    @staticmethod
+    def _date_param(session_date: str) -> str:
+        return session_date.replace("-", "")
+
+    @staticmethod
+    def _close_map(payload: dict, expected_date: str) -> dict[str, float]:
+        if not isinstance(payload, dict) or payload.get("stat") != "OK":
+            raise ValueError("TWSE MI_INDEX response unavailable")
+        if str(payload.get("date") or "") != expected_date.replace("-", ""):
+            raise ValueError("TWSE MI_INDEX response date mismatch")
+        for table in payload.get("tables", []):
+            fields = [str(field) for field in table.get("fields", [])]
+            if "證券代號" not in fields or "收盤價" not in fields:
+                continue
+            code_index = fields.index("證券代號")
+            close_index = fields.index("收盤價")
+            out: dict[str, float] = {}
+            for row in table.get("data", []):
+                if len(row) <= max(code_index, close_index):
+                    continue
+                code = str(row[code_index]).strip()
+                raw_close = str(row[close_index]).replace(",", "").strip()
+                if not code or raw_close in {"", "--", "---"}:
+                    continue
+                try:
+                    out[code] = float(raw_close)
+                except ValueError:
+                    continue
+            if out:
+                return out
+        raise ValueError("TWSE MI_INDEX security close table missing")
+
+    def _fetch_close_map(self, session_date: str) -> dict[str, float]:
+        response = requests.get(
+            self.URL,
+            params={
+                "response": "json",
+                "date": self._date_param(session_date),
+                "type": "ALLBUT0999",
+            },
+            headers={"User-Agent": "market-report-bot/1.0"},
+            timeout=25,
+        )
+        response.raise_for_status()
+        return self._close_map(response.json(), session_date)
+
+    def fetch_many(self, symbols: list[str], expected_dates: dict[str, str] | None = None) -> dict[str, Quote]:
+        wanted = {symbol.split(".")[0]: symbol for symbol in symbols if symbol.endswith(".TW")}
+        if not wanted:
+            return {}
+        expected_dates = expected_dates or {}
+        by_date: dict[str, set[str]] = {}
+        for code, symbol in wanted.items():
+            expected_date = expected_dates.get(symbol)
+            if expected_date:
+                by_date.setdefault(expected_date, set()).add(code)
+        if not by_date:
+            return {}
+
+        out: dict[str, Quote] = {}
+        for expected_date, codes in by_date.items():
+            try:
+                previous_date = get_previous_completed_session_date("TW", expected_date)
+                current = self._fetch_close_map(expected_date)
+                previous = self._fetch_close_map(previous_date)
+            except Exception:
+                log.warning(
+                    "TWSE historical close fallback failed",
+                    extra={"expected_date": expected_date},
+                    exc_info=True,
+                )
+                continue
+            for code in codes:
+                last = current.get(code)
+                prev = previous.get(code)
+                if last is None or prev is None or prev <= 0:
+                    continue
+                symbol = wanted[code]
+                out[symbol] = Quote(
+                    price=round(last, 4),
+                    prev_close=round(prev, 4),
+                    change_pct=round((last - prev) / prev * 100, 2),
+                    data_date=expected_date,
+                )
         return out
 
 
@@ -434,7 +533,7 @@ def fetch_with_failover(symbols: list[str], expected_dates: dict[str, str] | Non
     whatever the previous tiers missed."""
     chain: list[QuoteProvider] = [
         YFinanceBatchProvider(), YFinanceSingleProvider(),
-        TWSEProvider(), YahooChartProvider(),
+        TWSEProvider(), TWSEHistoricalCloseProvider(), YahooChartProvider(),
     ]
     quotes: dict[str, Quote] = {}
     sources: dict[str, str] = {}
