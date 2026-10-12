@@ -1,0 +1,34 @@
+name: Taiwan Close Fix Smoke
+
+on:
+  push:
+    branches:
+      - fix/tw-close-late-run-20261013
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PIOS_PORTFOLIO_SNAPSHOT_JSON: ${{ secrets.PIOS_PORTFOLIO_SNAPSHOT_JSON }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+      - run: pip install -r requirements.txt
+      - name: Fetch delayed Taiwan-close snapshot
+        run: python scripts/fetch_market_data.py tw_close
+      - name: Generate report without delivery
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          PORTFOLIO_KEY: ${{ secrets.PORTFOLIO_KEY }}
+          REPORT_MODEL: ${{ vars.REPORT_MODEL }}
+          DRY_RUN: "true"
+        run: python scripts/generate_report.py tw_close --generate-only
+      - name: Validate report
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          REPORT_MODEL: ${{ vars.REPORT_MODEL }}
+        run: python scripts/validate_report.py tw_close
