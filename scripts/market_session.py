@@ -145,6 +145,11 @@ def tw_open_snapshot_contract_status(now: datetime | None = None) -> str:
 
 
 def report_market_date(report_type: str, now: datetime | None = None) -> str:
+    if report_type == "tw_close":
+        # A scheduled runner can start hours late and cross Taipei midnight.
+        # Close-report identity follows the latest completed TWSE session, not
+        # the runner's wall-clock calendar date.
+        return get_target_market_date("tw_close", "TW", now=now)
     if report_type.startswith("us_"):
         local = (now or datetime.now(tz=NY)).astimezone(NY)
         return local.strftime("%Y-%m-%d")
