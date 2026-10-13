@@ -30,3 +30,8 @@ class ReceiptTests(unittest.TestCase):
             self.assertIn(f'group: {name}-canonical-delivery',text)
             self.assertIn('DELIVERY_RECEIPT_REMOTE_CHECK: "true"',text)
             self.assertNotIn('time.sleep(seconds)',text)
+    def test_us_open_checks_latest_receipt_before_expiry_classification(self):
+        root=Path(__file__).resolve().parents[1]
+        text=(root/'.github/workflows/us-open.yml').read_text()
+        block=text[text.index('name: Resolve canonical US Open intent'):text.index('name: Verify Telegram configuration')]
+        self.assertIn('DELIVERY_RECEIPT_REMOTE_CHECK: "true"',block)
