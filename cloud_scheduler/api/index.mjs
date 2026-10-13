@@ -21,14 +21,9 @@ export function classify(slot, now = new Date()) {
   const weekend = spec.type === 'us_close' ? ['Sun', 'Mon'] : ['Sat', 'Sun'];
   if (weekend.includes(parts.weekday)) return { status: 'MARKET_CLOSED' };
   if (time < spec.start || time >= spec.end) return { status: 'OUTSIDE_DELIVERY_WINDOW' };
-  // Public close scheduling is TPE-based; exact market-date determination stays
-  // with the exchange-aware report pipeline. US close uses prior NYSE weekday.
-  let marketDay = day;
-  if (spec.type === 'us_close') {
-    const prior = new Date(`${day}T00:00:00Z`); prior.setUTCDate(prior.getUTCDate() - 1);
-    marketDay = prior.toISOString().slice(0, 10);
-  }
-  return { status: 'DISPATCH', spec, day: marketDay, key: `${spec.type}:${marketDay.replaceAll('-', '')}` };
+  // US-close delivery identity is the TPE publication date, as confirmed by
+  // production receipts; it is NOT the prior NYSE quote session date.
+  return { status: 'DISPATCH', spec, day, key: `${spec.type}:${day.replaceAll('-', '')}` };
 }
 
 export function receiptValid(receipt, key) {

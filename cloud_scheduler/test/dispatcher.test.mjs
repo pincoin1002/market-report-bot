@@ -15,6 +15,9 @@ test('DST slots are separate', () => {
   assert.equal(classify('edt', new Date('2026-10-13T13:05:00Z')).status, 'DISPATCH');
   assert.equal(classify('est', new Date('2026-10-13T13:05:00Z')).status, 'INACTIVE_DST_SLOT');
 });
+test('US-close receipt key is TPE publication date, not prior quote session', () => {
+  assert.equal(classify('us_close', new Date('2026-10-13T00:30:00Z')).key, 'us_close:20261013');
+});
 test('authentication cannot trigger a report', async () => {
   assert.equal((await handle('tw_close', '', { now, env, fetcher: () => { throw Error(); } }))[0], 401);
 });
