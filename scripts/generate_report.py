@@ -503,7 +503,7 @@ def _send_telegram_product(text: str, *, product: str, dry_run: bool = False,
     fingerprints = [telegram_destination_fingerprint(cid) for cid in chat_ids]
     result = {"ok": False, "product": product, "destination_fingerprints": fingerprints,
               "message_ids": [], "message_lengths": [len(chunk) for chunk in chunks],
-              "chunk_count": len(chunks), "destination_count": len(chat_ids)}
+              "chunk_count": len(chunks), "destination_count": len(chat_ids), "confirmations": []}
     if dry_run:
         result.update({"ok": True, "simulated": True})
         log.info("Telegram delivery simulated", extra={"product": product,
@@ -534,6 +534,8 @@ def _send_telegram_product(text: str, *, product: str, dry_run: bool = False,
                     raise RuntimeError("Telegram confirmed a different destination")
                 message_id = payload["result"]["message_id"]
                 result["message_ids"].append(message_id)
+                result["confirmations"].append({"http_status": response.status_code, "api_ok": True,
+                    "message_id": message_id, "destination_fingerprint": fingerprint, "chunk": i + 1})
                 log.info("Telegram chunk confirmed", extra={"product": product, "ok": True,
                          "message_id": message_id, "destination_fingerprint": fingerprint,
                          "message_length": len(chunk), "chunk": i + 1, "chunk_count": len(chunks)})

@@ -2,11 +2,8 @@ name: 台股開盤戰報
 
 on:
   schedule:
-    # Native backup is staged at 03:17 TPE, away from the top-of-hour load
-    # window, then held until 07:40. Recent GitHub schedule events arrived
-    # almost three hours late; this leaves >5 hours of delay tolerance while
-    # preserving a strict 09:00 TPE expiry for the pre-open briefing.
-    - cron: "17 3 * * 1-5"
+    # Native fallback; no paid runner sleeps waiting for the intended window.
+    - cron: "47 7 * * 1-5"
       timezone: "Asia/Taipei"
   repository_dispatch:
     types: [trigger-tw-open]
@@ -35,34 +32,8 @@ on:
 
 
 jobs:
-  native-stage:
-    name: Stage native Taiwan Open backup
-    if: github.event_name == 'schedule'
-    runs-on: ubuntu-latest
-    timeout-minutes: 280
-    steps:
-      - name: Hold Taiwan-open backup until 07:40 Taipei
-        run: |
-          python - <<'PY'
-          import time
-          from datetime import datetime
-          from zoneinfo import ZoneInfo
-
-          tpe = ZoneInfo("Asia/Taipei")
-          now = datetime.now(tz=tpe)
-          target = now.replace(hour=7, minute=40, second=0, microsecond=0)
-          seconds = max(0, int((target - now).total_seconds()))
-          if seconds:
-              print(f"Taiwan-open backup staged early; waiting {seconds}s until 07:40 Taipei")
-              time.sleep(seconds)
-          else:
-              print("Taiwan-open backup arrived after 07:40 Taipei; handing off immediately")
-          PY
-
   generate-report:
     name: Generate Taiwan Open Report
-    needs: [native-stage]
-    if: always() && (github.event_name != 'schedule' || needs.native-stage.result == 'success')
     runs-on: ubuntu-latest
     concurrency:
       group: tw-open-canonical-delivery
@@ -88,6 +59,9 @@ jobs:
 
       - name: Check whether today's Taiwan-open report already completed
         id: existing
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          DELIVERY_RECEIPT_REMOTE_CHECK: "true"
         run: |
           python - <<'PY' >> "$GITHUB_OUTPUT"
           from datetime import datetime
@@ -98,25 +72,6 @@ jobs:
 
           today = datetime.now(tz=ZoneInfo("Asia/Taipei")).strftime("%Y%m%d")
           print(f"already_reported={'true' if already_delivered(f'tw_open:{today}') else 'false'}")
-          PY
-
-      - name: Wait for canonical Taiwan-open snapshot time
-        if: github.event.inputs.dry_run != 'true' && steps.existing.outputs.already_reported != 'true' && github.event_name == 'workflow_dispatch' && github.event.inputs.trigger_source == 'vercel_cron'
-        run: |
-          python - <<'PY'
-          import time
-          from datetime import datetime
-          from zoneinfo import ZoneInfo
-
-          tpe = ZoneInfo("Asia/Taipei")
-          now = datetime.now(tz=tpe)
-          target = now.replace(hour=7, minute=40, second=0, microsecond=0)
-          seconds = max(0, int((target - now).total_seconds()))
-          if seconds:
-              print(f"External Taiwan-open scheduler staged early; waiting {seconds}s until 07:40 Taipei")
-              time.sleep(seconds)
-          else:
-              print("External Taiwan-open scheduler reached canonical window; continuing")
           PY
 
       - name: Fetch market snapshot
@@ -210,8 +165,10 @@ jobs:
           fi
 
       - name: Deliver validated Taiwan Open Report
-        if: steps.existing.outputs.already_reported != 'true' && steps.fetch.outputs.market_closed != 'true' && steps.fetch.outputs.intent_unavailable != 'true' && (github.event.inputs.dry_run == 'true' || github.event_name == 'schedule' || inputs.send_telegram == true || github.event.inputs.send_telegram == 'true')
+        if: steps.existing.outputs.already_reported != 'true' && steps.fetch.outputs.market_closed != 'true' && steps.fetch.outputs.intent_unavailable != 'true' && (github.event.inputs.dry_run == 'true' || github.event_name == 'schedule' || github.event_name == 'repository_dispatch' || inputs.send_telegram == true || github.event.inputs.send_telegram == 'true')
         env:
+          GITHUB_TOKEN: ${{ github.token }}
+          DELIVERY_RECEIPT_REMOTE_CHECK: "true"
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           PORTFOLIO_KEY: ${{ secrets.PORTFOLIO_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}

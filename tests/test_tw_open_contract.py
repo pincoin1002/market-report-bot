@@ -39,13 +39,12 @@ class TaiwanOpenIntentContractTest(unittest.TestCase):
         self.assertIn("台股開盤戰報 2026-10-05｜開盤前參考", draft.headline)
         self.assertNotIn("台股開盤戰報 2026-10-02｜", draft.headline)
 
-    def test_workflow_is_prestaged_and_blocks_late_delivery(self):
+    def test_workflow_is_window_bound_and_blocks_late_delivery(self):
         text = (ROOT / ".github/workflows/tw-open.yml").read_text(encoding="utf-8")
-        self.assertIn('cron: "17 3 * * 1-5"', text)
+        self.assertIn('cron: "47 7 * * 1-5"', text)
         self.assertIn('timezone: "Asia/Taipei"', text)
-        self.assertIn("Stage native Taiwan Open backup", text)
-        self.assertIn("Hold Taiwan-open backup until 07:40 Taipei", text)
-        self.assertIn("needs: [native-stage]", text)
+        self.assertNotIn("native-stage", text)
+        self.assertNotIn("time.sleep", text)
         self.assertIn("TW_OPEN_INTENT_EXPIRED", text)
         self.assertIn("steps.fetch.outputs.intent_unavailable != 'true'", text)
         self.assertNotIn('cron: "50 23 * * 0-4"', text)
@@ -69,8 +68,8 @@ class TaiwanOpenIntentContractTest(unittest.TestCase):
     def test_workflow_serializes_external_and_native_delivery(self):
         text = (ROOT / ".github/workflows/tw-open.yml").read_text(encoding="utf-8")
         self.assertIn("group: tw-open-canonical-delivery", text)
-        self.assertIn("Wait for canonical Taiwan-open snapshot time", text)
-        self.assertIn("trigger_source == 'vercel_cron'", text)
+        self.assertNotIn("Wait for canonical Taiwan-open snapshot time", text)
+        self.assertIn('DELIVERY_RECEIPT_REMOTE_CHECK: "true"', text)
         self.assertIn("Check whether today's Taiwan-open report already completed", text)
         self.assertIn("already_reported != 'true'", text)
         self.assertIn("timeout-minutes: 90", text)

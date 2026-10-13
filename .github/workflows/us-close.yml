@@ -29,6 +29,9 @@ jobs:
   generate-report:
     name: Generate US Close Report
     runs-on: ubuntu-latest
+    concurrency:
+      group: us-close-canonical-delivery
+      cancel-in-progress: false
     env:
       PIOS_PORTFOLIO_SNAPSHOT_JSON: ${{ secrets.PIOS_PORTFOLIO_SNAPSHOT_JSON }}
     timeout-minutes: 30
@@ -128,6 +131,8 @@ jobs:
       - name: Deliver validated US Close Report
         if: steps.fetch.outputs.market_closed != 'true' && (github.event.inputs.dry_run == 'true' || github.event_name == 'schedule' || inputs.send_telegram == true || github.event.inputs.send_telegram == 'true')
         env:
+          GITHUB_TOKEN: ${{ github.token }}
+          DELIVERY_RECEIPT_REMOTE_CHECK: "true"
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           PORTFOLIO_KEY: ${{ secrets.PORTFOLIO_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}

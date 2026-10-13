@@ -2,10 +2,8 @@ name: 美股開盤日報
 
 on:
   schedule:
-    # Native backup is intentionally staged hours before 09:05 New York.
-    # Recent GitHub schedule events arrived 4-6 hours late; starting at 00:17
-    # gives the workflow enough slack while preserving the canonical 09:05 snapshot.
-    - cron: "17 0 * * 1-5"
+    # Native fallback is window-bound; precision timing is external.
+    - cron: "12 9 * * 1-5"
       timezone: "America/New_York"
   repository_dispatch:
     types: [trigger-us-open]
@@ -59,34 +57,8 @@ on:
 
 
 jobs:
-  native-stage:
-    name: Stage native US Open backup
-    if: github.event_name == 'schedule'
-    runs-on: ubuntu-latest
-    timeout-minutes: 270
-    steps:
-      - name: Hold native backup until 04:30 New York
-        run: |
-          python - <<'PY'
-          import time
-          from datetime import datetime
-          from zoneinfo import ZoneInfo
-
-          ny = ZoneInfo("America/New_York")
-          now = datetime.now(tz=ny)
-          target = now.replace(hour=4, minute=30, second=0, microsecond=0)
-          seconds = max(0, int((target - now).total_seconds()))
-          if seconds:
-              print(f"Native US-open backup staged early; waiting {seconds}s until 04:30 New York")
-              time.sleep(seconds)
-          else:
-              print("Native US-open backup arrived after 04:30 New York; handing off immediately")
-          PY
-
   generate-report:
     name: Generate US Open Report
-    needs: [native-stage]
-    if: always() && (github.event_name != 'schedule' || needs.native-stage.result == 'success')
     runs-on: ubuntu-latest
     # One mutable daily report and delivery state means concurrent external,
     # native-backup, and manual triggers must never run side-by-side.
@@ -100,7 +72,7 @@ jobs:
       US_OPEN_TRIGGER_SOURCE: ${{ github.event.inputs.trigger_source || github.event.client_payload.trigger_source || github.event_name }}
       US_OPEN_SCHEDULER_TRIGGERED_AT: ${{ github.event.inputs.scheduler_triggered_at || github.event.client_payload.scheduler_triggered_at || '' }}
       US_OPEN_SCHEDULER_TERMINAL_STATE: ${{ github.event.inputs.scheduler_terminal_state || github.event.client_payload.scheduler_terminal_state || '' }}
-    timeout-minutes: 330
+    timeout-minutes: 30
     permissions:
       contents: write
 
@@ -189,10 +161,6 @@ jobs:
               raise SystemExit("Telegram scheduler delivery test failed")
           print("Controlled scheduler delivery test sent")
           PY
-
-      - name: Wait for canonical US Open snapshot time
-        if: github.event.inputs.dry_run != 'true' && (github.event_name != 'workflow_dispatch' || (github.event.inputs.safe_verify != 'true' && github.event.inputs.scheduler_delivery_test != 'true')) && steps.intent.outputs.already_reported != 'true'
-        run: python scripts/us_open_wait.py
 
       - name: Fetch market snapshot
         id: fetch
@@ -315,6 +283,8 @@ jobs:
         id: deliver
         if: (github.event_name != 'workflow_dispatch' || (github.event.inputs.safe_verify != 'true' && github.event.inputs.scheduler_delivery_test != 'true')) && steps.intent.outputs.already_reported != 'true' && steps.fetch.outputs.market_closed != 'true' && steps.fetch.outputs.intent_unavailable != 'true' && steps.generate.outputs.terminal_state != 'VALIDATION_BLOCKED' && steps.validate.outputs.terminal_state != 'VALIDATION_BLOCKED' && (github.event.inputs.dry_run == 'true' || github.event_name == 'schedule' || inputs.send_telegram == true || github.event.inputs.send_telegram == 'true')
         env:
+          GITHUB_TOKEN: ${{ github.token }}
+          DELIVERY_RECEIPT_REMOTE_CHECK: "true"
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           PORTFOLIO_KEY: ${{ secrets.PORTFOLIO_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
