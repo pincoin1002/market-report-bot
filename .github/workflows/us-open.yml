@@ -113,6 +113,9 @@ jobs:
 
       - name: Resolve canonical US Open intent and idempotency
         id: intent
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          DELIVERY_RECEIPT_REMOTE_CHECK: "true"
         if: (github.event_name != 'workflow_dispatch' || (github.event.inputs.safe_verify != 'true' && github.event.inputs.scheduler_delivery_test != 'true')) && github.event.inputs.scheduler_terminal_state != 'SCHEDULER_WINDOW_EXPIRED'
         run: python scripts/us_open_intent.py
 
