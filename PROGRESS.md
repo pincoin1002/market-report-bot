@@ -1,5 +1,11 @@
 # PROGRESS
 
+## 2026-10-13 — production scheduler/delivery recovery
+
+- Isolated the repair from the user's dirty Phase 3/PIOS workspace. Production log proves Vercel Python initialization failed on missing market_session; unauthenticated probe returned HTTP 500. GitHub Taiwan-open schedule event was only created at 09:21 TPE, after the allowed window; an earlier runner sleep cannot repair that dispatch delay.
+- Added a zero-dependency, bounded cloud dispatcher and skip-build policy for unrelated report/cache commits. Native workflows no longer spend hours sleeping. Precision external cron configuration and actual production receipts are verified separately; a passing local test is not a delivery claim.
+- Added per-product delivery concurrency, latest-main receipt checks and atomic remote delivery claims; confirmed API message IDs are required. Ambiguous sends/receipt commits stay blocked for evidence-based reconciliation, never blind resend. No private portfolio or PIOS integration changes included in this release.
+
 ## 2026-10-07 — private per-holding decision engine (verified)
 
 - Started from current `origin/main` `1a1d251`; preserved generated reports and encrypted event cache. Replaced the private primary anomaly text with a deterministic PortfolioDecisionBrief containing exactly one action per authoritative active position, including quiet or quote-blocked holdings. No PIOS writes or trading API are introduced.

@@ -2,10 +2,8 @@ name: 台股收盤日報
 
 on:
   schedule:
-    # Native backup is staged at 11:17 TPE (03:17 UTC), then held until
-    # 15:05. GitHub schedule events have arrived >9h late; staging earlier
-    # keeps the intended TWSE session on the same Taipei calendar day.
-    - cron: "17 3 * * 1-5"
+    # Independent native fallback; external clock is the precision scheduler.
+    - cron: "13 7 * * 1-5"
   repository_dispatch:
     types: [trigger-tw-close]
   workflow_dispatch:
@@ -28,35 +26,12 @@ on:
 
 
 jobs:
-  native-stage:
-    name: Stage native Taiwan Close backup
-    if: github.event_name == 'schedule'
-    runs-on: ubuntu-latest
-    timeout-minutes: 250
-    steps:
-      - name: Hold Taiwan-close backup until 15:05 Taipei
-        run: |
-          python - <<'PY'
-          import time
-          from datetime import datetime
-          from zoneinfo import ZoneInfo
-
-          tpe = ZoneInfo("Asia/Taipei")
-          now = datetime.now(tz=tpe)
-          target = now.replace(hour=15, minute=5, second=0, microsecond=0)
-          seconds = max(0, int((target - now).total_seconds()))
-          if seconds:
-              print(f"Taiwan-close backup staged early; waiting {seconds}s until 15:05 Taipei")
-              time.sleep(seconds)
-          else:
-              print("Taiwan-close backup arrived after 15:05 Taipei; handing off immediately")
-          PY
-
   generate-report:
     name: Generate Taiwan Close Report
-    needs: [native-stage]
-    if: always() && (github.event_name != 'schedule' || needs.native-stage.result == 'success')
     runs-on: ubuntu-latest
+    concurrency:
+      group: tw-close-canonical-delivery
+      cancel-in-progress: false
     env:
       PIOS_PORTFOLIO_SNAPSHOT_JSON: ${{ secrets.PIOS_PORTFOLIO_SNAPSHOT_JSON }}
     timeout-minutes: 30
@@ -138,6 +113,8 @@ jobs:
       - name: Deliver validated Taiwan Close Report
         if: steps.fetch.outputs.market_closed != 'true' && (github.event.inputs.dry_run == 'true' || github.event_name == 'schedule' || github.event_name == 'repository_dispatch' || inputs.send_telegram == true || github.event.inputs.send_telegram == 'true')
         env:
+          GITHUB_TOKEN: ${{ github.token }}
+          DELIVERY_RECEIPT_REMOTE_CHECK: "true"
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           PORTFOLIO_KEY: ${{ secrets.PORTFOLIO_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}

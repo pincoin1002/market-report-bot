@@ -1086,27 +1086,24 @@ class SafetyAndWorkflowTest(unittest.TestCase):
             block = text[text.index("Validate report prices"):text.index("Deliver validated")]
             self.assertNotIn("continue-on-error: true", block)
 
-    def test_us_open_uses_early_timezone_aware_native_backup_without_runtime_duplicate_guard(self):
+    def test_us_open_uses_window_bound_timezone_aware_native_backup(self):
         text = (ROOT / ".github/workflows/us-open.yml").read_text(encoding="utf-8")
-        self.assertIn('cron: "17 0 * * 1-5"', text)
+        self.assertIn('cron: "12 9 * * 1-5"', text)
         self.assertIn('timezone: "America/New_York"', text)
-        self.assertIn("name: Stage native US Open backup", text)
-        self.assertIn("Hold native backup until 04:30 New York", text)
-        self.assertIn("needs: [native-stage]", text)
-        self.assertIn("timeout-minutes: 330", text)
+        self.assertNotIn("native-stage", text)
+        self.assertNotIn("time.sleep(seconds)", text)
+        self.assertIn("timeout-minutes: 30", text)
         self.assertNotIn('cron: "5 9 * * 1-5"', text)
         self.assertNotIn('cron: "0 13 * * 1-5"', text)
         self.assertNotIn('cron: "0 14 * * 1-5"', text)
         self.assertNotIn("duplicate_skipped", text)
         self.assertNotIn("_should_skip_us_open_duplicate", inspect.getsource(fetch_market_data))
 
-    def test_us_open_wait_allows_native_stage_but_stays_bounded_below_hosted_runner_limit(self):
-        source = (ROOT / "scripts/us_open_wait.py").read_text(encoding="utf-8")
-        self.assertIn("300 * 60", source)
-        self.assertIn("more than 300 minutes", source)
+    def test_us_open_has_no_long_runner_staging(self):
         workflow = (ROOT / ".github/workflows/us-open.yml").read_text(encoding="utf-8")
-        self.assertIn("timeout-minutes: 270", workflow)
-        self.assertIn("timeout-minutes: 330", workflow)
+        self.assertNotIn("scripts/us_open_wait.py", workflow)
+        self.assertNotIn("native-stage", workflow)
+        self.assertIn("timeout-minutes: 30", workflow)
 
     def test_us_open_external_dispatch_inputs_and_serialization_are_present(self):
         text = (ROOT / ".github/workflows/us-open.yml").read_text(encoding="utf-8")
@@ -1116,7 +1113,8 @@ class SafetyAndWorkflowTest(unittest.TestCase):
         self.assertIn("trigger_source", text)
         self.assertIn("scheduler_triggered_at", text)
         self.assertIn("group: us-open-canonical-delivery", text)
-        self.assertIn("scripts/us_open_wait.py", text)
+        self.assertNotIn("scripts/us_open_wait.py", text)
+        self.assertIn('DELIVERY_RECEIPT_REMOTE_CHECK: "true"', text)
 
     def test_us_open_expired_intent_is_a_workflow_failure_not_a_green_skip(self):
         text = (ROOT / ".github/workflows/us-open.yml").read_text(encoding="utf-8")
@@ -1283,12 +1281,12 @@ class TaiwanCloseLateRunnerRegressionTest(unittest.TestCase):
         source = inspect.getsource(providers.fetch_with_failover)
         self.assertLess(source.index("TWSEHistoricalCloseProvider()"), source.index("YahooChartProvider()"))
 
-    def test_tw_close_workflow_stages_early_and_allows_repository_dispatch_delivery(self):
+    def test_tw_close_workflow_uses_external_clock_without_long_staging(self):
         text = (ROOT / ".github/workflows/tw-close.yml").read_text(encoding="utf-8")
-        self.assertIn('cron: "17 3 * * 1-5"', text)
-        self.assertIn("name: Stage native Taiwan Close backup", text)
-        self.assertIn("Hold Taiwan-close backup until 15:05 Taipei", text)
-        self.assertIn("needs: [native-stage]", text)
+        self.assertIn('cron: "13 7 * * 1-5"', text)
+        self.assertNotIn("native-stage", text)
+        self.assertNotIn("time.sleep", text)
+        self.assertIn("group: tw-close-canonical-delivery", text)
         delivery = text[text.index("name: Deliver validated Taiwan Close Report"):text.index("name: Prepare review package")]
         self.assertIn("github.event_name == 'repository_dispatch'", delivery)
 
