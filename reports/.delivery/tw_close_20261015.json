@@ -1,1 +1,1 @@
-{"at": "2026-10-15T08:06:40.606910+00:00", "key": "tw_close:20261015", "owner_run_attempt": "1", "owner_run_id": "38702965454", "state": "DELIVERING", "telegram_message_ids": []}
+{"at": "2026-10-15T08:06:42.554258+00:00", "confirmations": [{"api_ok": true, "chunk": 1, "destination_fingerprint": "4fa4c083", "http_status": 200, "message_id": 898}], "destination_fingerprints": ["4fa4c083"], "key": "tw_close:20261015", "state": "DELIVERED", "telegram_api_ok": true, "telegram_message_ids": [898]}
