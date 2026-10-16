@@ -65,7 +65,7 @@ REPORT_TITLES = {
 TPE = timezone(timedelta(hours=8))
 
 def get_market_date(report_type: str) -> datetime:
-    """Return the financial market date for this report type relative to TPE time."""
+    """Legacy API for report publication identity; quotes retain their own date."""
     date_str = report_market_date(report_type)
     return datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=TPE)
 
@@ -943,11 +943,15 @@ def run_portfolio_advice(report: str, report_type: str,
 
 
 def _report_result(report_type: str, market_date: str, validation: str, delivery: str,
-                   message_ids: list[int], private_advice: str, terminal_state: str, reason: str) -> None:
+                   message_ids: list[int], private_advice: str, terminal_state: str, reason: str,
+                   *, trading_date: str | None = None) -> None:
     result = {"report_type": report_type, "market_date": market_date,
               "public_validation": validation, "public_delivery": delivery,
               "telegram_message_ids": message_ids, "private_advice": private_advice,
               "terminal_state": terminal_state, "reason": reason}
+    if report_type == "us_close":
+        result["publication_date"] = datetime.strptime(market_date, "%Y%m%d").date().isoformat()
+        result["us_trading_date"] = trading_date
     path = Path(__file__).parent.parent / "data" / "report_result.json"
     path.parent.mkdir(exist_ok=True)
     path.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
@@ -970,7 +974,7 @@ def deliver_validated_report(report: str, report_type: str, context: MarketConte
     if idempotency_key in simulated_deliveries or (not dry_run and delivery_state.already_delivered(idempotency_key)):
         _report_result(report_type, market_date, "PASS", "SKIPPED", [], "SKIPPED",
                        "SIMULATED" if dry_run else "DELIVERED",
-                       "ALREADY_SIMULATED" if dry_run else "ALREADY_DELIVERED")
+                       "ALREADY_SIMULATED" if dry_run else "ALREADY_DELIVERED", trading_date=context.market_date)
         return {"public_delivery": "SKIPPED", "private_advice": "SKIPPED", "message_ids": []}
 
     draft_ok, draft_reason = validate_public_draft(draft, context)
@@ -985,7 +989,7 @@ def deliver_validated_report(report: str, report_type: str, context: MarketConte
                                                            "render_reason": render_reason})
         if not dry_run:
             delivery_state.mark_state(idempotency_key, "BLOCKED")
-        _report_result(report_type, market_date, "FAIL", "SKIPPED", [], "SKIPPED", "VALIDATION_BLOCKED", reason)
+        _report_result(report_type, market_date, "FAIL", "SKIPPED", [], "SKIPPED", "VALIDATION_BLOCKED", reason, trading_date=context.market_date)
         return {"public_delivery": "SKIPPED", "private_advice": "SKIPPED", "message_ids": [], "reason": reason}
 
     if not dry_run:
@@ -999,13 +1003,13 @@ def deliver_validated_report(report: str, report_type: str, context: MarketConte
         if not dry_run:
             delivery_state.mark_state(idempotency_key, "FAILED")
         log.error("Public report delivery failed", extra={"error_type": type(exc).__name__})
-        _report_result(report_type, market_date, "PASS", "FAILED", [], "SKIPPED", "DELIVERY_FAILED", "TELEGRAM_UNCONFIRMED")
+        _report_result(report_type, market_date, "PASS", "FAILED", [], "SKIPPED", "DELIVERY_FAILED", "TELEGRAM_UNCONFIRMED", trading_date=context.market_date)
         return {"public_delivery": "FAILED", "private_advice": "SKIPPED", "message_ids": [], "reason": "TELEGRAM_UNCONFIRMED"}
 
     message_ids = list(telegram.get("message_ids", []))
     if dry_run:
         simulated_deliveries.add(idempotency_key)
-        _report_result(report_type, market_date, "PASS", "SKIPPED", [], "SKIPPED", "SIMULATED", "NO_SEND")
+        _report_result(report_type, market_date, "PASS", "SKIPPED", [], "SKIPPED", "SIMULATED", "NO_SEND", trading_date=context.market_date)
         return {"public_delivery": "SIMULATED", "private_advice": "SKIPPED", "message_ids": [],
                 "telegram": telegram}
 
@@ -1017,7 +1021,7 @@ def deliver_validated_report(report: str, report_type: str, context: MarketConte
     except Exception as exc:
         private_status = "BLOCKED"
         log.error("Private advice degraded after public delivery", extra={"error_type": type(exc).__name__})
-    _report_result(report_type, market_date, "PASS", "SENT", message_ids, private_status, "DELIVERED", "OK")
+    _report_result(report_type, market_date, "PASS", "SENT", message_ids, private_status, "DELIVERED", "OK", trading_date=context.market_date)
     return {"public_delivery": "SENT", "private_advice": private_status, "message_ids": message_ids,
             "telegram": telegram}
 

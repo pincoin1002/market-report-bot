@@ -53,6 +53,7 @@ export async function handle(slot, authorization, { now = new Date(), env = proc
     }
     if (response.status !== 404) return [503, { status: 'RECEIPT_CHECK_UNAVAILABLE' }];
     const inputs = { send_telegram: 'true' };
+    if (decision.spec.type === 'us_close') inputs.publication_date = decision.day;
     if (decision.spec.type === 'tw_open') inputs.trigger_source = 'vercel_cron';
     if (decision.spec.type === 'us_open') Object.assign(inputs, { intended_market_date: decision.day,
       intended_market_time: '09:05', trigger_source: 'vercel_cron', scheduler_triggered_at: now.toISOString() });

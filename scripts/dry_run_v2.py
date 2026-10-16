@@ -23,7 +23,7 @@ from structured_reports import (
     validate_action_brief, validate_public_draft,
 )
 from portfolio_decisions import build_decision_brief, render_decision_brief, validate_decision_brief, decision_telegram_chunks
-from market_session import get_target_market_date
+from market_session import get_target_market_date, report_market_date
 
 
 def _obs(symbol: str, currency: str = "USD", session: str = "REGULAR",
@@ -98,7 +98,9 @@ def run_one(report_type: str) -> dict:
     structure_ok, structure_errors = validate_rendered_report_structure(public.rendered_markdown, report_type)
     render_ok, render_reason = validate_render_matches_draft(public.rendered_markdown, public)
     simulated = set()
-    key = f"{report_type}:{context.market_date.replace('-', '')}"
+    delivery_date = (report_market_date(report_type, snapshot.generated_at)
+                     if report_type == "us_close" else context.market_date)
+    key = f"{report_type}:{delivery_date.replace('-', '')}"
     first = deliver_validated_report(public.rendered_markdown, report_type, context, public,
                                      snapshot, "fixture", key, dry_run=True, simulated_deliveries=simulated)
     second = deliver_validated_report(public.rendered_markdown, report_type, context, public,

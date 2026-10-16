@@ -8,6 +8,11 @@ on:
     types: [trigger-us-close]
   workflow_dispatch:
     inputs:
+      publication_date:
+        description: "Intended Taipei publication date (YYYY-MM-DD); not US quote date"
+        required: false
+        default: ""
+        type: string
       dry_run:
         description: "Exercise production path without external sends or report commits"
         required: false
@@ -37,6 +42,7 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: write
+      actions: read
 
     steps:
       - name: Checkout repository
@@ -50,6 +56,33 @@ jobs:
 
       - name: Install dependencies
         run: pip install -r requirements.txt
+
+      - name: Pin US-close publication date
+        env:
+          PYTHONPATH: scripts
+          GH_TOKEN: ${{ github.token }}
+          INPUT_PUBLICATION_DATE: ${{ github.event.inputs.publication_date || github.event.client_payload.publication_date || '' }}
+        run: |
+          # Use event creation, not the possibly delayed runner clock. Failure
+          # to resolve identity stops this run; never guess another date/key.
+          if [ -z "$INPUT_PUBLICATION_DATE" ]; then
+            triggered_at="$(timeout 20s gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" --jq .created_at)"
+            export US_CLOSE_TRIGGERED_AT="$triggered_at"
+          fi
+          python - <<'PY' >> "$GITHUB_ENV"
+          import os
+          from datetime import datetime
+          from market_session import resolve_us_close_publication_date
+          intended = os.environ.get("INPUT_PUBLICATION_DATE", "").strip()
+          if intended:
+              publication = resolve_us_close_publication_date(intended_date=intended)
+          else:
+              triggered_at = datetime.fromisoformat(os.environ["US_CLOSE_TRIGGERED_AT"].replace("Z", "+00:00"))
+              publication = resolve_us_close_publication_date(triggered_at)
+          print("US_CLOSE_PUBLICATION_DATE=" + publication)
+          PY
+        # Inline imports use the same reviewed report implementation.
+        # No credentials or full API payload is printed.
 
       - name: Fetch market snapshot
         id: fetch

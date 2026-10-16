@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from market_session import classify_tw_session, classify_us_session, report_market_date
+from market_session import classify_tw_session, classify_us_session, report_market_date, get_target_market_date
 from models import MarketContext, ProviderHealth, Snapshot, TaiexMarketSummary
 
 
@@ -35,7 +35,9 @@ def build_market_context(snapshot: Snapshot, report_type: str,
         # from the actual primary-market observations rather than today's clock.
         primary_dates = [q.market_date for q in snapshot.quote_observations.values()
                          if q.market == primary_market and q.quality_status == "VALID"]
-        market_date = max(primary_dates) if primary_dates else report_market_date(report_type, now)
+        market_date = max(primary_dates) if primary_dates else (
+            get_target_market_date("us_close", "US", now) if report_type == "us_close"
+            else report_market_date(report_type, now))
     quotes = {}
     data_quality = dict(snapshot.data_quality)
     for key, observation in snapshot.quote_observations.items():

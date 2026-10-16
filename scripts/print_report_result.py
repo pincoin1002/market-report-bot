@@ -8,6 +8,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
+from market_session import us_close_publication_date
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -25,7 +26,8 @@ def result_line(report_type: str, data_dir: Path = ROOT / "data",
         checks = ("structural_validation", "numeric_provenance", "structured", "render")
         passed = bool(validation) and all(validation.get(name, {}).get("passed") is True for name in checks)
         zone = ZoneInfo("America/New_York" if report_type.startswith("us_") else "Asia/Taipei")
-        market_date = datetime.now(tz=zone).strftime("%Y%m%d")
+        market_date = (us_close_publication_date().replace("-", "") if report_type == "us_close"
+                       else datetime.now(tz=zone).strftime("%Y%m%d"))
         if fetch_terminal_state:
             terminal_state = fetch_terminal_state
             reason = fetch_terminal_state
@@ -37,8 +39,13 @@ def result_line(report_type: str, data_dir: Path = ROOT / "data",
                   "public_delivery": "SKIPPED", "telegram_message_ids": [],
                   "private_advice": "SKIPPED",
                   "terminal_state": terminal_state, "reason": reason}
+        if report_type == "us_close":
+            result["publication_date"] = datetime.strptime(market_date, "%Y%m%d").date().isoformat()
+            result["us_trading_date"] = None  # No validated quote contract available.
     fields = ("report_type", "market_date", "public_validation", "public_delivery",
               "telegram_message_ids", "private_advice", "terminal_state", "reason")
+    if report_type == "us_close":
+        fields += ("publication_date", "us_trading_date")
     values = []
     for key in fields:
         value = result.get(key, "unknown")

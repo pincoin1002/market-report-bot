@@ -435,7 +435,8 @@ class SessionEngineTest(unittest.TestCase):
 
     def test_us_close_market_date_near_midnight_tpe(self):
         dt = datetime(2026, 8, 28, 0, 30, tzinfo=timezone.utc)
-        self.assertEqual(report_market_date("us_close", dt), "2026-08-27")
+        self.assertEqual(report_market_date("us_close", dt), "2026-08-28")
+        self.assertEqual(get_target_market_date("us_close", "US", dt), "2026-08-27")
 
     def test_close_reports_expect_regular_quotes(self):
         with patch("fetch_market_data.datetime") as clock:

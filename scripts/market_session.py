@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 from datetime import date, datetime, time, timezone, timedelta
 from zoneinfo import ZoneInfo
 
@@ -89,6 +90,11 @@ def get_target_market_date(report_type: str, market: str, now: datetime | None =
         return date_str
     if report_type.startswith("us_"):
         if report_type == "us_close":
+            # A pinned publication survives delayed execution across midnight.
+            # Quotes still identify the completed US exchange session, not this date.
+            if os.getenv("US_CLOSE_PUBLICATION_DATE", "").strip():
+                publication = date.fromisoformat(us_close_publication_date(now))
+                now = datetime.combine(publication, time(8, 30), tzinfo=TPE)
             date_str, _ = get_most_recent_completed_session("US", as_of=now)
             return date_str
         # us_open
@@ -144,7 +150,48 @@ def tw_open_snapshot_contract_status(now: datetime | None = None) -> str:
     return "INTENT_EXPIRED"
 
 
+def us_close_publication_date(now: datetime | None = None,
+                              intended_date: str | None = None) -> str:
+    """TPE publication identity; never an NY quote/trading date.
+
+    Workflow pins this from explicit scheduler input or immutable run creation
+    time. No current-clock fallback is used after the workflow has pinned it.
+    """
+    intended = (intended_date if intended_date is not None else
+                os.getenv("US_CLOSE_PUBLICATION_DATE", "")).strip()
+    if intended:
+        try:
+            parsed = date.fromisoformat(intended)
+            if parsed.isoformat() != intended:
+                raise ValueError
+        except ValueError:
+            raise ValueError("US_CLOSE_PUBLICATION_DATE_INVALID") from None
+        return intended
+    local = now or datetime.now(tz=TPE)
+    if local.tzinfo is None:
+        raise ValueError("US_CLOSE_TRIGGER_TIME_MUST_BE_TIMEZONE_AWARE")
+    return local.astimezone(TPE).date().isoformat()
+
+
+def resolve_us_close_publication_date(triggered_at: datetime | None = None,
+                                      intended_date: str = "") -> str:
+    """Resolve workflow intake without inventing a date for ambiguous late events."""
+    if intended_date.strip():
+        return us_close_publication_date(intended_date=intended_date)
+    if triggered_at is None or triggered_at.tzinfo is None:
+        raise ValueError("US_CLOSE_TRIGGER_TIME_REQUIRED")
+    local = triggered_at.astimezone(TPE)
+    # No US-close publication is scheduled before 08:30 or on Sun/Mon.
+    # A wholly late event is ambiguous; require explicit intended publication.
+    if local.weekday() in (6, 0) or local.time() < time(8, 30):
+        raise ValueError("US_CLOSE_PUBLICATION_DATE_REQUIRED")
+    return us_close_publication_date(local, intended_date="")
+
+
 def report_market_date(report_type: str, now: datetime | None = None) -> str:
+    # Legacy name: this is the report/file/delivery identity, not quote identity.
+    if report_type == "us_close":
+        return us_close_publication_date(now)
     if report_type == "tw_close":
         # A scheduled runner can start hours late and cross Taipei midnight.
         # Close-report identity follows the latest completed TWSE session, not
