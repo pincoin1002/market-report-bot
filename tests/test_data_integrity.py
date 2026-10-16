@@ -1173,7 +1173,7 @@ class SafetyAndWorkflowTest(unittest.TestCase):
 
     def test_us_open_scheduled_delivery_is_gated_by_validation_not_runner_clock(self):
         text = (ROOT / ".github/workflows/us-open.yml").read_text(encoding="utf-8")
-        delivery = text[text.index("name: Deliver validated US Open Report"):text.index("name: Prepare review package")]
+        delivery = text[text.index("name: Deliver validated US Open Report"):text.index("name: Commit and push generated report")]
         self.assertIn("github.event_name == 'schedule'", delivery)
         self.assertIn("intent_unavailable != 'true'", delivery)
         self.assertNotIn("duplicate_skipped", delivery)
@@ -1287,7 +1287,7 @@ class TaiwanCloseLateRunnerRegressionTest(unittest.TestCase):
         self.assertNotIn("native-stage", text)
         self.assertNotIn("time.sleep", text)
         self.assertIn("group: tw-close-canonical-delivery", text)
-        delivery = text[text.index("name: Deliver validated Taiwan Close Report"):text.index("name: Prepare review package")]
+        delivery = text[text.index("name: Deliver validated Taiwan Close Report"):text.index("name: Commit and push generated report")]
         self.assertIn("github.event_name == 'repository_dispatch'", delivery)
 
 

@@ -40,7 +40,7 @@ def _load_context() -> MarketContext | None:
     try:
         return MarketContext.model_validate_json(path.read_text(encoding="utf-8"))
     except ValidationError:
-        log.error("market_context.json invalid", exc_info=True)
+        log.error("market_context.json invalid")
         return None
 
 
@@ -51,7 +51,7 @@ def _load_draft() -> MarketReportDraft | None:
     try:
         return MarketReportDraft.model_validate_json(path.read_text(encoding="utf-8"))
     except ValidationError:
-        log.error("market_report_draft.json invalid", exc_info=True)
+        log.error("market_report_draft.json invalid")
         return None
 
 
@@ -438,7 +438,7 @@ def main() -> None:
         encoding="utf-8",
     )
     if not ok:
-        log.error("validation FAIL", extra={"payload": payload})
+        log.error("validation FAIL", extra={"report_type": report_type})
         sys.exit(1)
     log.info("validation PASS", extra={"report_type": report_type})
 

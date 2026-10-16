@@ -79,10 +79,5 @@ jobs:
           name: tw-open-dry-run-${{ github.run_id }}
           path: |
             reports/tw_open_*.md
-            data/market_snapshot.json
-            data/market_context.json
-            data/market_report_draft.json
-            data/validation_results.json
-            data/portfolio_action_brief.json
           retention-days: 3
           if-no-files-found: warn

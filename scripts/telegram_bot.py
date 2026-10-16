@@ -1,19 +1,10 @@
 #!/usr/bin/env python3
-"""Telegram Q&A bot for market reports.
-
-Polls Telegram and answers every text message in the authorized chat,
-using recent reports (via report_store) as context with Google Gemini.
-
-Usage (called by GitHub Actions):
-    python scripts/telegram_bot.py --duration 240
-"""
+"""Retired Q&A compatibility helpers; CLI and polling are disabled."""
 
 import os
 import sys
 import json
 import logging
-import time
-import argparse
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 
@@ -23,7 +14,6 @@ from google import genai
 from google.genai import types
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
-from logging_config import setup_logging
 from report_store import ReportStore
 import portfolio_store
 
@@ -288,106 +278,14 @@ def _extract_question(text: str) -> str | None:
 # ── Main polling loop ────────────────────────────────────────────────────────
 
 def poll(token: str, chat_id: str, model: str, duration: int) -> None:
-    state = load_state()
-    state.pop("latest_report", None)  # legacy field — context now in reports.db
-    offset = state.get("offset", 0)
-    deadline = time.time() + duration
-
-    base_dir = Path(__file__).parent.parent
-    store = ReportStore(base_dir / "data" / "reports.db")
-    store.ingest_dir(base_dir / "reports")   # pick up reports committed since last run
-    store.prune(keep_days=30)
-
-    log.info("polling started", extra={"duration": duration, "offset": offset})
-
-    while time.time() < deadline:
-        try:
-            result = tg(token, "getUpdates", offset=offset, timeout=20,
-                        allowed_updates=["message", "channel_post"])
-        except Exception:
-            log.warning("getUpdates error", exc_info=True)
-            time.sleep(5)
-            continue
-
-        for upd in result.get("result", []):
-            # Advance + persist the offset FIRST: a message that crashes the
-            # handler must never be re-fetched forever (poison-message loop).
-            offset = upd["update_id"] + 1
-            state["offset"] = offset
-            save_state(state)
-
-            try:
-                msg = upd.get("message") or upd.get("channel_post") or {}
-                text = msg.get("text", "")
-                from_chat = str(msg.get("chat", {}).get("id", ""))
-
-                # Support comma-separated list of allowed chat/user IDs
-                allowed_chats = {cid.strip() for cid in chat_id.split(",") if cid.strip()}
-                if from_chat not in allowed_chats:
-                    if from_chat:
-                        log.warning("ignored unauthorized message", extra={"chat": from_chat})
-                    continue
-
-                # Portfolio commands are handled locally — no Gemini call
-                cmd_reply = handle_portfolio_command(text)
-                if cmd_reply:
-                    send_message(token, from_chat, cmd_reply, reply_to=msg.get("message_id"))
-                    log.info("portfolio command handled", extra={"cmd": text.split()[0]})
-                    continue
-
-                question = _extract_question(text)
-                if not question:
-                    continue
-
-                report_ctx = build_context(store, question)
-                portfolio_ctx = _load_portfolio_context()
-
-                log.info("answering question", extra={"question": question[:60]})
-                try:
-                    answer = ask_gemini(question, report_ctx, portfolio_ctx, model)
-                    cleaned_answer = _clean_markdown_for_tg(answer)
-                    send_message(token, from_chat, cleaned_answer, reply_to=msg.get("message_id"))
-                    log.info("replied", extra={"message_id": msg.get("message_id")})
-                except Exception as exc:
-                    log.error("error answering", exc_info=True)
-                    send_message(token, from_chat,
-                                 f"⚠️ 處理問題時發生錯誤：{exc}", reply_to=msg.get("message_id"))
-            except Exception:
-                # Never let one bad update kill the polling loop
-                log.error("update handling failed — skipped", exc_info=True,
-                          extra={"update_id": upd.get("update_id")})
-
-        # Sleep briefly to avoid hammering the API
-        remaining = deadline - time.time()
-        if remaining <= 0:
-            break
-        time.sleep(min(2, remaining))
-
-    store.close()
-    log.info("polling done", extra={"final_offset": offset})
+    """Retired Q&A: no polling, model calls or network requests."""
+    raise RuntimeError("TELEGRAM_QA_DISABLED")
 
 
 # ── Entry point ──────────────────────────────────────────────────────────────
 
 def main() -> None:
-    setup_logging()
-    parser = argparse.ArgumentParser(description="Telegram Q&A bot for market reports")
-    parser.add_argument("--duration", type=int, default=270,
-                        help="How many seconds to poll (default: 270 = 4.5 min)")
-    args = parser.parse_args()
-
-    token = os.getenv("TELEGRAM_BOT_TOKEN", "")
-    chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
-    model = os.getenv("REPORT_MODEL", "gemini-2.0-flash")
-
-    if not token or not chat_id:
-        log.error("TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set — exiting")
-        sys.exit(1)
-    if not os.getenv("GEMINI_API_KEY"):
-        log.error("GEMINI_API_KEY not set — exiting")
-        sys.exit(1)
-
-    poll(token, chat_id, model, args.duration)
+    raise SystemExit("TELEGRAM_QA_DISABLED: 問答服務已停用；日報發送不受影響。")
 
 
 if __name__ == "__main__":

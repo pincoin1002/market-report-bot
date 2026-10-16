@@ -129,10 +129,6 @@ jobs:
           fi
 
 
-      - name: Prepare review package
-        if: steps.fetch.outputs.market_closed != 'true'
-        continue-on-error: true
-        run: python scripts/prepare_review.py tw_close
 
       - name: Commit and push generated report
         if: github.event.inputs.dry_run != 'true' && steps.fetch.outputs.market_closed != 'true'
@@ -145,15 +141,6 @@ jobs:
           git commit -m "chore: save generated tw_close report [skip ci]" || exit 0
           git pull --rebase
           git push
-
-      - name: Upload review package
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: tw-close-review-${{ github.run_id }}-${{ github.run_attempt }}
-          path: data/review_package_*.md
-          retention-days: 30
-          if-no-files-found: ignore
 
       - name: Upload report as artifact
         if: always()
@@ -170,15 +157,7 @@ jobs:
         with:
           name: tw-close-data-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            data/market_snapshot.json
-            data/market_context.json
-            data/market_report_draft.json
-            data/report_summary.json
-            data/validation_results.json
-            data/portfolio_advice_audit.json
             data/portfolio_decision_brief.json.enc
-            data/delivery_state.json
-            data/report_result.json
           retention-days: 30
           if-no-files-found: ignore
 

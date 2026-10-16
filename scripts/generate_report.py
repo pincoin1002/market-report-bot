@@ -915,7 +915,7 @@ def run_portfolio_advice(report: str, report_type: str,
                                     evidence=decision_evidence, as_of=consumed_at)
     ok, reason = validate_decision_brief(decisions, context, portfolio_context)
     if not ok:
-        log.warning("private advice validation failed", extra={"reason": reason})
+        log.warning("private advice validation failed", extra={"reason_code": "PRIVATE_VALIDATION_FAILED"})
         write_advice_audit(report_type, "BLOCKED", reason, snapshot)
         if deliver:
             send_operational_notice(f"{reason}\n\n已停止傳送持股建議。", report_type)
@@ -1058,7 +1058,7 @@ def main() -> None:
         try:
             snapshot = Snapshot.model_validate_json(snapshot_path.read_text(encoding="utf-8"))
         except Exception:
-            log.warning("snapshot unavailable during delivery", exc_info=True)
+            log.warning("snapshot unavailable during delivery")
         idempotency_key = f"{report_type}:{get_market_date(report_type).strftime('%Y%m%d')}"
         if not args.dry_run:
             delivery_state.mark_state(idempotency_key, "VALIDATING")
@@ -1070,7 +1070,7 @@ def main() -> None:
         except Exception:
             if not args.dry_run:
                 delivery_state.mark_state(idempotency_key, "BLOCKED")
-            log.error("market context unavailable before delivery", exc_info=True)
+            log.error("market context unavailable before delivery")
             sys.exit(1)
         result = deliver_validated_report(report, report_type, context, draft, snapshot, model,
                                           idempotency_key, dry_run=args.dry_run)
@@ -1109,7 +1109,7 @@ def main() -> None:
                     extra={"report_type": report_type})
         sys.exit(1)
     except ValidationError:
-        log.error("snapshot invalid — blocking report generation", exc_info=True)
+        log.error("snapshot invalid — blocking report generation")
         sys.exit(1)
 
     max_tokens = MAX_OUTPUT_TOKENS.get(report_type, 16000)
@@ -1143,7 +1143,7 @@ def main() -> None:
     try:
         run_portfolio_advice(report, report_type, snapshot, model, deliver=False)
     except Exception:
-        log.error("portfolio artifact stage failed", exc_info=True)
+        log.error("portfolio artifact stage failed")
 
     if args.generate_only:
         log.info("generate-only mode: delivery deferred until validation passes")

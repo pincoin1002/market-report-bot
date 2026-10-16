@@ -1,6 +1,2 @@
-# Minimal deps for telegram_bot.py only — keeps the every-minute GHA runs fast.
-# (yfinance/pandas from requirements.txt take ~60s to install and are unused here.)
-google-genai>=1.0.0
-requests>=2.31.0
-tenacity>=8.0.0
-cryptography>=42.0
+# Retired: Telegram Q&A has no runtime or dependency installation.
+# Shared report dependencies remain in requirements.txt.

@@ -18,8 +18,9 @@ from tenacity import retry, stop_after_attempt, wait_exponential_jitter
 from market_session import NY, TPE, classify_us_session, get_previous_completed_session_date
 from models import InstrumentSpec, Quote, QuoteObservation, Session
 from quote_quality import validate_observation
+from logging_config import SafeDiagnosticAdapter
 
-log = logging.getLogger("providers")
+log = SafeDiagnosticAdapter(logging.getLogger("providers"), {})
 
 
 class QuoteProvider(Protocol):

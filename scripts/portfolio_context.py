@@ -193,6 +193,6 @@ def load_authoritative_portfolio() -> PortfolioContext:
         try:
             return pios.load()
         except (OSError, ValueError, json.JSONDecodeError) as exc:
-            log.error("PIOS snapshot unreadable; portfolio analysis unavailable", extra={"reason": str(exc)})
+            log.error("PIOS snapshot unreadable; portfolio analysis unavailable", extra={"error_type": type(exc).__name__})
             return PortfolioContext(source="PIOS_UNAVAILABLE", notes=str(exc))
     return EncryptedPortfolioProvider().load()

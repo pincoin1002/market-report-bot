@@ -25,7 +25,7 @@ from google import genai
 from google.genai import types
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
-from logging_config import setup_logging
+from logging_config import setup_logging, SafeDiagnosticAdapter
 from instrument_registry import build_universe, quote_symbol
 from market_context import build_market_context
 from market_session import (
@@ -37,7 +37,7 @@ from portfolio_context import load_authoritative_portfolio
 from providers import fetch_session_observations
 from twse_market_evidence import fetch_twse_close_evidence
 
-log = logging.getLogger("fetch")
+log = SafeDiagnosticAdapter(logging.getLogger("fetch"), {})
 
 TPE = timezone(timedelta(hours=8))
 NY = ZoneInfo("America/New_York")
@@ -183,10 +183,10 @@ def check_market_closed_via_gemini(market_name: str, today_date: str) -> bool:
     """Ask Gemini via Google Search if the market is closed today due to typhoon or other emergencies."""
     try:
         answer = _call_gemini_market_check(market_name, today_date)
-        log.info(f"Gemini market closed check for {market_name} returned: {answer}")
+        log.info("Gemini market closure check completed")
         return "CLOSED" in answer
     except Exception as e:
-        log.warning(f"Failed to check market status via Gemini for {market_name}: {e}")
+        log.warning("Gemini market closure check failed")
         return False
 
 
