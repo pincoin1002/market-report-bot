@@ -503,7 +503,8 @@ def telegram_destination_fingerprint(chat_id: str) -> str:
 
 
 def _send_telegram_product(text: str, *, product: str, dry_run: bool = False,
-                           chunks_override: list[str] | None = None, plain_text: bool = False) -> dict:
+                           chunks_override: list[str] | None = None, plain_text: bool = False,
+                           allow_format_fallback: bool = True) -> dict:
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     chat_ids = [cid.strip() for cid in os.getenv("TELEGRAM_CHAT_ID", "").split(",") if cid.strip()]
     if not dry_run and (not token or not chat_ids):
@@ -529,7 +530,7 @@ def _send_telegram_product(text: str, *, product: str, dry_run: bool = False,
                 if not plain_text:
                     body["parse_mode"] = "Markdown"
                 response = requests.post(url, json=body, timeout=30)
-                if response.status_code != 200:
+                if response.status_code != 200 and allow_format_fallback:
                     log.warning("Telegram Markdown rejected; retrying plain text", extra={"product": product,
                                 "destination_fingerprint": fingerprint, "chunk": i + 1,
                                 "chunk_count": len(chunks), "http_status": response.status_code})
@@ -567,7 +568,11 @@ def public_telegram_payload(report: str, report_type: str, *, at: datetime | Non
 
 
 def send_telegram(report: str, report_type: str, *, dry_run: bool = False,
-                  at: datetime | None = None) -> dict:
+                  at: datetime | None = None, single_attempt: bool = False) -> dict:
+    if single_attempt:
+        return _send_telegram_product(public_telegram_payload(report, report_type, at=at),
+                                     product="PUBLIC_REPORT", dry_run=dry_run,
+                                     allow_format_fallback=False)
     return _send_telegram_product(public_telegram_payload(report, report_type, at=at),
                                   product="PUBLIC_REPORT", dry_run=dry_run)
 
@@ -973,7 +978,8 @@ def deliver_validated_report(report: str, report_type: str, context: MarketConte
                              draft, snapshot: Snapshot | None, model: str,
                              idempotency_key: str, *, dry_run: bool = False,
                              simulated_deliveries: set[str] | None = None,
-                             at: datetime | None = None) -> dict:
+                             at: datetime | None = None, public_only: bool = False,
+                             single_attempt: bool = False) -> dict:
     """Use the same validation and payload path for production and no-send replay."""
     from validate_report import (validate_numeric_provenance,
                                  validate_rendered_report_structure, validate_render_matches_draft)
@@ -1005,7 +1011,10 @@ def deliver_validated_report(report: str, report_type: str, context: MarketConte
         delivery_state.mark_state(idempotency_key, "VALIDATED")
         delivery_state.mark_state(idempotency_key, "DELIVERING")
     try:
-        telegram = send_telegram(report, report_type, dry_run=dry_run, at=at)
+        if single_attempt:
+            telegram = send_telegram(report, report_type, dry_run=dry_run, at=at, single_attempt=True)
+        else:
+            telegram = send_telegram(report, report_type, dry_run=dry_run, at=at)
         if not telegram.get("ok"):
             raise RuntimeError("public Telegram delivery unconfirmed")
     except Exception as exc:
@@ -1025,8 +1034,9 @@ def deliver_validated_report(report: str, report_type: str, context: MarketConte
     delivery_state.mark_state(idempotency_key, "DELIVERED", telegram_result=telegram)
     private_status = "SKIPPED"
     try:
-        send_email(report, report_type)
-        private_status = run_portfolio_advice(report, report_type, snapshot, model, deliver=True)
+        if not public_only:
+            send_email(report, report_type)
+            private_status = run_portfolio_advice(report, report_type, snapshot, model, deliver=True)
     except Exception as exc:
         private_status = "BLOCKED"
         log.error("Private advice degraded after public delivery", extra={"error_type": type(exc).__name__})

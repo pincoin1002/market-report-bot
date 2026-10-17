@@ -1,0 +1,46 @@
+name: One-off frozen Oct17 US-close recovery
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        type: choice
+        options: [dry_run, deliver_once, verify_delivered]
+        default: dry_run
+        required: true
+        description: "Only Oct16 US trading / Oct17 Taipei publication"
+      encrypted_payload:
+        type: string
+        required: true
+        description: "Authenticated ciphertext only; never paste plaintext market/portfolio data"
+permissions:
+  contents: read
+jobs:
+  recovery:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: us-close-canonical-delivery
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Validate immutable payload and execute selected guarded mode
+        env:
+          PORTFOLIO_KEY: ${{ secrets.PORTFOLIO_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GITHUB_TOKEN: ${{ github.token }}
+          DELIVERY_RECEIPT_REMOTE_CHECK: 'true'
+          US_CLOSE_PUBLICATION_DATE: '2026-10-17'
+          ENABLE_EMAIL: 'false'
+        run: python scripts/frozen_us_close_recovery.py
+      # No generation, quote/event fetch, PIOS input, report commit or artifact.
