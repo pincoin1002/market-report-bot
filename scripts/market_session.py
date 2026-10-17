@@ -90,13 +90,9 @@ def get_target_market_date(report_type: str, market: str, now: datetime | None =
         return date_str
     if report_type.startswith("us_"):
         if report_type == "us_close":
-            # A pinned publication survives delayed execution across midnight.
-            # Quotes still identify the completed US exchange session, not this date.
-            if os.getenv("US_CLOSE_PUBLICATION_DATE", "").strip():
-                publication = date.fromisoformat(us_close_publication_date(now))
-                now = datetime.combine(publication, time(8, 30), tzinfo=TPE)
-            date_str, _ = get_most_recent_completed_session("US", as_of=now)
-            return date_str
+            # Exact intended NY date. A holiday must NOT roll back to an older
+            # session and present that old close as today's missing report.
+            return us_close_session_contract(now)["us_trading_date"]
         # us_open
         if market.upper() == "TW":
             date_str, _ = get_most_recent_completed_session("TW", as_of=now)
@@ -186,6 +182,31 @@ def resolve_us_close_publication_date(triggered_at: datetime | None = None,
     if local.weekday() in (6, 0) or local.time() < time(8, 30):
         raise ValueError("US_CLOSE_PUBLICATION_DATE_REQUIRED")
     return us_close_publication_date(local, intended_date="")
+
+
+def us_close_session_contract(now: datetime | None = None,
+                              publication_date: str | None = None) -> dict[str, str]:
+    """NYSE session to be reported, independent of the delayed runner date.
+
+    TPE publication morning corresponds to the immediately preceding NY civil
+    date, NOT the runner's current NY date and NOT a prior open-day fallback.
+    Only this NY date is tested against the exchange calendar. Publication date
+    remains solely the scheduling/file/receipt identity.
+    """
+    local = now or datetime.now(tz=timezone.utc)
+    if local.tzinfo is None:
+        raise ValueError("US_CLOSE_TRIGGER_TIME_MUST_BE_TIMEZONE_AWARE")
+    publication = us_close_publication_date(local, intended_date=publication_date)
+    intended = date.fromisoformat(publication) - timedelta(days=1)
+    close = datetime.combine(intended, time(16), tzinfo=NY)
+    if not is_nyse_trading_day(close):
+        status = "MARKET_CLOSED"
+    elif local.astimezone(timezone.utc) < close.astimezone(timezone.utc):
+        status = "SESSION_NOT_COMPLETED"
+    else:
+        status = "READY"
+    return {"publication_date": publication, "us_trading_date": intended.isoformat(),
+            "status": status, "delivery_key": "us_close:" + publication.replace("-", "")}
 
 
 def report_market_date(report_type: str, now: datetime | None = None) -> str:

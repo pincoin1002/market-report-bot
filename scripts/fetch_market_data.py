@@ -11,6 +11,7 @@ Exit codes:
   3 = US market closed today (holiday / weekend) → send notice instead
   5 = US-open intended premarket snapshot no longer observable → fail closed
   6 = TW-open pre-open briefing window expired → fail closed
+  8 = pinned US-close session is not yet complete → fail closed, not a holiday
 """
 
 import logging
@@ -31,6 +32,7 @@ from market_context import build_market_context
 from market_session import (
     classify_tw_session, classify_us_session, get_previous_completed_session_date, get_target_market_date,
     tw_open_snapshot_contract_status, us_open_snapshot_contract_status,
+    us_close_session_contract,
 )
 from models import NamedQuote, PortfolioQuoteCoverage, PortfolioQuoteCoverageItem, QuoteObservation, Snapshot
 from portfolio_context import load_authoritative_portfolio
@@ -213,11 +215,18 @@ def is_tw_market_closed(report_type: str) -> bool:
     return False
 
 
-def is_us_market_closed(report_type: str) -> bool:
+def is_us_market_closed(report_type: str, now: datetime | None = None) -> bool:
     """Return True if the US market is closed today (NYSE calendar, New York time)."""
     if report_type in ("tw_open", "tw_close"):
         return False  # TW-only reports skip US holiday check
-    today = datetime.now(tz=NY)
+    if report_type == "us_close":
+        # After NY midnight a delayed runner still reports the pinned prior
+        # session. An LLM/current-day holiday search cannot override its date.
+        closed = us_close_session_contract(now)["status"] == "MARKET_CLOSED"
+        if closed:
+            log.info("US intended close session is a NYSE non-trading date")
+        return closed
+    today = (now or datetime.now(tz=NY)).astimezone(NY)
     if today.weekday() >= 5:
         log.info("US market closed (weekend)", extra={"date": today.strftime("%Y-%m-%d")})
         return True
@@ -377,9 +386,8 @@ def _expected_session(report_type: str, now: datetime | None = None) -> str:
         local = now.astimezone(TPE)
         return "REGULAR" if target == local.strftime("%Y-%m-%d") else "PREVIOUS_CLOSE"
     if report_type == "us_close":
-        target = get_target_market_date(report_type, "US", now=now)
-        local = now.astimezone(NY)
-        return "REGULAR" if target == local.strftime("%Y-%m-%d") else "PREVIOUS_CLOSE"
+        # Completed close identity does not change after NY midnight.
+        return "REGULAR"
     if report_type.startswith("us_"):
         # us_open is a premarket snapshot contract, not a label for whichever
         # US session happens to be live when a delayed runner starts.
@@ -398,6 +406,17 @@ def main() -> None:
     report_type = sys.argv[1]
     data_dir = Path(__file__).parent.parent / "data"
     data_dir.mkdir(exist_ok=True)
+
+    if report_type == "us_close":
+        close_contract = us_close_session_contract()
+        _set_github_output("publication_date", close_contract["publication_date"])
+        _set_github_output("us_trading_date", close_contract["us_trading_date"])
+        if close_contract["status"] != "READY":
+            _set_github_output("terminal_state", close_contract["status"])
+        if close_contract["status"] == "SESSION_NOT_COMPLETED":
+            _set_github_output("market_closed", "false")
+            log.error("US intended close session is not complete; refusing older prices")
+            sys.exit(8)
 
     if is_tw_market_closed(report_type):
         _set_github_output("market_closed", "true")

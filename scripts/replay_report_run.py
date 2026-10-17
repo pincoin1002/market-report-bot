@@ -16,7 +16,7 @@ from pathlib import Path
 from generate_report import (_verified_data_only_report, deliver_validated_report,
                              public_telegram_payload)
 from market_context import build_market_context
-from market_session import get_target_market_date
+from market_session import get_target_market_date, report_market_date, us_close_session_contract
 from models import MarketContext, MarketReportDraft, PortfolioActionBrief, Snapshot
 from portfolio_context import load_authoritative_portfolio
 from structured_reports import (build_action_brief, build_public_draft, render_action_brief,
@@ -74,13 +74,24 @@ def replay(report_type: str, *, artifact: Path | None = None,
         source = "completed_real_snapshot_as_of"
 
     text = draft.rendered_markdown
+    close_contract = None
+    if report_type == "us_close":
+        close_contract = us_close_session_contract(as_of or context.generated_at)
+        if (close_contract["status"] != "READY"
+                or context.market_date != close_contract["us_trading_date"]
+                or any(q.market == "US" and q.quality_status == "VALID"
+                       and q.market_date != close_contract["us_trading_date"] for q in context.quotes.values())):
+            raise ValueError("US_CLOSE_REPLAY_SESSION_MISMATCH")
     draft_ok, draft_reason = validate_public_draft(draft, context)
     numeric_ok, numeric_errors = validate_numeric_provenance(text, context)
     structure_ok, structure_errors = validate_rendered_report_structure(text, report_type)
     match_ok, match_reason = validate_render_matches_draft(text, draft)
     forbidden = [token for token in FORBIDDEN if token in text]
     render_ok = structure_ok and match_ok and not forbidden
-    key_date = (as_of or context.generated_at).strftime("%Y%m%d") if report_type == "tw_open" else context.market_date.replace("-", "")
+    key_date = (report_market_date(report_type, as_of or context.generated_at).replace("-", "")
+                if report_type == "us_close" else
+                (as_of or context.generated_at).strftime("%Y%m%d") if report_type == "tw_open"
+                else context.market_date.replace("-", ""))
     key = f"{report_type}:{key_date}"
     simulated: set[str] = set()
     first = deliver_validated_report(text, report_type, context, draft, snapshot, "replay", key,
@@ -118,6 +129,9 @@ def replay(report_type: str, *, artifact: Path | None = None,
                          "forbidden": forbidden},
               "public_telegram_chunks": len(first.get("telegram", {}).get("message_lengths", [])),
               "telegram_messages_sent": 0}
+    if close_contract:
+        result.update(publication_date=close_contract["publication_date"],
+                      us_trading_date=close_contract["us_trading_date"], delivery_key=key)
     if print_public:
         print("PUBLIC_WOULD_SEND_BEGIN")
         print(public_telegram_payload(text, report_type, at=as_of or context.generated_at))

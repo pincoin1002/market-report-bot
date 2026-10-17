@@ -40,6 +40,20 @@ test('US close has no Sunday or Monday dispatch', () => {
     assert.equal(classify('us_close', new Date(`${day}T00:30:00Z`)).status, 'MARKET_CLOSED');
   }
 });
+test('Oct17 Saturday publication dispatches Friday-close key, never Friday receipt', async () => {
+  let sent;
+  const result = await handle('us_close', 'Bearer fixture-cron-secret', {
+    now: new Date('2026-10-17T00:53:48Z'), env,
+    fetcher: async (url, options) => {
+      if (options.method === 'POST') { sent = JSON.parse(options.body); return { status: 204 }; }
+      assert.ok(url.includes('us_close_20261017.json'));
+      return { status: 404 };
+    },
+  });
+  assert.equal(result[1].key, 'us_close:20261017');
+  assert.equal(result[1].status, 'DISPATCHED');
+  assert.equal(sent.inputs.publication_date, '2026-10-17');
+});
 test('US-close Bot receipt suppresses later Vercel dispatch for the same publication', async () => {
   const key = 'us_close:20261016';
   let calls = 0;

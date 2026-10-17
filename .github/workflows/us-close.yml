@@ -123,18 +123,22 @@ jobs:
           fi
 
       - name: Send non-trading day notice
-        if: github.event.inputs.dry_run != 'true' && steps.fetch.outputs.market_closed == 'true'
+        if: github.event.inputs.dry_run != 'true' && steps.fetch.outputs.market_closed == 'true' && (github.event_name == 'schedule' || inputs.send_telegram == true || github.event.inputs.send_telegram == 'true')
         env:
+          PYTHONPATH: scripts
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           python - <<'EOF'
           import os, requests
-          from datetime import datetime
-          from zoneinfo import ZoneInfo
+          from market_session import us_close_session_contract
 
-          today = datetime.now(tz=ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
-          msg_text = f"🔴 美股收盤日報｜{today}\n{'─'*38}\n\n今天為美股非交易日（假日或週末），市場休市，無收盤報告。"
+          contract = us_close_session_contract()
+          if contract['status'] != 'MARKET_CLOSED':
+              raise RuntimeError('US_CLOSE_HOLIDAY_NOTICE_CONTRACT_MISMATCH')
+          publication = contract['publication_date']
+          trading = contract['us_trading_date']
+          msg_text = f"🔴 美股收盤日報｜發布日 {publication}\n{'─'*38}\n\n美國 {trading} 為 NYSE 非交易日，沒有該日收盤報告。"
 
           token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
           chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()

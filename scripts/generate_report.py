@@ -30,7 +30,7 @@ from logging_config import setup_logging
 import delivery_state
 from instrument_registry import resolve_instrument
 from market_context import build_market_context
-from market_session import human_session_label, report_market_date, get_target_market_date
+from market_session import human_session_label, report_market_date, get_target_market_date, us_close_session_contract
 from adr_engine import calculate_tsm_adr_premium
 from models import MarketContext, Portfolio, Snapshot
 import portfolio_store
@@ -244,11 +244,20 @@ def _build_snapshot_block(snapshot: Snapshot) -> str:
 def load_market_context(report_type: str, snapshot: Snapshot | None = None) -> MarketContext:
     context_path = Path(__file__).parent.parent / "data" / "market_context.json"
     if context_path.exists():
-        return MarketContext.model_validate_json(context_path.read_text(encoding="utf-8"))
-    if snapshot is None:
-        snapshot_path = Path(__file__).parent.parent / "data" / "market_snapshot.json"
-        snapshot = Snapshot.model_validate_json(snapshot_path.read_text(encoding="utf-8"))
-    return build_market_context(snapshot, report_type)
+        context = MarketContext.model_validate_json(context_path.read_text(encoding="utf-8"))
+    else:
+        if snapshot is None:
+            snapshot_path = Path(__file__).parent.parent / "data" / "market_snapshot.json"
+            snapshot = Snapshot.model_validate_json(snapshot_path.read_text(encoding="utf-8"))
+        context = build_market_context(snapshot, report_type)
+    if report_type == "us_close" and os.getenv("US_CLOSE_PUBLICATION_DATE", "").strip():
+        contract = us_close_session_contract()
+        if (contract["status"] != "READY" or context.report_type != report_type
+                or context.market_date != contract["us_trading_date"]
+                or any(q.market == "US" and q.quality_status == "VALID"
+                       and q.market_date != contract["us_trading_date"] for q in context.quotes.values())):
+            raise ValueError("US_CLOSE_TRADING_DATE_MISMATCH")
+    return context
 
 
 
